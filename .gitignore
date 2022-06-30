@@ -1,0 +1,6 @@
+env/
+build/
+dist/
+pydbg.egg-info/
+.vscode/
+*.pyd
