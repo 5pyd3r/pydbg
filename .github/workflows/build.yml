@@ -1,8 +1,9 @@
 name: build
 
 on:
+  workflow_dispatch:
   push:
-    ignore_tags:
+    tags-ignore:
       - v*
 
 jobs:
