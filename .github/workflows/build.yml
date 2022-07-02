@@ -2,8 +2,8 @@ name: build
 
 on:
   push:
-    tags-ignore:
-      - v*
+    branches:
+      - main
 
 jobs:
 
