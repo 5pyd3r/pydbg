@@ -1,9 +1,9 @@
-name: release
+name: build
 
 on:
   push:
-    tags:
-      - "!v*"
+    ignore_tags:
+      - v*
 
 jobs:
 
