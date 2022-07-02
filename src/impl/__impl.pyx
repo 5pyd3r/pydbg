@@ -35,7 +35,7 @@ cdef class Debugger:
             return False
 
     def detach(self):
-        
+        pass
 
     def run(self, timeout=INFINITE):
         cdef DEBUG_EVENT event
