@@ -2,10 +2,10 @@ name: release
 
 on:
   push:
-    brunches:
+    branches: 
       - *
-    ignore-tags:
-      - v*
+    tags:
+      - "!v*"
 
 jobs:
 
