@@ -8,7 +8,7 @@ on:
   
 jobs:
   build-win64:
-    if: github.event.pull_request.merged == true
+    if: github.event.workflow_dispatch || github.event.pull_request.merged == true
     runs-on: windows-latest
     strategy:
       max-parallel: 3
