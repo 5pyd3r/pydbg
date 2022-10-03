@@ -1,9 +1,9 @@
 name: build
 
 on:
-  push
+  push:
     branches:
-      - *_dev
+      - '*_dev'
 
 jobs:
   build-win64:
