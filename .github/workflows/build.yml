@@ -2,13 +2,13 @@ name: build
 
 on:
   workflow_dispatch:
-  push:
-    branches:
-      - main
-      - '*_dev'
-
+  pull_request:
+    types:
+      - closed
+  
 jobs:
   build-win64:
+    if: github.event.pull_request.merged == true
     runs-on: windows-latest
     strategy:
       max-parallel: 3
@@ -43,6 +43,7 @@ jobs:
         path: dist
 
   build-win32:
+    if: github.event.pull_request.merged == true
     runs-on: windows-latest
     strategy:
       max-parallel: 3
