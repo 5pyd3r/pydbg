@@ -34,12 +34,8 @@ cdef class Debugger:
         else:
             return False
 
-    def detach(self, process):
-        if DebugActiveProcessStop(process) != 0:
-            del self.process[process]
-            return True
-        else:
-            return False
+    def detach(self):
+        
 
     def run(self, timeout=INFINITE):
         cdef DEBUG_EVENT event
