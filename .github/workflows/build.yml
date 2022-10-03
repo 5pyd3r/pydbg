@@ -3,7 +3,8 @@ name: build
 on:
   push:
     branches:
-      - '*_dev'
+      - main
+  workflow_dispatch
 
 jobs:
   build-win64:
