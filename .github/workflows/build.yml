@@ -1,12 +1,11 @@
 name: build
 
 on:
-  push:
+  push
     branches:
-      - main
+      - *_dev
 
 jobs:
-
   build-win64:
     runs-on: windows-latest
     strategy:
