@@ -16,7 +16,7 @@ from _win32types cimport (
     PAGE_EXECUTE, PAGE_EXECUTE_READ, PAGE_EXECUTE_READWRITE,
 )
 
-cpdef bytes read_process_memory(uint64_t h_process, uint64_t addr, int size):
+cpdef bytes read_process_memory(uintptr_t h_process, uintptr_t addr, size_t size):
     """Read 'size' bytes from process memory at 'addr'.
 
     Returns bytes read. Raises OSError on failure.
@@ -27,8 +27,8 @@ cpdef bytes read_process_memory(uint64_t h_process, uint64_t addr, int size):
 
     cdef SIZE_T bytes_read = 0
     cdef BOOL result = ReadProcessMemory(
-        <HANDLE><LPVOID>h_process,
-        <LPCVOID><uintptr_t>addr,
+        <HANDLE>h_process,
+        <LPCVOID>addr,
         buf,
         <SIZE_T>size,
         &bytes_read)
@@ -42,7 +42,7 @@ cpdef bytes read_process_memory(uint64_t h_process, uint64_t addr, int size):
     return data
 
 
-cpdef int write_process_memory(uint64_t h_process, uintptr_t addr, bytes data):
+cpdef int write_process_memory(uintptr_t h_process, uintptr_t addr, bytes data):
     """Write bytes to process memory at 'addr'.
 
     Returns number of bytes written. Raises OSError on failure.
@@ -52,7 +52,7 @@ cpdef int write_process_memory(uint64_t h_process, uintptr_t addr, bytes data):
     cdef BOOL result = WriteProcessMemory(
         <HANDLE>h_process,
         <LPVOID>addr,
-        <void*><char*>data,
+        <void*>data,
         <SIZE_T>size,
         &bytes_written)
 
@@ -62,7 +62,7 @@ cpdef int write_process_memory(uint64_t h_process, uintptr_t addr, bytes data):
     return <int>bytes_written
 
 
-cpdef dict virtual_query_ex(uint64_t h_process, uintptr_t addr):
+cpdef dict virtual_query_ex(uintptr_t h_process, uintptr_t addr):
     """Query memory region info at 'addr'.
 
     Returns dict with: base_address, allocation_base, allocation_protect,
@@ -90,7 +90,7 @@ cpdef dict virtual_query_ex(uint64_t h_process, uintptr_t addr):
     }
 
 
-cpdef int virtual_protect_ex(uint64_t h_process, uintptr_t addr,
+cpdef int virtual_protect_ex(uintptr_t h_process, uintptr_t addr,
                               int size, int protect):
     """Change memory protection on a region.
 
@@ -110,16 +110,16 @@ cpdef int virtual_protect_ex(uint64_t h_process, uintptr_t addr,
     return old_protect
 
 
-cpdef list enum_process_modules(uint64_t h_process):
+cpdef list enum_process_modules(uintptr_t h_process):
     """Enumerate loaded modules in a process.
 
     Returns list of dicts with: handle, base_address.
     Raises OSError on failure.
     """
-    cdef HANDLE[1024] modules
+    cdef HMODULE[1024] modules
     cdef DWORD cb_needed = 0
     cdef BOOL result = EnumProcessModules(
-        <HANDLE><LPVOID>h_process,
+        <HANDLE>h_process,
         modules,
         sizeof(modules),
         &cb_needed)
@@ -139,15 +139,15 @@ cpdef list enum_process_modules(uint64_t h_process):
     return out
 
 
-cpdef str get_module_file_name_ex(uint64_t h_process, uint64_t h_module):
+cpdef str get_module_file_name_ex(uintptr_t h_process, uintptr_t h_module):
     """Get file name of a module in a process.
 
     Returns file path string. Raises OSError on failure.
     """
     cdef char[260] filename
     cdef DWORD len = GetModuleFileNameExA(
-        <HANDLE><LPVOID>h_process,
-        <HANDLE><LPVOID>h_module,
+        <HANDLE>h_process,
+        <HANDLE>h_module,
         filename,
         260)
 

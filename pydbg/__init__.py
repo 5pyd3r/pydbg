@@ -2,7 +2,7 @@ from .debugger import Debugger
 from .exceptions import (
     PydbgError,
     ProcessError,
-    MemoryError,
+    MemError,
     ThreadError,
     BreakpointError,
     TimeoutError,

@@ -6,7 +6,7 @@ Provides a procedural interface over the Cython Win32 wrappers.
 from .exceptions import (
     PydbgError,
     ProcessError,
-    MemoryError as PydbgMemoryError,
+    MemError,
     ThreadError,
     BreakpointError,
     TimeoutError,

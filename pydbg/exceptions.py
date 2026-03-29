@@ -6,7 +6,7 @@ class ProcessError(PydbgError):
     """Process-related errors (create, attach, detach)."""
 
 
-class MemoryError(PydbgError):
+class MemError(PydbgError):
     """Memory operation errors (read, write, query)."""
 
 

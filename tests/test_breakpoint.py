@@ -61,7 +61,7 @@ class TestDebuggerBreakpointAPI(unittest.TestCase):
 
     def test_set_and_remove_int3(self):
         """Set int3 breakpoint, then remove."""
-        from pydbg.cython import Debugger
+        from pydbg import Debugger
         from pydbg.cython import _thread
 
         dbg = Debugger()
@@ -85,7 +85,7 @@ class TestDebuggerBreakpointAPI(unittest.TestCase):
 
     def test_set_hw_breakpoint_via_api(self):
         """Set hw breakpoint via high-level API."""
-        from pydbg.cython import Debugger
+        from pydbg import Debugger
         from pydbg.cython import _thread
 
         dbg = Debugger()

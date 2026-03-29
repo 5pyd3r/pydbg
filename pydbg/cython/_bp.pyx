@@ -36,7 +36,6 @@ cdef CONTEXT _get_context(HANDLE h_thread):
         raise OSError(GetLastError(), "GetThreadContext failed")
     return ctx
 
-
 cpdef int set_hw_breakpoint(unsigned long long h_thread, int slot, uint64_t addr,
                              int condition, int length) except? -1:
     """Set a hardware breakpoint.
