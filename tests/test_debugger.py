@@ -78,7 +78,7 @@ class TestDebuggerAPICompleteness(unittest.TestCase):
 
 
 class TestExceptionHelpers(unittest.TestCase):
-    """Tests for exception_code_to_str and get_exception_info."""
+    """Tests for exception_code_to_str."""
 
     def test_exception_code_to_str(self):
         """Verify known codes map to correct names."""
