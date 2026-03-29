@@ -49,11 +49,20 @@ class TestMemoryReadWrite(unittest.TestCase):
         for _ in range(100):
             try:
                 info = _memory.virtual_query_ex(self.h_proc, addr)
-                if info['state'] == 0x10000:  # MEM_COMMIT
+                if info['state'] == 0x1000:  # MEM_COMMIT
                     break
                 addr = info['base_address'] + info['region_size']
             except OSError:
                 break
+
+        # Write test data
+        test_data = b'\xDE\xAD\xBE\xEF'
+        written = _memory.write_process_memory(self.h_proc, addr, test_data)
+        self.assertGreater(written, 0)
+
+        # Read back and verify
+        read_back = _memory.read_process_memory(self.h_proc, addr, len(test_data))
+        self.assertEqual(read_back[:len(test_data)], test_data)
 
     def test_virtual_query(self):
         """Query memory at module base returns committed region."""
