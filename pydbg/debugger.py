@@ -23,7 +23,7 @@ class DebugEvent:
     """Represents a debug event."""
 
     __slots__ = ('type', 'pid', 'tid', 'exception_code', 'exception_addr',
-                 'first_chance', 'raw')
+                 'first_chance', 'exception_name', 'exception_info', 'raw')
 
     def __init__(self, event_dict):
         self.raw = event_dict
@@ -33,6 +33,15 @@ class DebugEvent:
         self.exception_code = event_dict.get('exception_code')
         self.exception_addr = event_dict.get('exception_addr')
         self.first_chance = event_dict.get('first_chance')
+        self.exception_name = None
+        self.exception_info = None
+        if self.exception_code is not None:
+            self.exception_name = _exception.exception_code_to_str(self.exception_code)
+            self.exception_info = _exception.get_exception_info(
+                self.exception_code,
+                self.exception_addr or 0,
+                1 if self.first_chance else 0,
+                event_dict.get('exception_params', []))
 
     def __repr__(self):
         return f"<DebugEvent {self.type} pid={self.pid} tid={self.tid}>"
@@ -356,9 +365,16 @@ class Debugger:
         if bp_id not in self._breakpoints:
             raise BreakpointError(f"Breakpoint {bp_id} not found")
 
-        bp_type, addr, original = self._breakpoints.pop(bp_id)
-        if bp_type == 'int3':
+        bp_info = self._breakpoints.pop(bp_id)
+        if bp_info[0] == 'int3':
+            _, addr, original = bp_info
             self.write_memory(addr, original)
+        elif bp_info[0] == 'hw':
+            _, addr, slot = bp_info
+            try:
+                _bp.clear_hw_breakpoint(self._thread_handle, slot)
+            except (OSError, ValueError) as e:
+                raise BreakpointError(f"clear_hw_breakpoint: {e}")
 
     def set_hw_breakpoint(self, addr, condition='x', length=1, slot=0):
         """Set a hardware breakpoint.
@@ -477,3 +493,111 @@ class Debugger:
                 self._process_handle, addr, size, protect)
         except OSError as e:
             raise MemError(f"VirtualProtectEx at 0x{addr:X}: {e}")
+
+    def exception_code_to_str(self, code):
+        """Convert an exception code to a human-readable string.
+
+        Args:
+            code: Exception code (int).
+
+        Returns:
+            str: Human-readable exception name.
+        """
+        return _exception.exception_code_to_str(code)
+
+    def get_exception_info(self, code, addr, first_chance, exception_params):
+        """Parse exception data into a structured dict.
+
+        Args:
+            code: Exception code (int).
+            addr: Exception address (int).
+            first_chance: 1 if first-chance, 0 if second-chance.
+            exception_params: List of exception parameter values.
+
+        Returns:
+            dict with parsed exception info.
+        """
+        return _exception.get_exception_info(code, addr, first_chance, exception_params)
+
+    def run(self, callback, timeout_ms=10000):
+        """Run the debug event loop.
+
+        Waits for debug events and dispatches them to the callback.
+        Continues until the target process exits or the callback returns False.
+
+        Args:
+            callback: Function(DebugEvent) -> bool or None.
+                      Return False to stop the loop.
+            timeout_ms: Timeout per wait_event call (default 10000).
+
+        Returns:
+            int: Exit code of the process.
+
+        Raises:
+            ProcessError: On failure.
+        """
+        exit_code = 1
+        while True:
+            event = self.wait_event(timeout_ms)
+            if event is None:
+                continue
+
+            result = callback(event)
+            if result is False:
+                break
+
+            if event.type == 'EXIT_PROCESS':
+                exit_code = event.raw.get('exit_code', 1)
+                break
+
+            self.continue_event(event.pid, event.tid)
+
+        return exit_code
+
+    def enumerate_threads(self, pid=None):
+        """Enumerate threads for a process.
+
+        Args:
+            pid: Process ID. Defaults to the current debugged process.
+
+        Returns:
+            list of dicts with 'tid', 'owner_pid', 'base_priority'.
+
+        Raises:
+            ThreadError: On failure.
+        """
+        target = pid or self._pid
+        if target is None:
+            raise ThreadError("No process to enumerate threads for")
+        try:
+            return _thread.enumerate_threads(target)
+        except OSError as e:
+            raise ThreadError(f"EnumerateThreads: {e}")
+
+    def get_thread_ids(self, pid=None):
+        """Get just the thread IDs for a process.
+
+        Args:
+            pid: Process ID. Defaults to the current debugged process.
+
+        Returns:
+            list of int thread IDs.
+
+        Raises:
+            ThreadError: On failure.
+        """
+        return [t['tid'] for t in self.enumerate_threads(pid)]
+
+    def find_breakpoint(self, addr):
+        """Find a breakpoint by address.
+
+        Args:
+            addr: Memory address to search for.
+
+        Returns:
+            Breakpoint ID (int), or None if not found.
+        """
+        for bp_id, bp_info in self._breakpoints.items():
+            if bp_info[1] == addr:
+                return bp_id
+        return None

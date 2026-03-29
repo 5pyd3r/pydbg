@@ -271,3 +271,19 @@ cdef extern from "psapi.h":
     BOOL EnumProcessModules(HANDLE hProcess, HMODULE* lphModule, DWORD cb, DWORD* lpcbNeeded)
     DWORD GetModuleFileNameExA(HANDLE hProcess, HMODULE hModule, char* lpFilename, DWORD nSize)
     BOOL GetModuleInformation(HANDLE hProcess, HMODULE hModule, MODULEINFO* lpmodinfo, DWORD cb)
+
+cdef extern from "tlhelp32.h":
+    DWORD TH32CS_SNAPTHREAD
+
+    ctypedef struct THREADENTRY32:
+        DWORD dwSize
+        DWORD cntUsage
+        DWORD th32ThreadID
+        DWORD th32OwnerProcessID
+        LONG tpBasePri
+        LONG tpDeltaPri
+        DWORD dwFlags
+
+    HANDLE CreateToolhelp32Snapshot(DWORD dwFlags, DWORD th32ProcessID)
+    BOOL Thread32First(HANDLE hSnapshot, THREADENTRY32* lpte)
+    BOOL Thread32Next(HANDLE hSnapshot, THREADENTRY32* lpte)

@@ -7,6 +7,8 @@ from _win32types cimport (
     CloseHandle,
     THREAD_ALL_ACCESS, CONTEXT_ALL,
     CONTEXT_DEBUG_REGISTERS, CONTEXT_INTEGER, CONTEXT_CONTROL,
+    CreateToolhelp32Snapshot, Thread32First, Thread32Next,
+    THREADENTRY32, TH32CS_SNAPTHREAD,
 )
 
 from libc.string cimport memset
@@ -125,3 +127,39 @@ cpdef int close_handle(unsigned long long h_handle):
     if result == 0:
         raise OSError(GetLastError(), "CloseHandle failed")
     return 0
+
+
+cpdef list enumerate_threads(int pid):
+    """Enumerate thread IDs for a given process.
+
+    Uses CreateToolhelp32Snapshot + Thread32First/Thread32Next.
+
+    Args:
+        pid: Process ID.
+
+    Returns:
+        list of thread ID dicts with keys: 'tid', 'owner_pid', 'base_priority'.
+
+    Raises:
+        OSError: On snapshot failure.
+    """
+    cdef HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, <DWORD>pid)
+    if snap == <HANDLE><unsigned long long>-1:
+        raise OSError(GetLastError(), "CreateToolhelp32Snapshot failed")
+
+    cdef THREADENTRY32 te
+    te.dwSize = sizeof(THREADENTRY32)
+    cdef list threads = []
+
+    cdef BOOL ok = Thread32First(snap, &te)
+    while ok:
+        if te.th32OwnerProcessID == <DWORD>pid:
+            threads.append({
+                'tid': te.th32ThreadID,
+                'owner_pid': te.th32OwnerProcessID,
+                'base_priority': te.tpBasePri,
+            })
+        ok = Thread32Next(snap, &te)
+
+    CloseHandle(snap)
+    return threads
