@@ -13,7 +13,7 @@ __all__ = [
     'Debugger',
     'PydbgError',
     'ProcessError',
-    'MemoryError',
+    'MemError',
     'ThreadError',
     'BreakpointError',
     'TimeoutError',

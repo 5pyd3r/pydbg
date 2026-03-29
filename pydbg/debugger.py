@@ -155,12 +155,12 @@ class Debugger:
             bytes object.
 
         Raises:
-            PydbgMemoryError: On failure.
+            MemError: On failure.
         """
         try:
             return _memory.read_process_memory(self._process_handle, addr, size)
         except OSError as e:
-            raise PydbgMemoryError(f"ReadProcessMemory at 0x{addr:X}: {e}")
+            raise MemError(f"ReadProcessMemory at 0x{addr:X}: {e}")
 
     def write_memory(self, addr, data):
         """Write bytes to process memory.
@@ -173,12 +173,12 @@ class Debugger:
             Number of bytes written.
 
         Raises:
-            PydbgMemoryError: On failure.
+            MemError: On failure.
         """
         try:
             return _memory.write_process_memory(self._process_handle, addr, data)
         except OSError as e:
-            raise PydbgMemoryError(f"WriteProcessMemory at 0x{addr:X}: {e}")
+            raise MemError(f"WriteProcessMemory at 0x{addr:X}: {e}")
 
     def query_memory(self, addr):
         """Query memory region information.
@@ -190,12 +190,12 @@ class Debugger:
             dict with region info.
 
         Raises:
-            PydbgMemoryError: On failure.
+            MemError: On failure.
         """
         try:
             return _memory.virtual_query_ex(self._process_handle, addr)
         except OSError as e:
-            raise PydbgMemoryError(f"VirtualQueryEx at 0x{addr:X}: {e}")
+            raise MemError(f"VirtualQueryEx at 0x{addr:X}: {e}")
 
     def enum_modules(self):
         """Enumerate loaded modules.
@@ -204,12 +204,12 @@ class Debugger:
             list of dicts with module info.
 
         Raises:
-            PydbgMemoryError: On failure.
+            MemError: On failure.
         """
         try:
             return _memory.enum_process_modules(self._process_handle)
         except OSError as e:
-            raise PydbgMemoryError(f"EnumProcessModules: {e}")
+            raise MemError(f"EnumProcessModules: {e}")
 
     def get_module_filename(self, h_module):
         """Get file name of a loaded module.
@@ -221,12 +221,12 @@ class Debugger:
             File path string.
 
         Raises:
-            PydbgMemoryError: On failure.
+            MemError: On failure.
         """
         try:
             return _memory.get_module_file_name_ex(self._process_handle, h_module)
         except OSError as e:
-            raise PydbgMemoryError(f"GetModuleFileNameEx: {e}")
+            raise MemError(f"GetModuleFileNameEx: {e}")
 
     def open_thread(self, thread_id):
         """Open a thread by ID.
