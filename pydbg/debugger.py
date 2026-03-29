@@ -425,3 +425,55 @@ class Debugger:
             _process.close_handle(h_handle)
         except OSError as e:
             raise ProcessError(f"CloseHandle: {e}")
+
+    def terminate_process(self, exit_code=1):
+        """Terminate the debugged process.
+
+        Args:
+            exit_code: Process exit code (default 1).
+
+        Raises:
+            ProcessError: No process handle or termination failed.
+        """
+        if self._process_handle is None:
+            raise ProcessError("No process handle")
+        try:
+            _process.terminate_process(self._process_handle, exit_code)
+        except OSError as e:
+            raise ProcessError(f"TerminateProcess failed: {e}")
+
+    def get_exit_code(self):
+        """Get the exit code of the debugged process.
+
+        Returns:
+            int: Process exit code.
+
+        Raises:
+            ProcessError: No process handle or call failed.
+        """
+        if self._process_handle is None:
+            raise ProcessError("No process handle")
+        try:
+            return _process.get_exit_code(self._process_handle)
+        except OSError as e:
+            raise ProcessError(f"GetExitCodeProcess failed: {e}")
+
+    def protect_memory(self, addr, size, protect):
+        """Change memory protection on a region.
+
+        Args:
+            addr: Memory address (int).
+            size: Region size in bytes.
+            protect: New protection value (e.g. 0x40 = PAGE_EXECUTE_READWRITE).
+
+        Returns:
+            int: Previous protection value.
+
+        Raises:
+            MemError: On failure.
+        """
+        try:
+            return _memory.virtual_protect_ex(
+                self._process_handle, addr, size, protect)
+        except OSError as e:
+            raise MemError(f"VirtualProtectEx at 0x{addr:X}: {e}")
