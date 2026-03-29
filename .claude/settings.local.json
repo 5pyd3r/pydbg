@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(meson setup:*)",
+      "Bash(meson --version)",
+      "Bash(cython --version)",
+      "Bash(where cl:*)",
+      "Bash(where link:*)",
+      "Read(//c/Program Files/**)",
+      "Read(//c/Program Files \\(x86\\)/Microsoft Visual Studio//**)"
+    ]
+  }
+}
