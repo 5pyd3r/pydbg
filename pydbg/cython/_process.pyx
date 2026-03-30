@@ -20,15 +20,15 @@ from libc.string cimport memset
 
 # Event code string mapping
 _EVENT_NAMES = {
-    1: "EXCEPTION",
-    2: "CREATE_THREAD",
-    3: "CREATE_PROCESS",
-    4: "EXIT_THREAD",
-    5: "EXIT_PROCESS",
-    6: "LOAD_DLL",
-    7: "UNLOAD_DLL",
-    8: "OUTPUT_DEBUG_STRING",
-    9: "RIP_INFO",
+    EXCEPTION_DEBUG_EVENT: "EXCEPTION",
+    CREATE_THREAD_DEBUG_EVENT: "CREATE_THREAD",
+    CREATE_PROCESS_DEBUG_EVENT: "CREATE_PROCESS",
+    EXIT_THREAD_DEBUG_EVENT: "EXIT_THREAD",
+    EXIT_PROCESS_DEBUG_EVENT: "EXIT_PROCESS",
+    LOAD_DLL_DEBUG_EVENT: "LOAD_DLL",
+    UNLOAD_DLL_DEBUG_EVENT: "UNLOAD_DLL",
+    # OUTPUT_DEBUG_STRING: "OUTPUT_DEBUG_STRING",
+    # RIP_INFO: "RIP_INFO",
 }
 
 cpdef tuple create_process(str path):
@@ -129,8 +129,7 @@ cpdef void continue_debug_event(int pid, int tid, int status=DBG_CONTINUE):
     """
     cdef BOOL result = ContinueDebugEvent(<DWORD>pid, <DWORD>tid, <DWORD>status)
     if result == 0:
-        raise OSError(GetLastError(), "ContinueDebugEvent failed")
-
+        raise OSError(GetLastError(), f"ContinueDebugEvent failed, {pid}, {tid}")
 
 cpdef int debug_active_process_stop(int pid) except? -1:
     """Detach debugger from a process.

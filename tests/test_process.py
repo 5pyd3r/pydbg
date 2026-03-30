@@ -20,6 +20,7 @@ class TestProcessLifecycle(unittest.TestCase):
         self.assertNotEqual(h_thr, 0)
 
         # Clean up
+        _process.debug_active_process_stop(pid)
         _process.terminate_process(h_proc, 0)
         _process.close_handle(h_proc)
         _process.close_handle(h_thr)
@@ -35,9 +36,10 @@ class TestProcessLifecycle(unittest.TestCase):
         self.assertEqual(event['event_name'], 'CREATE_PROCESS')
         self.assertEqual(event['pid'], pid)
 
-        _process.continue_debug_event(pid, tid, 0)
+        _process.continue_debug_event(pid, tid)
 
         # Clean up
+        _process.debug_active_process_stop(pid)
         _process.terminate_process(h_proc, 0)
         _process.close_handle(h_proc)
         _process.close_handle(h_thr)
@@ -51,7 +53,8 @@ class TestProcessLifecycle(unittest.TestCase):
         # First event: CREATE_PROCESS
         event = _process.wait_for_debug_event(5000)
         self.assertEqual(event['event_name'], 'CREATE_PROCESS')
-        _process.continue_debug_event(pid, tid, 0)
+        self.assertEqual(event['pid'], pid)
+        _process.continue_debug_event(pid, tid)
 
         # Second event: LOAD_DLL (may be multiple)
         for _ in range(20):
@@ -60,7 +63,7 @@ class TestProcessLifecycle(unittest.TestCase):
                 break
             if event['event_name'] == 'EXCEPTION':
                 break
-            _process.continue_debug_event(pid, tid, 0)
+            _process.continue_debug_event(event['pid'], event['tid'])
 
         # Should hit the loader breakpoint
         if event and event['event_name'] == 'EXCEPTION':
@@ -96,6 +99,7 @@ class TestDebuggerAPI(unittest.TestCase):
         dbg.continue_event(pid, tid)
 
         # Terminate
+        dbg.detach()
         dbg.close_handle(dbg._process_handle)
         dbg.close_handle(dbg._thread_handle)
 

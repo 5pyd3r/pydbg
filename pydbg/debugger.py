@@ -134,7 +134,7 @@ class Debugger:
             return None
         return DebugEvent(event_dict)
 
-    def continue_event(self, pid=None, tid=None, status=0):
+    def continue_event(self, pid=None, tid=None):
         """Continue a stopped thread.
 
         Args:
@@ -148,8 +148,7 @@ class Debugger:
         try:
             _process.continue_debug_event(
                 pid or self._pid,
-                tid or self._tid,
-                status)
+                tid or self._tid)
         except OSError as e:
             raise ProcessError(f"ContinueDebugEvent failed: {e}")
 

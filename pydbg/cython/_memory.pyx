@@ -47,12 +47,13 @@ cpdef int write_process_memory(uintptr_t h_process, uintptr_t addr, bytes data):
 
     Returns number of bytes written. Raises OSError on failure.
     """
+    cdef const char *buf = data
     cdef int size = len(data)
     cdef SIZE_T bytes_written = 0
     cdef BOOL result = WriteProcessMemory(
         <HANDLE>h_process,
         <LPVOID>addr,
-        <void*>data,
+        buf,
         <SIZE_T>size,
         &bytes_written)
 

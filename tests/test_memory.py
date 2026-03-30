@@ -15,7 +15,15 @@ class TestMemoryReadWrite(unittest.TestCase):
             TEST_TARGET_PATH)
         # Consume CREATE_PROCESS event
         _process.wait_for_debug_event(5000)
-        _process.continue_debug_event(self.pid, self.tid, 0)
+        _process.continue_debug_event(self.pid, self.tid)
+
+        for _ in range(20):
+            event = _process.wait_for_debug_event(5000)
+            if event is None:
+                break
+            if event['event_name'] == 'EXCEPTION':
+                break
+            _process.continue_debug_event(event['pid'], event['tid'])
 
     def tearDown(self):
         from pydbg.cython import _process
@@ -58,11 +66,11 @@ class TestMemoryReadWrite(unittest.TestCase):
         # Write test data
         test_data = b'\xDE\xAD\xBE\xEF'
         written = _memory.write_process_memory(self.h_proc, addr, test_data)
-        self.assertGreater(written, 0)
+        self.assertEqual(written, 4)
 
         # Read back and verify
-        read_back = _memory.read_process_memory(self.h_proc, addr, len(test_data))
-        self.assertEqual(read_back[:len(test_data)], test_data)
+        read_back = _memory.read_process_memory(self.h_proc, addr, 4)
+        self.assertEqual(read_back[:4], test_data)
 
     def test_virtual_query(self):
         """Query memory at module base returns committed region."""
@@ -85,7 +93,15 @@ class TestModuleEnum(unittest.TestCase):
         self.pid, self.tid, self.h_proc, self.h_thr = _process.create_process(
             TEST_TARGET_PATH)
         _process.wait_for_debug_event(5000)
-        _process.continue_debug_event(self.pid, self.tid, 0)
+        _process.continue_debug_event(self.pid, self.tid)
+
+        for _ in range(20):
+            event = _process.wait_for_debug_event(5000)
+            if event is None:
+                break
+            if event['event_name'] == 'EXCEPTION':
+                break
+            _process.continue_debug_event(event['pid'], event['tid'])
 
     def tearDown(self):
         from pydbg.cython import _process

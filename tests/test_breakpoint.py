@@ -14,10 +14,20 @@ class TestHardwareBreakpoint(unittest.TestCase):
         self.pid, self.tid, self.h_proc, self.h_thr = _process.create_process(
             TEST_TARGET_PATH)
         _process.wait_for_debug_event(5000)
-        _process.continue_debug_event(self.pid, self.tid, 0)
+        _process.continue_debug_event(self.pid, self.tid)
+
+        for _ in range(20):
+            event = _process.wait_for_debug_event(5000)
+            if event is None:
+                break
+            if event['event_name'] == 'EXCEPTION':
+                break
+            _process.continue_debug_event(event['pid'], event['tid'])
+
 
     def tearDown(self):
         from pydbg.cython import _process
+        _process.debug_active_process_stop(self.pid)
         _process.terminate_process(self.h_proc, 0)
         _process.close_handle(self.h_proc)
         _process.close_handle(self.h_thr)
@@ -80,6 +90,7 @@ class TestDebuggerBreakpointAPI(unittest.TestCase):
         dbg.remove_breakpoint(bp_id)
 
         _thread.close_handle(h_thread)
+        dbg.detach()
         dbg.close_handle(dbg._process_handle)
         dbg.close_handle(dbg._thread_handle)
 
@@ -103,6 +114,7 @@ class TestDebuggerBreakpointAPI(unittest.TestCase):
         dbg.remove_breakpoint(bp_id)
 
         _thread.close_handle(h_thread)
+        dbg.detach()
         dbg.close_handle(dbg._process_handle)
         dbg.close_handle(dbg._thread_handle)
 

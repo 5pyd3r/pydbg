@@ -194,7 +194,7 @@ class TestThreadEnumeration(unittest.TestCase):
         self.pid, self.tid, self.h_proc, self.h_thr = _process.create_process(
             TEST_TARGET_PATH)
         _process.wait_for_debug_event(5000)
-        _process.continue_debug_event(self.pid, self.tid, 0)
+        _process.continue_debug_event(self.pid, self.tid)
 
     def tearDown(self):
         from pydbg.cython import _process
