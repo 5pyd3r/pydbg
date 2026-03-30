@@ -1881,7 +1881,7 @@ class TestProcessLifecycle(unittest.TestCase):
         self.assertEqual(event['event_name'], 'CREATE_PROCESS')
         self.assertEqual(event['pid'], pid)
 
-        _process.continue_debug_event(pid, tid, 0)
+        _process.continue_debug_event(pid, tid)
 
         # Clean up
         _process.terminate_process(h_proc, 0)
@@ -1897,7 +1897,7 @@ class TestProcessLifecycle(unittest.TestCase):
         # First event: CREATE_PROCESS
         event = _process.wait_for_debug_event(5000)
         self.assertEqual(event['event_name'], 'CREATE_PROCESS')
-        _process.continue_debug_event(pid, tid, 0)
+        _process.continue_debug_event(pid, tid)
 
         # Second event: LOAD_DLL (may be multiple)
         for _ in range(20):
@@ -1906,7 +1906,7 @@ class TestProcessLifecycle(unittest.TestCase):
                 break
             if event['event_name'] == 'EXCEPTION':
                 break
-            _process.continue_debug_event(pid, tid, 0)
+            _process.continue_debug_event(pid, tid)
 
         # Should hit the loader breakpoint
         if event and event['event_name'] == 'EXCEPTION':
@@ -1970,7 +1970,7 @@ class TestMemoryReadWrite(unittest.TestCase):
             TEST_TARGET_PATH)
         # Consume CREATE_PROCESS event
         _process.wait_for_debug_event(5000)
-        _process.continue_debug_event(self.pid, self.tid, 0)
+        _process.continue_debug_event(self.pid, self.tid)
 
     def tearDown(self):
         from pydbg.cython import _process
@@ -2031,7 +2031,7 @@ class TestModuleEnum(unittest.TestCase):
         self.pid, self.tid, self.h_proc, self.h_thr = _process.create_process(
             TEST_TARGET_PATH)
         _process.wait_for_debug_event(5000)
-        _process.continue_debug_event(self.pid, self.tid, 0)
+        _process.continue_debug_event(self.pid, self.tid)
 
     def tearDown(self):
         from pydbg.cython import _process
@@ -2079,7 +2079,7 @@ class TestThreadContext(unittest.TestCase):
         self.pid, self.tid, self.h_proc, self.h_thr = _process.create_process(
             TEST_TARGET_PATH)
         _process.wait_for_debug_event(5000)
-        _process.continue_debug_event(self.pid, self.tid, 0)
+        _process.continue_debug_event(self.pid, self.tid)
 
     def tearDown(self):
         from pydbg.cython import _process
@@ -2165,7 +2165,7 @@ class TestHardwareBreakpoint(unittest.TestCase):
         self.pid, self.tid, self.h_proc, self.h_thr = _process.create_process(
             TEST_TARGET_PATH)
         _process.wait_for_debug_event(5000)
-        _process.continue_debug_event(self.pid, self.tid, 0)
+        _process.continue_debug_event(self.pid, self.tid)
 
     def tearDown(self):
         from pydbg.cython import _process
