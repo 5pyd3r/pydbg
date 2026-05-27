@@ -7,7 +7,10 @@ test_target = executable(
 # Common environment: PYTHONPATH includes both / (pure Python) and build pydbg/cython (compiled extensions)
 test_env = environment()
 test_env.prepend('PYTHONPATH',
-  meson.project_source_root()
+  meson.project_source_root() / 'src'
+)
+test_env.prepend('PYTHONPATH',
+  meson.project_build_root() / 'src'
 )
 test_env.set('TEST_TARGET_PATH', test_target.full_path())
 

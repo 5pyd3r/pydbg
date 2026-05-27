@@ -10,5 +10,5 @@ project('pydbg', 'c',
 py_mod = import('python')
 py = py_mod.find_installation(pure: false)
 
-subdir('pydbg')
+subdir('src/pydbg')
 subdir('tests')
