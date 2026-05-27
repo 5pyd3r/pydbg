@@ -52,9 +52,9 @@ Cython wrappers: `src/pydbg/cython/_process.pyx`, `_memory.pyx`, `_thread.pyx`, 
 
 ## Development Workflow
 
-1. Branch from `master`
+1. Branch from `master` (`git checkout -b <branch-name>`)
 2. Develop, lint locally (`flake8 src/ tests/ --max-line-length=120`)
-3. Push branch, open PR to `master`
+3. **NEVER push directly to master.** Push branch, open PR to `master`
 4. CI must pass before merge
 5. `master` is protected (requires PR + status checks)
 
