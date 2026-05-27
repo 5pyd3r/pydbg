@@ -1,0 +1,12 @@
+build/
+__pycache__/
+*.pyc
+*.pyo
+*.obj
+*.exe
+*.dll
+*.so
+*.pyd
+*.o
+*.dylib
+.claude/
