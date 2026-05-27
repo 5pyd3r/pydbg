@@ -136,7 +136,7 @@ class PE:
         if offset + 112 > len(self._data):
             raise ValueError("Data too short for PE32+ optional header")
 
-        fields = struct.unpack_from('<HBBIIIIIIQIIIIHHHHHHIIII',
+        fields = struct.unpack_from('<HBBIIIIIQIIIIHHHHHHIIII',
                                     self._data, offset)
         num_rva = struct.unpack_from('<I', self._data, offset + 92)[0]
 
