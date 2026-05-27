@@ -54,3 +54,11 @@ test(
   env: test_env,
   workdir: meson.project_build_root(),
 )
+
+test(
+  'debugger',
+  py,
+  args: ['-m', 'unittest', 'tests.test_debugger'],
+  env: test_env,
+  workdir: meson.project_build_root(),
+)
