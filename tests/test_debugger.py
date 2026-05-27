@@ -16,7 +16,7 @@ class TestDebugEvent(unittest.TestCase):
 
     def test_debug_event_attributes(self):
         """Verify DebugEvent correctly parses event dict."""
-        from pydbg.debugger import DebugEvent
+        from pydbg import DebugEvent
 
         raw = {
             'event_name': 'CREATE_PROCESS',
@@ -34,7 +34,7 @@ class TestDebugEvent(unittest.TestCase):
 
     def test_debug_event_repr(self):
         """Verify __repr__ format."""
-        from pydbg.debugger import DebugEvent
+        from pydbg import DebugEvent
 
         raw = {'event_name': 'EXCEPTION', 'pid': 100, 'tid': 200}
         event = DebugEvent(raw)
@@ -42,7 +42,7 @@ class TestDebugEvent(unittest.TestCase):
 
     def test_debug_event_default_values(self):
         """Verify defaults for missing keys."""
-        from pydbg.debugger import DebugEvent
+        from pydbg import DebugEvent
 
         event = DebugEvent({})
         self.assertEqual(event.type, 'UNKNOWN')
@@ -51,7 +51,7 @@ class TestDebugEvent(unittest.TestCase):
 
     def test_debug_event_exception_fields(self):
         """Verify DebugEvent populates exception_name and exception_info."""
-        from pydbg.debugger import DebugEvent
+        from pydbg import DebugEvent
 
         raw = {
             'event_name': 'EXCEPTION',
@@ -82,8 +82,8 @@ class TestDebuggerAPICompleteness(unittest.TestCase):
         dbg.continue_event(pid, tid)
 
         dbg.terminate_process(0)
-        dbg.close_handle(dbg._process_handle)
-        dbg.close_handle(dbg._thread_handle)
+        dbg.close_handle(dbg._session.process_handle)
+        dbg.close_handle(dbg._session.thread_handle)
 
     def test_get_exit_code_running(self):
         """Verify get_exit_code returns STILL_ACTIVE for running process."""
@@ -98,8 +98,8 @@ class TestDebuggerAPICompleteness(unittest.TestCase):
         self.assertEqual(code, 259)  # STILL_ACTIVE
 
         dbg.terminate_process(0)
-        dbg.close_handle(dbg._process_handle)
-        dbg.close_handle(dbg._thread_handle)
+        dbg.close_handle(dbg._session.process_handle)
+        dbg.close_handle(dbg._session.thread_handle)
 
 
 @unittest.skipUnless(_has_cython, "Requires compiled Cython extensions")
@@ -170,8 +170,8 @@ class TestRemoveHwBreakpoint(unittest.TestCase):
         self.assertIsNone(dbg.find_breakpoint(regs['rip']))
 
         dbg.terminate_process(0)
-        dbg.close_handle(dbg._process_handle)
-        dbg.close_handle(dbg._thread_handle)
+        dbg.close_handle(dbg._session.process_handle)
+        dbg.close_handle(dbg._session.thread_handle)
 
 
 @unittest.skipUnless(_has_cython, "Requires compiled Cython extensions")
@@ -226,8 +226,8 @@ class TestThreadEnumeration(unittest.TestCase):
         from pydbg import Debugger
 
         dbg = Debugger()
-        dbg._pid = self.pid
-        dbg._process_handle = self.h_proc
+        dbg._session.pid = self.pid
+        dbg._session.process_handle = self.h_proc
 
         tids = dbg.get_thread_ids()
         self.assertGreater(len(tids), 0)
@@ -257,8 +257,8 @@ class TestFindBreakpoint(unittest.TestCase):
         self.assertIsNone(dbg.find_breakpoint(base))
 
         dbg.terminate_process(0)
-        dbg.close_handle(dbg._process_handle)
-        dbg.close_handle(dbg._thread_handle)
+        dbg.close_handle(dbg._session.process_handle)
+        dbg.close_handle(dbg._session.thread_handle)
 
     def test_find_nonexistent_breakpoint(self):
         """Verify find_breakpoint returns None for unknown address."""

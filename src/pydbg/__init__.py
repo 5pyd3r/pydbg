@@ -1,4 +1,5 @@
-from .debugger import Debugger
+from .core.debugger import Debugger
+from .core.event import DebugEvent
 from .exceptions import (
     PydbgError,
     ProcessError,
@@ -20,6 +21,7 @@ from .cython._exception import (
 __version__ = '0.1.0'
 __all__ = [
     'Debugger',
+    'DebugEvent',
     'PydbgError',
     'ProcessError',
     'MemError',

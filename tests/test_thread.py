@@ -82,8 +82,8 @@ class TestDebuggerThreadAPI(unittest.TestCase):
 
         _process.close_handle(h_thread)
         dbg.detach()
-        dbg.close_handle(dbg._process_handle)
-        dbg.close_handle(dbg._thread_handle)
+        dbg.close_handle(dbg._session.process_handle)
+        dbg.close_handle(dbg._session.thread_handle)
 
 
 if __name__ == '__main__':
