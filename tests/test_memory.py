@@ -5,7 +5,14 @@ import os
 
 from tests import TEST_TARGET_PATH
 
+try:
+    from pydbg.cython import _process, _memory
+    _has_cython = True
+except ImportError:
+    _has_cython = False
 
+
+@unittest.skipUnless(_has_cython, "Requires compiled Cython extensions")
 class TestMemoryReadWrite(unittest.TestCase):
     """Test reading and writing process memory."""
 
@@ -85,6 +92,7 @@ class TestMemoryReadWrite(unittest.TestCase):
         self.assertIn('protect', info)
 
 
+@unittest.skipUnless(_has_cython, "Requires compiled Cython extensions")
 class TestModuleEnum(unittest.TestCase):
     """Test module enumeration."""
 

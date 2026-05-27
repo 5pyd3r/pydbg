@@ -176,22 +176,15 @@ class PE:
         if offset + 96 > len(self._data):
             raise ValueError("Data too short for PE32 optional header")
 
-        magic = struct.unpack_from('<H', self._data, offset)[0]
-        maj_link = struct.unpack_from('<B', self._data, offset + 2)[0]
-        min_link = struct.unpack_from('<B', self._data, offset + 3)[0]
-        size_code = struct.unpack_from('<I', self._data, offset + 4)[0]
-        entry_point = struct.unpack_from('<I', self._data, offset + 16)[0]
-        base_of_code = struct.unpack_from('<I', self._data, offset + 20)[0]
-        image_base = struct.unpack_from('<I', self._data, offset + 28)[0]
-        section_align = struct.unpack_from('<I', self._data, offset + 32)[0]
-        file_align = struct.unpack_from('<I', self._data, offset + 36)[0]
-        size_of_image = struct.unpack_from('<I', self._data, offset + 56)[0]
-        size_of_headers = struct.unpack_from('<I', self._data, offset + 60)[0]
-        checksum = struct.unpack_from('<I', self._data, offset + 64)[0]
-        subsystem = struct.unpack_from('<H', self._data, offset + 68)[0]
+        # PE32 optional header: 96 bytes
+        # 0:H 2:B 3:B 4:I 8:I 12:I 16:I 20:I 24:I 28:I 32:I 36:I
+        # 40:H 42:H 44:H 46:H 48:H 50:H
+        # 52:I 56:I 60:I 64:I 68:H 70:H 72:I 76:I 80:I 84:I 88:I 92:I
+        fields = struct.unpack_from(
+            '<HBBIIIIIIIIIHHHHHHIIIIHHIIIIII', self._data, offset)
         num_rva = struct.unpack_from('<I', self._data, offset + 92)[0]
 
-        # Data directories start after PE32 static fields (96 bytes)
+        # Data directories
         data_dirs_offset = offset + 96
         data_dirs = {}
         for i in range(min(num_rva, 16)):
@@ -202,19 +195,19 @@ class PE:
             data_dirs[i] = DataDirectory(virtual_address=rva, size=size)
 
         self.optional_header = OptionalHeader(
-            magic=magic,
-            major_linker_version=maj_link,
-            minor_linker_version=min_link,
-            size_of_code=size_code,
-            entry_point_rva=entry_point,
-            base_of_code=base_of_code,
-            image_base=image_base,
-            section_alignment=section_align,
-            file_alignment=file_align,
-            size_of_image=size_of_image,
-            size_of_headers=size_of_headers,
-            checksum=checksum,
-            subsystem=subsystem,
+            magic=fields[0],
+            major_linker_version=fields[1],
+            minor_linker_version=fields[2],
+            size_of_code=fields[3],
+            entry_point_rva=fields[6],
+            base_of_code=fields[7],
+            image_base=fields[9],
+            section_alignment=fields[10],
+            file_alignment=fields[11],
+            size_of_image=struct.unpack_from('<I', self._data, offset + 56)[0],
+            size_of_headers=struct.unpack_from('<I', self._data, offset + 60)[0],
+            checksum=struct.unpack_from('<I', self._data, offset + 64)[0],
+            subsystem=struct.unpack_from('<H', self._data, offset + 68)[0],
             number_of_rva_and_sizes=num_rva,
             data_directories=data_dirs,
         )

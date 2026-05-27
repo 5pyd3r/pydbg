@@ -5,7 +5,14 @@ import os
 
 from tests import TEST_TARGET_PATH
 
+try:
+    from pydbg.cython import _process, _bp, _memory
+    _has_cython = True
+except ImportError:
+    _has_cython = False
 
+
+@unittest.skipUnless(_has_cython, "Requires compiled Cython extensions")
 class TestHardwareBreakpoint(unittest.TestCase):
     """Test setting and clearing hardware breakpoints."""
 
@@ -66,6 +73,7 @@ class TestHardwareBreakpoint(unittest.TestCase):
             _bp.set_hw_breakpoint(self.h_thr, 5, 0x1000, 0, 0)
 
 
+@unittest.skipUnless(_has_cython, "Requires compiled Cython extensions")
 class TestDebuggerBreakpointAPI(unittest.TestCase):
     """Tests for high-level breakpoint API."""
 
@@ -89,7 +97,7 @@ class TestDebuggerBreakpointAPI(unittest.TestCase):
 
         dbg.remove_breakpoint(bp_id)
 
-        _thread.close_handle(h_thread)
+        _process.close_handle(h_thread)
         dbg.detach()
         dbg.close_handle(dbg._process_handle)
         dbg.close_handle(dbg._thread_handle)
@@ -113,7 +121,7 @@ class TestDebuggerBreakpointAPI(unittest.TestCase):
 
         dbg.remove_breakpoint(bp_id)
 
-        _thread.close_handle(h_thread)
+        _process.close_handle(h_thread)
         dbg.detach()
         dbg.close_handle(dbg._process_handle)
         dbg.close_handle(dbg._thread_handle)

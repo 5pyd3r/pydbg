@@ -4,6 +4,12 @@ import unittest
 
 from tests import TEST_TARGET_PATH
 
+try:
+    from pydbg.cython import _process, _thread, _exception
+    _has_cython = True
+except ImportError:
+    _has_cython = False
+
 
 class TestDebugEvent(unittest.TestCase):
     """Tests for the DebugEvent wrapper class."""
@@ -62,6 +68,7 @@ class TestDebugEvent(unittest.TestCase):
         self.assertEqual(event.exception_info['name'], 'EXCEPTION_BREAKPOINT')
 
 
+@unittest.skipUnless(_has_cython, "Requires compiled Cython extensions")
 class TestDebuggerAPICompleteness(unittest.TestCase):
     """Tests for terminate_process and get_exit_code."""
 
@@ -95,6 +102,7 @@ class TestDebuggerAPICompleteness(unittest.TestCase):
         dbg.close_handle(dbg._thread_handle)
 
 
+@unittest.skipUnless(_has_cython, "Requires compiled Cython extensions")
 class TestExceptionHelpers(unittest.TestCase):
     """Tests for exception_code_to_str."""
 
@@ -141,6 +149,7 @@ class TestExceptionHelpers(unittest.TestCase):
         self.assertEqual(info['access_addr'], 0xDEAD)
 
 
+@unittest.skipUnless(_has_cython, "Requires compiled Cython extensions")
 class TestRemoveHwBreakpoint(unittest.TestCase):
     """Tests for hardware breakpoint removal."""
 
@@ -165,6 +174,7 @@ class TestRemoveHwBreakpoint(unittest.TestCase):
         dbg.close_handle(dbg._thread_handle)
 
 
+@unittest.skipUnless(_has_cython, "Requires compiled Cython extensions")
 class TestRunLoop(unittest.TestCase):
     """Tests for the event-driven debug loop."""
 
@@ -186,6 +196,7 @@ class TestRunLoop(unittest.TestCase):
         self.assertIsInstance(exit_code, int)
 
 
+@unittest.skipUnless(_has_cython, "Requires compiled Cython extensions")
 class TestThreadEnumeration(unittest.TestCase):
     """Tests for thread enumeration."""
 
@@ -223,6 +234,7 @@ class TestThreadEnumeration(unittest.TestCase):
         self.assertIsInstance(tids[0], int)
 
 
+@unittest.skipUnless(_has_cython, "Requires compiled Cython extensions")
 class TestFindBreakpoint(unittest.TestCase):
     """Tests for find_breakpoint."""
 

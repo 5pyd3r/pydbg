@@ -121,14 +121,6 @@ cpdef int resume_thread(unsigned long long h_thread):
     return <int>result
 
 
-cpdef int close_handle(unsigned long long h_handle):
-    """Close a Win32 handle. Raises OSError on failure."""
-    cdef BOOL result = CloseHandle(<HANDLE><LPVOID>h_handle)
-    if result == 0:
-        raise OSError(GetLastError(), "CloseHandle failed")
-    return 0
-
-
 cpdef list enumerate_threads(int pid):
     """Enumerate thread IDs for a given process.
 

@@ -5,7 +5,14 @@ import os
 
 from tests import TEST_TARGET_PATH
 
+try:
+    from pydbg.cython import _process, _thread
+    _has_cython = True
+except ImportError:
+    _has_cython = False
 
+
+@unittest.skipUnless(_has_cython, "Requires compiled Cython extensions")
 class TestThreadContext(unittest.TestCase):
     """Test reading and writing thread context."""
 
@@ -39,7 +46,7 @@ class TestThreadContext(unittest.TestCase):
 
         h = _thread.open_thread(self.tid)
         self.assertGreater(h, 0)
-        _thread.close_handle(h)
+        _process.close_handle(h)
 
     def test_suspend_resume(self):
         """Verify suspend and resume cycle."""
@@ -52,8 +59,9 @@ class TestThreadContext(unittest.TestCase):
         count2 = _thread.resume_thread(h)
         self.assertGreaterEqual(count2, 0)
 
-        _thread.close_handle(h)
+        _process.close_handle(h)
 
+@unittest.skipUnless(_has_cython, "Requires compiled Cython extensions")
 class TestDebuggerThreadAPI(unittest.TestCase):
     """Tests for high-level thread API."""
 
@@ -72,7 +80,7 @@ class TestDebuggerThreadAPI(unittest.TestCase):
         self.assertIn('rip', regs)
         self.assertIn('rsp', regs)
 
-        _thread.close_handle(h_thread)
+        _process.close_handle(h_thread)
         dbg.detach()
         dbg.close_handle(dbg._process_handle)
         dbg.close_handle(dbg._thread_handle)

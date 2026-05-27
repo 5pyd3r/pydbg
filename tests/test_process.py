@@ -5,7 +5,14 @@ import os
 
 from tests import TEST_TARGET_PATH
 
+try:
+    from pydbg.cython import _process
+    _has_cython = True
+except ImportError:
+    _has_cython = False
 
+
+@unittest.skipUnless(_has_cython, "Requires compiled Cython extensions")
 class TestProcessLifecycle(unittest.TestCase):
     """Integration tests for process creation and debug event loop."""
 
@@ -81,6 +88,7 @@ class TestProcessLifecycle(unittest.TestCase):
             _process.debug_active_process_stop(999999)
 
 
+@unittest.skipUnless(_has_cython, "Requires compiled Cython extensions")
 class TestDebuggerAPI(unittest.TestCase):
     """Tests for the high-level Debugger class."""
 

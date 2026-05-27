@@ -14,7 +14,7 @@ from .exceptions import (
 
 # Import Cython modules (available after build)
 try:
-    from pydbg.cython import _process, _memory, _thread, _exception, _bp
+    from .cython import _process, _memory, _thread, _exception, _bp
 except ImportError:
     _process = _memory = _thread = _exception = _bp = None
 
