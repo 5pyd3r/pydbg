@@ -1,0 +1,52 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [master, main]
+  push:
+    branches: [master, main]
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Install meson
+        run: pip install meson ninja
+
+      - name: Configure
+        run: meson setup build --wipe
+
+      - name: Lint (flake8)
+        run: |
+          pip install flake8
+          flake8 src/ tests/ --max-line-length=120
+
+  build-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Install build deps
+        run: pip install meson ninja cython
+
+      - name: Configure
+        run: meson setup build
+
+      - name: Build (cython may fail on Linux — non-fatal)
+        run: meson compile -C build || true
+
+      - name: Run pure Python tests
+        run: |
+          export PYTHONPATH=$PWD/src:$PWD/build/src
+          python -m unittest tests.test_pe -v
+          python -m unittest tests.test_debugger -v
