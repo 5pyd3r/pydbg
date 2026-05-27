@@ -268,7 +268,151 @@ def build_pe_with_imports():
     return bytes(data)
 
 
-class TestSyntheticPE(unittest.TestCase):
+def build_minimal_pe32():
+    """Build minimal synthetic PE32 bytes for testing."""
+    # DOS header
+    dos_header = struct.pack('<2s58xI', b'MZ', 0x80)
+    dos_header += b'\x00' * (0x80 - len(dos_header))
+
+    # PE signature
+    pe_sig = struct.pack('<I', 0x00004550)
+
+    # IMAGE_FILE_HEADER (20 bytes)
+    file_header = struct.pack(
+        '<HHIIIHH',
+        0x14C,        # machine: i386
+        2,            # number_of_sections
+        0x5A000000,   # time_date_stamp
+        0, 0,         # PointerToSymbolTable, NumberOfSymbols
+        0xE0,         # SizeOfOptionalHeader (PE32)
+        0x22,         # characteristics
+    )
+
+    # PE32 optional header: 96 bytes static fields
+    # Magic(2) + Linker(1+1) + Code/I0/I1/Entry/Base/BaseOfData(6*4) + ImageBase(4)
+    # + SectionAlign(4) + FileAlign(4) + 6*H(12) + Win32(4)
+    # + SizeOfImage/Headers/CheckSum(3*4) + Subsystem/DllChar(2+2)
+    # + StackReserve/Commit/HeapReserve/Commit(4*4) + LoaderFlags(4) + NumRva(4)
+    opt_header = struct.pack(
+        '<HBB',
+        0x10B,        # magic: PE32
+        14, 0,        # linker version
+    )
+    opt_header += struct.pack(
+        '<IIIIII',
+        0x1000,       # SizeOfCode
+        0,            # SizeOfInitializedData
+        0,            # SizeOfUninitializedData
+        0x1000,       # AddressOfEntryPoint
+        0x1000,       # BaseOfCode
+        0,            # BaseOfData (PE32 only)
+    )
+    opt_header += struct.pack('<I', 0x400000)    # ImageBase
+    opt_header += struct.pack(
+        '<II',
+        0x1000,       # SectionAlignment
+        0x200,        # FileAlignment
+    )
+    opt_header += struct.pack(
+        '<HHHHHH',
+        4, 0,         # OS version
+        0, 0,         # Image version
+        4, 0,         # Subsystem version
+    )
+    opt_header += struct.pack('<I', 0)            # Win32VersionValue
+    opt_header += struct.pack(
+        '<III',
+        0x4000,       # SizeOfImage
+        0x400,        # SizeOfHeaders
+        0,            # CheckSum
+    )
+    opt_header += struct.pack(
+        '<HH',
+        2,            # Subsystem (GUI)
+        0,            # DllCharacteristics
+    )
+    opt_header += struct.pack(
+        '<IIII',
+        0x100000,     # SizeOfStackReserve
+        0x1000,       # SizeOfStackCommit
+        0x100000,     # SizeOfHeapReserve
+        0x1000,       # SizeOfHeapCommit
+    )
+    opt_header += struct.pack('<II', 0, 2)        # LoaderFlags, NumberOfRvaAndSizes
+
+    # Data directories: 2 entries
+    data_dirs = struct.pack(
+        '<IIII',
+        0x3000, 0x100,   # Export
+        0x4000, 0x100,   # Import
+    )
+
+    # Section headers: 2 * 40 bytes
+    text_section = struct.pack(
+        '<8sIIIIIIHHI',
+        b'.text\x00\x00\x00', 0xE00, 0x1000, 0x1000, 0x400,
+        0, 0, 0, 0,
+        0x60000020,
+    )
+    rdata_section = struct.pack(
+        '<8sIIIIIIHHI',
+        b'.rdata\x00\x00', 0xA00, 0x2000, 0xC00, 0x1400,
+        0, 0, 0, 0,
+        0x40000040,
+    )
+
+    data = dos_header + pe_sig + file_header + opt_header + data_dirs + text_section + rdata_section
+    if len(data) < 0x4200:
+        data += b'\x00' * (0x4200 - len(data))
+    return data
+
+
+class TestSyntheticPE32(unittest.TestCase):
+    """Tests for PE32 parser with synthetic data."""
+
+    def test_parse_magic_pe32(self):
+        from pydbg.pe import PE
+        data = build_minimal_pe32()
+        pe = PE(data)
+        self.assertEqual(pe.optional_header.magic, 0x10B)
+
+    def test_parse_dos_header_pe32(self):
+        from pydbg.pe import PE
+        data = build_minimal_pe32()
+        pe = PE(data)
+        self.assertEqual(pe.dos_header.e_magic, 0x5A4D)
+        self.assertEqual(pe.dos_header.e_lfanew, 0x80)
+
+    def test_parse_file_header_pe32(self):
+        from pydbg.pe import PE
+        data = build_minimal_pe32()
+        pe = PE(data)
+        self.assertEqual(pe.file_header.machine, 0x14C)
+        self.assertEqual(pe.file_header.number_of_sections, 2)
+
+    def test_parse_optional_header_pe32(self):
+        from pydbg.pe import PE
+        data = build_minimal_pe32()
+        pe = PE(data)
+        self.assertEqual(pe.optional_header.image_base, 0x400000)
+        self.assertEqual(pe.optional_header.entry_point_rva, 0x1000)
+        self.assertEqual(pe.optional_header.number_of_rva_and_sizes, 2)
+
+    def test_parse_sections_pe32(self):
+        from pydbg.pe import PE
+        data = build_minimal_pe32()
+        pe = PE(data)
+        self.assertEqual(len(pe.sections), 2)
+        self.assertEqual(pe.sections[0].name, '.text')
+        self.assertEqual(pe.sections[0].virtual_address, 0x1000)
+        self.assertEqual(pe.sections[1].name, '.rdata')
+
+    def test_rva_to_offset_pe32(self):
+        from pydbg.pe import PE
+        data = build_minimal_pe32()
+        pe = PE(data)
+        offset = pe.rva_to_offset(0x1050)
+        self.assertEqual(offset, 0x450)
     """Tests for PE parser with synthetic data."""
 
     def test_parse_dos_header(self):
