@@ -1,12 +1,10 @@
 """Tests for thread operations: context, suspend, resume."""
 
 import unittest
-import os
-
 from tests import TEST_TARGET_PATH
 
 try:
-    from pydbg.cython import _process, _thread
+    from pydbg.cython import _process
     _has_cython = True
 except ImportError:
     _has_cython = False
@@ -17,14 +15,12 @@ class TestThreadContext(unittest.TestCase):
     """Test reading and writing thread context."""
 
     def setUp(self):
-        from pydbg.cython import _process
         self.pid, self.tid, self.h_proc, self.h_thr = _process.create_process(
             TEST_TARGET_PATH)
         _process.wait_for_debug_event(5000)
         _process.continue_debug_event(self.pid, self.tid)
 
     def tearDown(self):
-        from pydbg.cython import _process
         _process.debug_active_process_stop(self.pid)
         _process.terminate_process(self.h_proc, 0)
         _process.close_handle(self.h_proc)
@@ -61,6 +57,7 @@ class TestThreadContext(unittest.TestCase):
 
         _process.close_handle(h)
 
+
 @unittest.skipUnless(_has_cython, "Requires compiled Cython extensions")
 class TestDebuggerThreadAPI(unittest.TestCase):
     """Tests for high-level thread API."""
@@ -68,11 +65,10 @@ class TestDebuggerThreadAPI(unittest.TestCase):
     def test_get_registers(self):
         """Verify Debugger.get_registers returns dict."""
         from pydbg import Debugger
-        from pydbg.cython import _thread
 
         dbg = Debugger()
         pid, tid = dbg.create_process(TEST_TARGET_PATH)
-        event = dbg.wait_event(5000)
+        dbg.wait_event(5000)
         dbg.continue_event(pid, tid)
 
         h_thread = dbg.open_thread(tid)

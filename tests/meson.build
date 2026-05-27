@@ -4,8 +4,11 @@ test_target = executable(
   'target/simple_target.c',
 )
 
-# Common environment: PYTHONPATH includes both / (pure Python) and build pydbg/cython (compiled extensions)
+# Common environment: PYTHONPATH includes project root (for tests), source (pure Python), and build (compiled extensions)
 test_env = environment()
+test_env.prepend('PYTHONPATH',
+  meson.project_source_root()
+)
 test_env.prepend('PYTHONPATH',
   meson.project_source_root() / 'src'
 )

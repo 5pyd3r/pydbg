@@ -3,7 +3,7 @@ project('pydbg', 'c',
   meson_version: '>=0.60',
   default_options: [
     'c_std=c11',
-    'buildtype=debug',
+    'buildtype=release',
   ])
 
 # Python dependency

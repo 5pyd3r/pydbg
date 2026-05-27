@@ -125,6 +125,8 @@ cpdef list enum_process_modules(uintptr_t h_process):
 
     cdef BOOL result
     cdef list out = []
+    cdef int count
+    cdef int i
     try:
         result = EnumProcessModules(
             <HANDLE>h_process,
@@ -148,8 +150,7 @@ cpdef list enum_process_modules(uintptr_t h_process):
             if result == 0:
                 raise OSError(GetLastError(), "EnumProcessModules failed")
 
-        cdef int count = cb_needed // sizeof(HANDLE)
-        cdef int i
+        count = cb_needed // sizeof(HANDLE)
         for i in range(count):
             out.append({
                 'handle': <uint64_t>modules[i],

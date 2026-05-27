@@ -1,12 +1,10 @@
 """Tests for hardware breakpoints."""
 
 import unittest
-import os
-
 from tests import TEST_TARGET_PATH
 
 try:
-    from pydbg.cython import _process, _bp, _memory
+    from pydbg.cython import _process
     _has_cython = True
 except ImportError:
     _has_cython = False
@@ -17,7 +15,6 @@ class TestHardwareBreakpoint(unittest.TestCase):
     """Test setting and clearing hardware breakpoints."""
 
     def setUp(self):
-        from pydbg.cython import _process
         self.pid, self.tid, self.h_proc, self.h_thr = _process.create_process(
             TEST_TARGET_PATH)
         _process.wait_for_debug_event(5000)
@@ -31,9 +28,7 @@ class TestHardwareBreakpoint(unittest.TestCase):
                 break
             _process.continue_debug_event(event['pid'], event['tid'])
 
-
     def tearDown(self):
-        from pydbg.cython import _process
         _process.debug_active_process_stop(self.pid)
         _process.terminate_process(self.h_proc, 0)
         _process.close_handle(self.h_proc)
@@ -80,11 +75,10 @@ class TestDebuggerBreakpointAPI(unittest.TestCase):
     def test_set_and_remove_int3(self):
         """Set int3 breakpoint, then remove."""
         from pydbg import Debugger
-        from pydbg.cython import _thread
 
         dbg = Debugger()
         pid, tid = dbg.create_process(TEST_TARGET_PATH)
-        event = dbg.wait_event(5000)
+        dbg.wait_event(5000)
         dbg.continue_event(pid, tid)
 
         # Get a code address
@@ -105,11 +99,10 @@ class TestDebuggerBreakpointAPI(unittest.TestCase):
     def test_set_hw_breakpoint_via_api(self):
         """Set hw breakpoint via high-level API."""
         from pydbg import Debugger
-        from pydbg.cython import _thread
 
         dbg = Debugger()
         pid, tid = dbg.create_process(TEST_TARGET_PATH)
-        event = dbg.wait_event(5000)
+        dbg.wait_event(5000)
         dbg.continue_event(pid, tid)
 
         h_thread = dbg.open_thread(tid)

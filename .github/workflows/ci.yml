@@ -23,12 +23,12 @@ jobs:
         run: flake8 src/ tests/ --max-line-length=120
 
       - name: Configure
-        run: meson setup build
+        run: meson setup build --buildtype=release
 
       - name: Build
         run: meson compile -C build
 
       - name: Test
         run: |
-          $env:PYTHONPATH = "$pwd\src;$pwd\build\src"
+          $env:PYTHONPATH = "$pwd;$pwd\src;$pwd\build\src"
           meson test -C build --print-errorlogs

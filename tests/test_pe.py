@@ -8,9 +8,11 @@ import os
 def build_minimal_pe32plus():
     """Build minimal synthetic PE32+ bytes for testing."""
     # DOS header: 64 bytes
-    dos_header = struct.pack('<2s58xI',
-        b'MZ',        # e_magic
-        0x80)         # e_lfanew -> offset 128
+    dos_header = struct.pack(
+        '<2s58xI',
+        b'MZ',  # e_magic
+        0x80,  # e_lfanew -> offset 128
+    )
     # Pad to 128 bytes (dos header + padding)
     dos_header += b'\x00' * (0x80 - len(dos_header))
 
@@ -18,32 +20,43 @@ def build_minimal_pe32plus():
     pe_sig = struct.pack('<I', 0x00004550)  # "PE\0\0"
 
     # IMAGE_FILE_HEADER (20 bytes)
-    file_header = struct.pack('<HHIIIHH',
-        0x8664,       # machine: AMD64
-        2,            # number_of_sections
-        0x5A000000,   # time_date_stamp
-        0,            # PointerToSymbolTable
-        0,            # NumberOfSymbols
-        0xF0,         # SizeOfOptionalHeader (PE32+)
+    file_header = struct.pack(
+        '<HHIIIHH',
+        0x8664,  # machine: AMD64
+        2,  # number_of_sections
+        0x5A000000,  # time_date_stamp
+        0,  # PointerToSymbolTable
+        0,  # NumberOfSymbols
+        0xF0,  # SizeOfOptionalHeader (PE32+)
         0x22)         # characteristics
 
     # IMAGE_OPTIONAL_HEADER64 (PE32+ static fields: 112 bytes before data dirs)
-    opt_header = struct.pack('<HBB',
-        0x20B,        # magic: PE32+
-        14,           # major linker version
-        0)            # minor linker version
-    opt_header += struct.pack('<III',
-        0x1000,       # SizeOfCode
-        0,            # SizeOfInitializedData
-        0)            # SizeOfUninitializedData
-    opt_header += struct.pack('<II',
-        0x1000,       # AddressOfEntryPoint
-        0x1000)       # BaseOfCode
-    opt_header += struct.pack('<Q',
-        0x140000000)  # ImageBase
-    opt_header += struct.pack('<II',
-        0x1000,       # SectionAlignment
-        0x200)        # FileAlignment
+    opt_header = struct.pack(
+        '<HBB',
+        0x20B,  # magic: PE32+
+        14,  # major linker version
+        0,  # minor linker version
+    )
+    opt_header += struct.pack(
+        '<III',
+        0x1000,  # SizeOfCode
+        0,  # SizeOfInitializedData
+        0,  # SizeOfUninitializedData
+    )
+    opt_header += struct.pack(
+        '<II',
+        0x1000,  # AddressOfEntryPoint
+        0x1000,  # BaseOfCode
+    )
+    opt_header += struct.pack(
+        '<Q',
+        0x140000000,  # ImageBase
+    )
+    opt_header += struct.pack(
+        '<II',
+        0x1000,  # SectionAlignment
+        0x200,  # FileAlignment
+    )
     # Current position: 2+1+1+4+4+4+4+4+8+4+4 = 40 bytes
     # Need to reach offset 92: 92 - 40 = 52 bytes of padding
     opt_header += b'\x00' * 52
@@ -53,29 +66,35 @@ def build_minimal_pe32plus():
     # Data directories: 2 entries * 8 bytes = 16 bytes
     # Entry 0 (Export): RVA=0x3000, Size=0x100
     # Entry 1 (Import): RVA=0x4000, Size=0x100
-    data_dirs = struct.pack('<IIII',
-        0x3000, 0x100,   # Export
-        0x4000, 0x100)   # Import
+    data_dirs = struct.pack(
+        '<IIII',
+        0x3000, 0x100,  # Export
+        0x4000, 0x100,  # Import
+    )
 
     # Section headers: 2 * 40 bytes
     # .text section
-    text_section = struct.pack('<8sIIIIIIHHI',
+    text_section = struct.pack(
+        '<8sIIIIIIHHI',
         b'.text\x00\x00\x00',  # Name
-        0xE00,            # VirtualSize
-        0x1000,           # VirtualAddress
-        0x1000,           # SizeOfRawData
-        0x400,            # PointerToRawData
+        0xE00,  # VirtualSize
+        0x1000,  # VirtualAddress
+        0x1000,  # SizeOfRawData
+        0x400,  # PointerToRawData
         0, 0, 0, 0,
-        0x60000020)       # Characteristics: CODE|EXECUTE|READ
+        0x60000020,  # Characteristics: CODE|EXECUTE|READ
+    )
     # .rdata section
-    rdata_section = struct.pack('<8sIIIIIIHHI',
+    rdata_section = struct.pack(
+        '<8sIIIIIIHHI',
         b'.rdata\x00\x00',  # Name
-        0xA00,            # VirtualSize
-        0x2000,           # VirtualAddress
-        0xC00,            # SizeOfRawData
-        0x1400,           # PointerToRawData
+        0xA00,  # VirtualSize
+        0x2000,  # VirtualAddress
+        0xC00,  # SizeOfRawData
+        0x1400,  # PointerToRawData
         0, 0, 0, 0,
-        0x40000040)       # Characteristics: DATA|READ
+        0x40000040,  # Characteristics: DATA|READ
+    )
 
     data = dos_header + pe_sig + file_header + opt_header + data_dirs + text_section + rdata_section
 
@@ -107,14 +126,18 @@ def build_pe_with_exports():
     data_dirs = struct.pack('<IIII', 0x3000, 0x200, 0x4000, 0x100)
 
     # .text: RVA=0x1000, file=0x400, size=0x1000
-    text = struct.pack('<8sIIIIIIHHI',
+    text = struct.pack(
+        '<8sIIIIIIHHI',
         b'.text\x00\x00\x00', 0xE00, 0x1000, 0x1000, 0x400,
-        0, 0, 0, 0, 0x60000020)
+        0, 0, 0, 0, 0x60000020,
+    )
 
     # .rdata: RVA=0x2000, file=0x1400, size=0x3000 (big enough for exports)
-    rdata = struct.pack('<8sIIIIIIHHI',
+    rdata = struct.pack(
+        '<8sIIIIIIHHI',
         b'.rdata\x00\x00', 0x3000, 0x2000, 0x3000, 0x1400,
-        0, 0, 0, 0, 0x40000040)
+        0, 0, 0, 0, 0x40000040,
+    )
 
     data = dos_header + pe_sig + file_header + oh + data_dirs + text + rdata
     # Pad to 0x4400
@@ -141,12 +164,13 @@ def build_pe_with_exports():
     ordinals_rva = 0x3208
     func_name_rva = 0x3300
 
-    export_dir = struct.pack('<IIHHIIIIIII',
-        0,              # Characteristics
-        0,              # TimeDateStamp
-        0, 0,           # Version
-        name_rva,       # Name
-        1,              # Base (ordinal base = 1)
+    export_dir = struct.pack(
+        '<IIHHIIIIIII',
+        0,  # Characteristics
+        0,  # TimeDateStamp
+        0, 0,  # Version
+        name_rva,  # Name
+        1,  # Base (ordinal base = 1)
         1,              # NumberOfFunctions
         1,              # NumberOfNames
         func_rva,       # AddressOfFunctions
@@ -187,12 +211,16 @@ def build_pe_with_imports():
     # Import: RVA=0x5000, Size=0x200
     data_dirs = struct.pack('<IIII', 0, 0, 0x5000, 0x200)
 
-    text = struct.pack('<8sIIIIIIHHI',
+    text = struct.pack(
+        '<8sIIIIIIHHI',
         b'.text\x00\x00\x00', 0xE00, 0x1000, 0x1000, 0x400,
-        0, 0, 0, 0, 0x60000020)
-    rdata = struct.pack('<8sIIIIIIHHI',
+        0, 0, 0, 0, 0x60000020,
+    )
+    rdata = struct.pack(
+        '<8sIIIIIIHHI',
         b'.rdata\x00\x00', 0x5000, 0x2000, 0x5000, 0x1400,
-        0, 0, 0, 0, 0x40000040)
+        0, 0, 0, 0, 0x40000040,
+    )
 
     data = dos_header + pe_sig + file_header + oh + data_dirs + text + rdata
     if len(data) < 0x6400:
@@ -215,11 +243,12 @@ def build_pe_with_imports():
 
     # IMAGE_IMPORT_DESCRIPTOR (20 bytes):
     # OriginalFirstThunk(4), TimeDateStamp(4), ForwarderChain(4), Name(4), FirstThunk(4)
-    import_desc = struct.pack('<IIIII',
-        ilt_rva,      # OriginalFirstThunk (ILT)
+    import_desc = struct.pack(
+        '<IIIII',
+        ilt_rva,  # OriginalFirstThunk (ILT)
         0,            # TimeDateStamp
         0,            # ForwarderChain
-        dll_name_rva, # Name
+        dll_name_rva,  # Name
         iat_rva)      # FirstThunk (IAT)
     data[import_dir_offset:import_dir_offset + 20] = import_desc
     # Null terminator (next 20 bytes are already zero)

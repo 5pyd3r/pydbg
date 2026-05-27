@@ -5,7 +5,7 @@ import unittest
 from tests import TEST_TARGET_PATH
 
 try:
-    from pydbg.cython import _process, _thread, _exception
+    from pydbg.cython import _process
     _has_cython = True
 except ImportError:
     _has_cython = False
@@ -201,14 +201,12 @@ class TestThreadEnumeration(unittest.TestCase):
     """Tests for thread enumeration."""
 
     def setUp(self):
-        from pydbg.cython import _process
         self.pid, self.tid, self.h_proc, self.h_thr = _process.create_process(
             TEST_TARGET_PATH)
         _process.wait_for_debug_event(5000)
         _process.continue_debug_event(self.pid, self.tid)
 
     def tearDown(self):
-        from pydbg.cython import _process
         _process.terminate_process(self.h_proc, 0)
         _process.close_handle(self.h_proc)
         _process.close_handle(self.h_thr)

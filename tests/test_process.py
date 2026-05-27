@@ -1,8 +1,6 @@
 """Tests for process debugging: create, wait, continue, detach."""
 
 import unittest
-import os
-
 from tests import TEST_TARGET_PATH
 
 try:
@@ -18,7 +16,6 @@ class TestProcessLifecycle(unittest.TestCase):
 
     def test_create_process(self):
         """Verify create_process returns valid pid/tid."""
-        from pydbg.cython import _process
 
         pid, tid, h_proc, h_thr = _process.create_process(TEST_TARGET_PATH)
         self.assertGreater(pid, 0)
@@ -34,7 +31,6 @@ class TestProcessLifecycle(unittest.TestCase):
 
     def test_wait_and_continue(self):
         """Verify wait_for_debug_event returns CREATE_PROCESS, then continue."""
-        from pydbg.cython import _process
 
         pid, tid, h_proc, h_thr = _process.create_process(TEST_TARGET_PATH)
 
@@ -53,7 +49,6 @@ class TestProcessLifecycle(unittest.TestCase):
 
     def test_exception_breakpoint(self):
         """Verify we get EXCEPTION_BREAKPOINT from initial int3."""
-        from pydbg.cython import _process
 
         pid, tid, h_proc, h_thr = _process.create_process(TEST_TARGET_PATH)
 
@@ -82,7 +77,6 @@ class TestProcessLifecycle(unittest.TestCase):
 
     def test_detach_nonexistent(self):
         """Verify detach on invalid pid raises OSError."""
-        from pydbg.cython import _process
 
         with self.assertRaises(OSError):
             _process.debug_active_process_stop(999999)

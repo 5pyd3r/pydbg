@@ -1,12 +1,10 @@
 """Tests for memory operations: read, write, query, modules."""
 
 import unittest
-import os
-
 from tests import TEST_TARGET_PATH
 
 try:
-    from pydbg.cython import _process, _memory
+    from pydbg.cython import _process
     _has_cython = True
 except ImportError:
     _has_cython = False
@@ -17,7 +15,6 @@ class TestMemoryReadWrite(unittest.TestCase):
     """Test reading and writing process memory."""
 
     def setUp(self):
-        from pydbg.cython import _process
         self.pid, self.tid, self.h_proc, self.h_thr = _process.create_process(
             TEST_TARGET_PATH)
         # Consume CREATE_PROCESS event
@@ -33,7 +30,6 @@ class TestMemoryReadWrite(unittest.TestCase):
             _process.continue_debug_event(event['pid'], event['tid'])
 
     def tearDown(self):
-        from pydbg.cython import _process
         _process.terminate_process(self.h_proc, 0)
         _process.close_handle(self.h_proc)
         _process.close_handle(self.h_thr)
@@ -97,7 +93,6 @@ class TestModuleEnum(unittest.TestCase):
     """Test module enumeration."""
 
     def setUp(self):
-        from pydbg.cython import _process
         self.pid, self.tid, self.h_proc, self.h_thr = _process.create_process(
             TEST_TARGET_PATH)
         _process.wait_for_debug_event(5000)
@@ -112,7 +107,6 @@ class TestModuleEnum(unittest.TestCase):
             _process.continue_debug_event(event['pid'], event['tid'])
 
     def tearDown(self):
-        from pydbg.cython import _process
         _process.terminate_process(self.h_proc, 0)
         _process.close_handle(self.h_proc)
         _process.close_handle(self.h_thr)
