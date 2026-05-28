@@ -1,10 +1,6 @@
 """ModuleResolver — enumerate modules and resolve filenames."""
 
-try:
-    from ..cython import _memory
-except ImportError:
-    _memory = None
-
+from .. import _pydbg
 from ..exceptions import MemError
 
 
@@ -16,12 +12,12 @@ class ModuleResolver:
 
     def enumerate(self):
         try:
-            return _memory.enum_process_modules(self._s.process_handle)
+            return _pydbg.enum_process_modules(self._s.process_handle)
         except OSError as e:
             raise MemError(f"EnumProcessModules: {e}")
 
     def get_filename(self, h_module):
         try:
-            return _memory.get_module_file_name_ex(self._s.process_handle, h_module)
+            return _pydbg.get_module_file_name_ex(self._s.process_handle, h_module)
         except OSError as e:
             raise MemError(f"GetModuleFileNameEx: {e}")

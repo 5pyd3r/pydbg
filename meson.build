@@ -1,10 +1,12 @@
-project('pydbg', 'c',
+project('pydbg', 'c', 'cython',
   version: '0.1.0',
   meson_version: '>=0.60',
   default_options: [
     'c_std=c11',
     'buildtype=release',
-  ])
+    'b_ndebug=if-release', 
+    'cython_language=c']
+)
 
 # Python dependency
 py_mod = import('python')

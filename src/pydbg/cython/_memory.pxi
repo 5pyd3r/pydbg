@@ -117,47 +117,25 @@ cpdef list enum_process_modules(uintptr_t h_process):
     Returns list of dicts with: handle, base_address.
     Raises OSError on failure.
     """
-    cdef DWORD buf_size = 1024 * sizeof(HMODULE)
+    cdef HMODULE[1024] modules
     cdef DWORD cb_needed = 0
-    cdef HMODULE* modules = <HMODULE*>malloc(buf_size)
-    if modules == NULL:
-        raise MemoryError("Failed to allocate module buffer")
+    cdef BOOL result = EnumProcessModules(
+        <HANDLE>h_process,
+        modules,
+        sizeof(modules),
+        &cb_needed)
 
-    cdef BOOL result
+    if result == 0:
+        raise OSError(GetLastError(), "EnumProcessModules failed")
+
+    cdef int count = cb_needed // sizeof(HANDLE)
     cdef list out = []
-    cdef int count
     cdef int i
-    try:
-        result = EnumProcessModules(
-            <HANDLE>h_process,
-            modules,
-            buf_size,
-            &cb_needed)
-
-        if result == 0:
-            raise OSError(GetLastError(), "EnumProcessModules failed")
-
-        if cb_needed > buf_size:
-            free(modules)
-            modules = <HMODULE*>malloc(cb_needed)
-            if modules == NULL:
-                raise MemoryError("Failed to allocate module buffer")
-            result = EnumProcessModules(
-                <HANDLE>h_process,
-                modules,
-                cb_needed,
-                &cb_needed)
-            if result == 0:
-                raise OSError(GetLastError(), "EnumProcessModules failed")
-
-        count = cb_needed // sizeof(HANDLE)
-        for i in range(count):
-            out.append({
-                'handle': <uint64_t>modules[i],
-                'base_address': <uint64_t>modules[i],
-            })
-    finally:
-        free(modules)
+    for i in range(count):
+        out.append({
+            'handle': <uint64_t>modules[i],
+            'base_address': <uint64_t>modules[i],
+        })
 
     return out
 

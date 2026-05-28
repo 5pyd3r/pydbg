@@ -5,7 +5,8 @@ import unittest
 from tests import TEST_TARGET_PATH
 
 try:
-    from pydbg.cython import _process
+    from pydbg import _pydbg
+
     _has_cython = True
 except ImportError:
     _has_cython = False
@@ -19,12 +20,12 @@ class TestDebugEvent(unittest.TestCase):
         from pydbg import DebugEvent
 
         raw = {
-            'event_name': 'CREATE_PROCESS',
-            'pid': 1234,
-            'tid': 5678,
+            "event_name": "CREATE_PROCESS",
+            "pid": 1234,
+            "tid": 5678,
         }
         event = DebugEvent(raw)
-        self.assertEqual(event.type, 'CREATE_PROCESS')
+        self.assertEqual(event.type, "CREATE_PROCESS")
         self.assertEqual(event.pid, 1234)
         self.assertEqual(event.tid, 5678)
         self.assertIsNone(event.exception_code)
@@ -36,16 +37,16 @@ class TestDebugEvent(unittest.TestCase):
         """Verify __repr__ format."""
         from pydbg import DebugEvent
 
-        raw = {'event_name': 'EXCEPTION', 'pid': 100, 'tid': 200}
+        raw = {"event_name": "EXCEPTION", "pid": 100, "tid": 200}
         event = DebugEvent(raw)
-        self.assertEqual(repr(event), '<DebugEvent EXCEPTION pid=100 tid=200>')
+        self.assertEqual(repr(event), "<DebugEvent EXCEPTION pid=100 tid=200>")
 
     def test_debug_event_default_values(self):
         """Verify defaults for missing keys."""
         from pydbg import DebugEvent
 
         event = DebugEvent({})
-        self.assertEqual(event.type, 'UNKNOWN')
+        self.assertEqual(event.type, "UNKNOWN")
         self.assertEqual(event.pid, 0)
         self.assertEqual(event.tid, 0)
 
@@ -54,25 +55,23 @@ class TestDebugEvent(unittest.TestCase):
         from pydbg import DebugEvent
 
         raw = {
-            'event_name': 'EXCEPTION',
-            'pid': 100,
-            'tid': 200,
-            'exception_code': 0x80000003,
-            'exception_addr': 0x1000,
-            'first_chance': True,
-            'exception_params': [],
+            "event_name": "EXCEPTION",
+            "pid": 100,
+            "tid": 200,
+            "exception_code": 0x80000003,
+            "exception_addr": 0x1000,
+            "first_chance": True,
+            "exception_params": [],
         }
         event = DebugEvent(raw)
-        self.assertEqual(event.exception_name, 'EXCEPTION_BREAKPOINT')
+        self.assertEqual(event.exception_name, "EXCEPTION_BREAKPOINT")
         self.assertIsNotNone(event.exception_info)
-        self.assertEqual(event.exception_info['name'], 'EXCEPTION_BREAKPOINT')
+        self.assertEqual(event.exception_info["name"], "EXCEPTION_BREAKPOINT")
 
 
-@unittest.skipUnless(_has_cython, "Requires compiled Cython extensions")
 class TestDebuggerAPICompleteness(unittest.TestCase):
     """Tests for terminate_process and get_exit_code."""
 
-    @unittest.skip("KNOWN_ISSUE: ContinueDebugEvent error 87 on CI runner")
     def test_terminate_process(self):
         """Verify terminate_process kills the target."""
         from pydbg import Debugger
@@ -103,58 +102,50 @@ class TestDebuggerAPICompleteness(unittest.TestCase):
         dbg.close_handle(dbg._session.thread_handle)
 
 
-@unittest.skipUnless(_has_cython, "Requires compiled Cython extensions")
 class TestExceptionHelpers(unittest.TestCase):
     """Tests for exception_code_to_str."""
 
     def test_exception_code_to_str(self):
         """Verify known codes map to correct names."""
-        from pydbg.cython import _exception
-
         self.assertEqual(
-            _exception.exception_code_to_str(0x80000003),
-            'EXCEPTION_BREAKPOINT')
+            _pydbg.exception_code_to_str(0x80000003), "EXCEPTION_BREAKPOINT"
+        )
         self.assertEqual(
-            _exception.exception_code_to_str(0xC0000005),
-            'EXCEPTION_ACCESS_VIOLATION')
+            _pydbg.exception_code_to_str(0xC0000005), "EXCEPTION_ACCESS_VIOLATION"
+        )
         self.assertEqual(
-            _exception.exception_code_to_str(0x80000004),
-            'EXCEPTION_SINGLE_STEP')
+            _pydbg.exception_code_to_str(0x80000004), "EXCEPTION_SINGLE_STEP"
+        )
 
     def test_exception_code_unknown(self):
         """Verify unknown code returns formatted string."""
-        from pydbg.cython import _exception
-
-        result = _exception.exception_code_to_str(0xDEADBEEF)
-        self.assertEqual(result, 'UNKNOWN_EXCEPTION(0xDEADBEEF)')
+        result = _pydbg.exception_code_to_str(0xDEADBEEF)
+        self.assertEqual(result, "UNKNOWN_EXCEPTION(0xDEADBEEF)")
 
     def test_debugger_exception_code_to_str(self):
         """Verify Debugger.exception_code_to_str delegates to Cython."""
         from pydbg import Debugger
 
         dbg = Debugger()
+        self.assertEqual(dbg.exception_code_to_str(0x80000003), "EXCEPTION_BREAKPOINT")
         self.assertEqual(
-            dbg.exception_code_to_str(0x80000003), 'EXCEPTION_BREAKPOINT')
-        self.assertEqual(
-            dbg.exception_code_to_str(0xC0000005), 'EXCEPTION_ACCESS_VIOLATION')
+            dbg.exception_code_to_str(0xC0000005), "EXCEPTION_ACCESS_VIOLATION"
+        )
 
     def test_debugger_get_exception_info(self):
         """Verify Debugger.get_exception_info parses access violation."""
         from pydbg import Debugger
 
         dbg = Debugger()
-        info = dbg.get_exception_info(
-            0xC0000005, 0xDEAD, 1, [0, 0xDEAD])
-        self.assertEqual(info['name'], 'EXCEPTION_ACCESS_VIOLATION')
-        self.assertEqual(info['access_type'], 'read')
-        self.assertEqual(info['access_addr'], 0xDEAD)
+        info = dbg.get_exception_info(0xC0000005, 0xDEAD, 1, [0, 0xDEAD])
+        self.assertEqual(info["name"], "EXCEPTION_ACCESS_VIOLATION")
+        self.assertEqual(info["access_type"], "read")
+        self.assertEqual(info["access_addr"], 0xDEAD)
 
 
-@unittest.skipUnless(_has_cython, "Requires compiled Cython extensions")
 class TestRemoveHwBreakpoint(unittest.TestCase):
     """Tests for hardware breakpoint removal."""
 
-    @unittest.skip("KNOWN_ISSUE: ContinueDebugEvent error 87 on CI runner")
     def test_remove_hw_breakpoint(self):
         """Verify remove_breakpoint works for HW breakpoints without error."""
         from pydbg import Debugger
@@ -164,19 +155,27 @@ class TestRemoveHwBreakpoint(unittest.TestCase):
         dbg.wait_event(5000)
         dbg.continue_event(pid, tid)
 
+        # Consume events until initial breakpoint
+        for _ in range(50):
+            event = dbg.wait_event(2000)
+            if event is None or event.type == "EXIT_PROCESS":
+                break
+            if event.type == "EXCEPTION":
+                break
+            dbg.continue_event(event.pid, event.tid)
+
         h_thread = dbg.open_thread(tid)
         regs = dbg.get_registers(h_thread)
-        bp_id = dbg.set_hw_breakpoint(regs['rip'], condition='x', length=1, slot=0)
+        bp_id = dbg.set_hw_breakpoint(regs["rip"], condition="x", length=1, slot=0)
 
         dbg.remove_breakpoint(bp_id)
-        self.assertIsNone(dbg.find_breakpoint(regs['rip']))
+        self.assertIsNone(dbg.find_breakpoint(regs["rip"]))
 
         dbg.terminate_process(0)
         dbg.close_handle(dbg._session.process_handle)
         dbg.close_handle(dbg._session.thread_handle)
 
 
-@unittest.skipUnless(_has_cython, "Requires compiled Cython extensions")
 class TestRunLoop(unittest.TestCase):
     """Tests for the event-driven debug loop."""
 
@@ -194,32 +193,49 @@ class TestRunLoop(unittest.TestCase):
 
         exit_code = dbg.run(on_event, timeout_ms=5000)
 
-        self.assertIn('CREATE_PROCESS', events)
+        self.assertIn("CREATE_PROCESS", events)
         self.assertIsInstance(exit_code, int)
 
 
-@unittest.skip("KNOWN_ISSUE: ContinueDebugEvent error 87 on CI runner")
 class TestThreadEnumeration(unittest.TestCase):
     """Tests for thread enumeration."""
 
     def setUp(self):
-        self.pid, self.tid, self.h_proc, self.h_thr = _process.create_process(
-            TEST_TARGET_PATH)
-        _process.wait_for_debug_event(5000)
-        _process.continue_debug_event(self.pid, self.tid)
+        self.pid, self.tid, self.h_proc, self.h_thr = _pydbg.create_process(
+            TEST_TARGET_PATH
+        )
+        _pydbg.wait_for_debug_event(5000)
+        _pydbg.continue_debug_event(self.pid, self.tid)
+        # Consume events until initial breakpoint
+        for _ in range(50):
+            event = _pydbg.wait_for_debug_event(2000)
+            if event is None or event.get("event_name") == "EXIT_PROCESS":
+                break
+            if event.get("event_name") == "EXCEPTION":
+                break
+            _pydbg.continue_debug_event(event["pid"], event["tid"])
 
     def tearDown(self):
-        _process.terminate_process(self.h_proc, 0)
-        _process.close_handle(self.h_proc)
-        _process.close_handle(self.h_thr)
+        _pydbg.terminate_process(self.h_proc, 0)
+        # Drain all events (may include pending LOAD_DLL + EXIT_THREAD + EXIT_PROCESS)
+        for _ in range(50):
+            try:
+                event = _pydbg.wait_for_debug_event(2000)
+                if event is None:
+                    break
+                _pydbg.continue_debug_event(event["pid"], event["tid"])
+                if event.get("event_name") == "EXIT_PROCESS":
+                    break
+            except OSError:
+                break
+        _pydbg.close_handle(self.h_proc)
+        _pydbg.close_handle(self.h_thr)
 
     def test_enumerate_threads(self):
         """Verify enumerate_threads returns at least one thread."""
-        from pydbg.cython import _thread
-
-        threads = _thread.enumerate_threads(self.pid)
+        threads = _pydbg.enumerate_threads(self.pid)
         self.assertGreater(len(threads), 0)
-        self.assertIn('tid', threads[0])
+        self.assertIn("tid", threads[0])
 
     def test_get_thread_ids(self):
         """Verify Debugger.get_thread_ids returns list of ints."""
@@ -234,11 +250,9 @@ class TestThreadEnumeration(unittest.TestCase):
         self.assertIsInstance(tids[0], int)
 
 
-@unittest.skipUnless(_has_cython, "Requires compiled Cython extensions")
 class TestFindBreakpoint(unittest.TestCase):
     """Tests for find_breakpoint."""
 
-    @unittest.skip("KNOWN_ISSUE: ContinueDebugEvent error 87 on CI runner")
     def test_find_existing_breakpoint(self):
         """Verify find_breakpoint returns correct ID."""
         from pydbg import Debugger
@@ -248,8 +262,17 @@ class TestFindBreakpoint(unittest.TestCase):
         dbg.wait_event(5000)
         dbg.continue_event(pid, tid)
 
+        # Consume events until initial breakpoint
+        for _ in range(50):
+            event = dbg.wait_event(2000)
+            if event is None or event.type == "EXIT_PROCESS":
+                break
+            if event.type == "EXCEPTION":
+                break
+            dbg.continue_event(event.pid, event.tid)
+
         modules = dbg.enum_modules()
-        base = modules[0]['base_address']
+        base = modules[0]["base_address"]
         bp_id = dbg.set_breakpoint(base)
 
         self.assertEqual(dbg.find_breakpoint(base), bp_id)
@@ -269,5 +292,5 @@ class TestFindBreakpoint(unittest.TestCase):
         self.assertIsNone(dbg.find_breakpoint(0xDEADBEEF))
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     unittest.main()
