@@ -1,74 +1,69 @@
 """Tests for hardware breakpoints."""
 
 import unittest
+
 from tests import TEST_TARGET_PATH
 
 try:
-    from pydbg.cython import _process
+    from pydbg import _pydbg
+
     _has_cython = True
 except ImportError:
     _has_cython = False
 
 
-@unittest.skipUnless(_has_cython, "Requires compiled Cython extensions")
 class TestHardwareBreakpoint(unittest.TestCase):
     """Test setting and clearing hardware breakpoints."""
 
     def setUp(self):
-        self.pid, self.tid, self.h_proc, self.h_thr = _process.create_process(
-            TEST_TARGET_PATH)
-        _process.wait_for_debug_event(5000)
-        _process.continue_debug_event(self.pid, self.tid)
+        self.pid, self.tid, self.h_proc, self.h_thr = _pydbg.create_process(
+            TEST_TARGET_PATH
+        )
+        _pydbg.wait_for_debug_event(5000)
+        _pydbg.continue_debug_event(self.pid, self.tid)
 
         for _ in range(20):
-            event = _process.wait_for_debug_event(5000)
+            event = _pydbg.wait_for_debug_event(5000)
             if event is None:
                 break
-            if event['event_name'] == 'EXCEPTION':
+            if event["event_name"] == "EXCEPTION":
                 break
-            _process.continue_debug_event(event['pid'], event['tid'])
+            _pydbg.continue_debug_event(event["pid"], event["tid"])
 
     def tearDown(self):
-        _process.debug_active_process_stop(self.pid)
-        _process.terminate_process(self.h_proc, 0)
-        _process.close_handle(self.h_proc)
-        _process.close_handle(self.h_thr)
+        _pydbg.debug_active_process_stop(self.pid)
+        _pydbg.terminate_process(self.h_proc, 0)
+        _pydbg.close_handle(self.h_proc)
+        _pydbg.close_handle(self.h_thr)
 
     def test_set_hw_breakpoint(self):
         """Set an execute breakpoint at image base."""
-        from pydbg.cython import _bp, _memory
+        modules = _pydbg.enum_process_modules(self.h_proc)
+        base = modules[0]["base_address"]
 
-        modules = _memory.enum_process_modules(self.h_proc)
-        base = modules[0]['base_address']
-
-        result = _bp.set_hw_breakpoint(
-            self.h_thr, slot=0, addr=base,
-            condition=0, length=0)  # execute, 1 byte
+        result = _pydbg.set_hw_breakpoint(
+            self.h_thr, slot=0, addr=base, condition=0, length=0
+        )  # execute, 1 byte
         self.assertEqual(result, 0)
 
         # Clean up
-        _bp.clear_hw_breakpoint(self.h_thr, slot=0)
+        _pydbg.clear_hw_breakpoint(self.h_thr, slot=0)
 
     def test_clear_hw_breakpoint(self):
         """Set then clear a breakpoint."""
-        from pydbg.cython import _bp, _memory
+        modules = _pydbg.enum_process_modules(self.h_proc)
+        base = modules[0]["base_address"]
 
-        modules = _memory.enum_process_modules(self.h_proc)
-        base = modules[0]['base_address']
-
-        _bp.set_hw_breakpoint(self.h_thr, 0, base, 0, 0)
-        result = _bp.clear_hw_breakpoint(self.h_thr, 0)
+        _pydbg.set_hw_breakpoint(self.h_thr, 0, base, 0, 0)
+        result = _pydbg.clear_hw_breakpoint(self.h_thr, 0)
         self.assertEqual(result, 0)
 
     def test_invalid_slot(self):
         """Verify invalid slot raises ValueError."""
-        from pydbg.cython import _bp
-
         with self.assertRaises(ValueError):
-            _bp.set_hw_breakpoint(self.h_thr, 5, 0x1000, 0, 0)
+            _pydbg.set_hw_breakpoint(self.h_thr, 5, 0x1000, 0, 0)
 
 
-@unittest.skipUnless(_has_cython, "Requires compiled Cython extensions")
 class TestDebuggerBreakpointAPI(unittest.TestCase):
     """Tests for high-level breakpoint API."""
 
@@ -84,14 +79,14 @@ class TestDebuggerBreakpointAPI(unittest.TestCase):
         # Get a code address
         h_thread = dbg.open_thread(tid)
         regs = dbg.get_registers(h_thread)
-        addr = regs['rip']
+        addr = regs["rip"]
 
         bp_id = dbg.set_breakpoint(addr)
         self.assertGreater(bp_id, 0)
 
         dbg.remove_breakpoint(bp_id)
 
-        _process.close_handle(h_thread)
+        _pydbg.close_handle(h_thread)
         dbg.detach()
         dbg.close_handle(dbg._session.process_handle)
         dbg.close_handle(dbg._session.thread_handle)
@@ -107,18 +102,18 @@ class TestDebuggerBreakpointAPI(unittest.TestCase):
 
         h_thread = dbg.open_thread(tid)
         regs = dbg.get_registers(h_thread)
-        addr = regs['rip']
+        addr = regs["rip"]
 
-        bp_id = dbg.set_hw_breakpoint(addr, 'x', 1, 0)
+        bp_id = dbg.set_hw_breakpoint(addr, "x", 1, 0)
         self.assertGreater(bp_id, 0)
 
         dbg.remove_breakpoint(bp_id)
 
-        _process.close_handle(h_thread)
+        _pydbg.close_handle(h_thread)
         dbg.detach()
         dbg.close_handle(dbg._session.process_handle)
         dbg.close_handle(dbg._session.thread_handle)
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     unittest.main()

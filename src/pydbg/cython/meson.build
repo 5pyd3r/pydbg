@@ -1,32 +1,14 @@
-cython = find_program('cython', required: false)
+# Cython 扩展模块构建
 
-if cython.found()
-  cython_sources = [
-    '_process.pyx',
-    '_memory.pyx',
-    '_thread.pyx',
-    '_exception.pyx',
-    '_bp.pyx',
-  ]
+add_project_arguments('-I', meson.current_source_dir(), language : 'cython')
 
-  # Cython compilation: .pyx -> .c -> .pyd
-  foreach src : cython_sources
-    # Step 1: cythonize .pyx to .c
-    c_file = custom_target(
-      'cython_' + src,
-      input: src,
-      output: src.replace('.pyx', '.c'),
-      command: [cython, '-3', '--fast-fail', '-o', '@OUTPUT@', '@INPUT@'],
-      depend_files: ['_win32types.pxd'],
-    )
-
-    # Step 2: compile .c to shared module (.pyd)
-    py.extension_module(
-      src.replace('.pyx', ''),
-      c_file,
-      c_args: [] + (get_option('buildtype') == 'debug' ? ['-D_DEBUG'] : []),
-      link_args: ['-ldbghelp', '-lkernel32', '-ladvapi32', '-lpsapi'],
-      subdir: 'pydbg/cython',
-    )
-  endforeach
-endif
+# 生成合并的扩展模块
+py.extension_module('_pydbg',
+  '_pydbg.pyx',
+  dependencies: [
+    py.dependency(),
+    declare_dependency(link_args: ['-lkernel32', '-luser32', '-ldbghelp'])
+  ],
+  install: true,
+  subdir: 'pydbg',
+)

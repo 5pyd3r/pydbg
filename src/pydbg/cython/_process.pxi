@@ -47,10 +47,9 @@ cpdef tuple create_process(str path):
 
     path_bytes = path.encode('utf-8')
 
-    cdef bytes cmd_line = path_bytes
     cdef BOOL result = CreateProcessA(
-        <LPCSTR>path_bytes,
-        <char*>cmd_line,
+        <LPCSTR>NULL,
+        <char*>path_bytes,
         NULL, NULL, 0,
         DEBUG_PROCESS | DEBUG_ONLY_THIS_PROCESS,
         NULL, <LPCSTR>NULL,
