@@ -1,28 +1,17 @@
 # Known Issues
 
-## PE Parser (tests/test_pe.py — 6 tests skipped)
+*No known issues at this time.*
 
-PE parser (`pe.py`) fails to correctly parse synthetic PE32+ test data on CI.
-Section names, image base, RVA offsets, exports, and imports are not parsed correctly.
-Tests affected:
+## Resolved
 
-- `TestSyntheticPE.test_parse_optional_header_pe32plus`
-- `TestSyntheticPE.test_parse_sections`
-- `TestRvaConversion.test_rva_to_offset`
-- `TestExportParsing.test_parse_exports`
-- `TestImportParsing.test_parse_imports`
-- `TestRealDLL.test_parse_kernel32`
+### PE Parser (6 tests)
+**Fixed in #9.** PE32+ optional header had incorrect `NumberOfRvaAndSizes` offset (read from 92 instead of 108), wrong section header struct format (`<IIIIIIIHH` → `<IIIIIIHHI`), and test data used PE32 layout (96 bytes) instead of PE32+ (112 bytes). All 20 PE tests pass.
 
-**Status:** Pre-existing. Skipped with `@unittest.skip`.
+### ContinueDebugEvent Error 87 (5 tests)
+**Fixed in #9.** Cross-test event pollution: `terminate_process` and `run()` left unconsumed `EXIT_PROCESS` debug events, poisoning subsequent tests' `wait_event` calls. Fixed by draining debug events after process termination and consuming events until initial breakpoint before interacting with target process.
 
-## ContinueDebugEvent Error 87 (tests/test_debugger.py — 5 tests skipped)
+### Software Breakpoint WriteProcessMemory Error 998
+**Fixed in #9.** `SoftwareBreakpointManager.set()` failed with `ERROR_NOACCESS` when writing int3 byte to code pages without write permission. Fixed by calling `VirtualProtectEx` to set `PAGE_EXECUTE_READWRITE` before writing.
 
-`ContinueDebugEvent` Win32 API returns ERROR_INVALID_PARAMETER (87) on CI runner.
-Tests affected:
-
-- `TestDebuggerAPICompleteness.test_terminate_process`
-- `TestRemoveHwBreakpoint.test_remove_hw_breakpoint`
-- `TestFindBreakpoint.test_find_existing_breakpoint`
-- `TestThreadEnumeration` (entire class, setUp fails)
-
-**Status:** Pre-existing. Possible CI-specific timing issue. Skipped with `@unittest.skip`.
+### All @unittest.skip Decorators
+**Removed in #9.** All 26 skips removed after fixing the underlying issues.

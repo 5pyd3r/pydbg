@@ -1,80 +1,43 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+## 分支与协作规则
 
-## Project Overview
+- **永远不在 master 分支上 commit。** 所有改动必须通过 feature 分支 + PR。
+- Feature 分支命名：`feat/<描述>`、`fix/<描述>`、`refactor/<描述>`
+- AI 绝不 merge PR，只有人能 merge。
+- Merge 后删除 feature 分支：`git branch -d feat/xxx && git push origin --delete feat/xxx`
+- **使用 git worktree 创建隔离工作目录。** 在新分支上工作前，通过 `git worktree add ../d3d_video-<branch> <branch>` 创建隔离目录，避免污染主工作区。完成后提交并推送至 GitHub。
 
-pydbg is a Windows Win32 debugging library providing a high-level Python API over Cython Win32 wrappers. Public API: `from pydbg import Debugger, DebugEvent, ...`.
+## CI 失败处理
 
-## Build & Test (Windows only)
+编译/测试失败时，按分类处理：
+1. **编译错误** — 自动获取 CI 日志（`gh run view <id> --log-failed`），分析原因，修复后重新推送。最多重试 3 次。超过 3 次 → 微信通知用户决策。
+2. **测试失败** — 尝试修复 1 次。失败 → 微信通知用户。确认是环境问题可 GTEST_SKIP 并计入遗留。
+3. **链接/未知错误** — 即时微信通知用户，不自动处理。
 
-```bash
-# Lint
-flake8 src/ tests/ --max-line-length=120
+## 决策分级
 
-# Build
-meson setup build --buildtype=release
-meson compile -C build
+### 自主决策（不通知用户）
+- 命名、实现细节、编译错误修复、测试编写、死代码删除、include 清理
 
-# Test (meson handles PYTHONPATH via test_env in tests/meson.build)
-meson test -C build --print-errorlogs
-```
+### 自主决策 + PR 中记录
+- 新增工具函数、代码重构（不改外部行为）、新测试、依赖小版本更新
 
-[Cython](https://cython.org/) must be installed. Build outputs `.pyd` extensions to `build/src/pydbg/cython/`.
+### 必须微信通知用户
+- 架构变更、新依赖引入/删除、API 破坏性变更、CI 不可自动修复、遗留问题、spec 确认
 
-## Architecture (post-Phase-1 refactoring)
+## PR 规范
 
-```
-Debugger (core/debugger.py) — facade, lifecycle + event loop
-  ├── _session: DebugSession          — pure state dataclass (core/session.py)
-  ├── memory: MemoryManager           — read/write/query/protect (memory/manager.py)
-  ├── thread: ThreadManager           — context/suspend/resume/step (thread/manager.py)
-  ├── brk_sw: SoftwareBreakpointManager — int3 breakpoints (breakpoint/software.py)
-  ├── brk_hw: HardwareBreakpointManager — debug register breakpoints (breakpoint/hardware.py)
-  └── modules: ModuleResolver         — enum modules, resolve filenames (module/resolver.py)
-```
+用户想创建 PR 时自动生成：
+- 标题：`feat/fix/refactor: 简述`
+- 描述：改动摘要（3-5点）、文件列表、CI 链接、自主决策记录、遗留问题
+不使用gh命令创建PR
 
-Public API unchanged. Debugger methods delegate to managers. Managers receive `DebugSession` in constructor and reference `self._s`.
+## 微信通知
 
-Cython wrappers: `src/pydbg/cython/_process.pyx`, `_memory.pyx`, `_thread.pyx`, `_exception.pyx`, `_bp.pyx`.
+- 通过 wechat skill 的 socket_client.py 发送消息
+- 通知类（不等待回复）：CI 状态、PR 创建、分支操作
+- 决策类（等待回复）：架构选择、CI 不可修复、新依赖、spec 确认
+- 用户 merge 后不重复通知
 
-## Test State
 
-- `memory`, `process`, `thread`, `breakpoint`, `pe`, `debugger` test suites
-- 11 tests skipped (pre-existing bugs): PE parser section/export/import parsing, `ContinueDebugEvent` error 87 on CI. See `docs/KNOWN_ISSUES.md`.
-- Tests access `dbg._session.process_handle` etc. instead of old `dbg._process_handle`.
-
-## CI
-
-- Windows runner only (`windows-latest`), Python 3.13
-- Trigger: `pull_request` to `master`/`main`
-- Lint → Build → Test
-
-## Development Workflow
-
-1. Branch from `master` (`git checkout -b <branch-name>`)
-2. Develop, lint locally (`flake8 src/ tests/ --max-line-length=120`)
-3. **NEVER push directly to master.** Push branch, open PR to `master`
-4. CI must pass before merge
-5. `master` is protected (requires PR + status checks)
-
-## WeChat Communication Rule
-
-**All questions, results, and notifications must be sent through WeChat.** Never assume the user sees terminal output.
-Primary developer's WeChat user_id: `o9cq809NAV1dcxqCc69ESmXaDto8@im.wechat`
-
-## WeChat Background Tasks
-
-WeChat bridge daemon runs at `/tmp/wechat-bridge-*.sock`. After every response, start a background listener:
-
-```bash
-python3 /home/ubuntu/.claude/skills/wechat/scripts/socket_client.py wait
-```
-
-Check daemon status: `python3 skills/wechat/scripts/socket_client.py status`. Send messages: `socket_client.py send '{"user_id": "...", "text": "..."}'`.
-
-## Docs
-
-- `docs/superpowers/specs/` — design specs
-- `docs/superpowers/plans/` — implementation plans
-- `docs/KNOWN_ISSUES.md` — pre-existing bugs tracked for future resolution
