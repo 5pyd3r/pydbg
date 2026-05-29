@@ -312,3 +312,40 @@ cdef extern from "windows.h":
 
     # Synchronization
     DWORD WaitForSingleObject(HANDLE hHandle, DWORD dwMilliseconds)
+
+
+cdef extern from "dbghelp.h":
+    DWORD MAX_SYM_NAME
+
+    # Symbol options
+    DWORD SYMOPT_UNDNAME
+    DWORD SYMOPT_DEFERRED_LOADS
+    DWORD SYMOPT_LOAD_LINES
+    DWORD SYMOPT_FAIL_CRITICAL_ERRORS
+
+    ctypedef struct SYMBOL_INFOW:
+        unsigned long SizeOfStruct
+        unsigned long TypeIndex
+        unsigned long long Reserved[2]
+        unsigned long Index
+        unsigned long Size
+        unsigned long long ModBase
+        unsigned long Flags
+        unsigned long long Value
+        unsigned long long Address
+        unsigned long Register
+        unsigned long Scope
+        unsigned long Tag
+        unsigned long NameLen
+        unsigned long MaxNameLen
+        unsigned short Name[1]
+
+    BOOL SymInitializeW(HANDLE hProcess, const unsigned short* UserSearchPath, BOOL fInvadeProcess)
+    BOOL SymCleanup(HANDLE hProcess)
+    BOOL SymFromNameW(HANDLE hProcess, const unsigned short* Name, SYMBOL_INFOW* Symbol)
+    BOOL SymFromAddrW(HANDLE hProcess, DWORD64 Address, DWORD64* Displacement, SYMBOL_INFOW* Symbol)
+    DWORD64 SymLoadModuleExW(HANDLE hProcess, HANDLE hFile,
+        const unsigned short* ImageName, const unsigned short* ModuleName,
+        DWORD64 BaseOfDll, DWORD DllSize, void* Data, DWORD Flags)
+    DWORD SymSetOptions(DWORD SymOptions)
+    DWORD SymGetOptions()

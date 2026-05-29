@@ -13,6 +13,7 @@ from .disasm.engine import DisasmEngine, Instruction
 from .hook.iat import IATHook
 from .hook.inline import InlineHook, Trampoline
 from .trace.step import StepTracer
+from .symbol.resolver import SymbolResolver
 from .trace.calltree import CallTree, CallNode
 from .patch.assembler import Assembler
 from .core.event import DebugEvent
@@ -50,6 +51,7 @@ __all__ = [
     "build_blocks",
     "build_cfg",
     "Assembler",
+    "SymbolResolver",
     "IATHook",
     "InlineHook",
     "Trampoline",

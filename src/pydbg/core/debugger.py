@@ -15,6 +15,7 @@ from ..exceptions import (
 )
 from ..memory.manager import MemoryManager
 from ..module.resolver import ModuleResolver
+from ..symbol.resolver import SymbolResolver
 from ..thread.manager import ThreadManager
 from .event import DebugEvent
 from .session import DebugSession
@@ -30,6 +31,7 @@ class Debugger:
         self.brk_sw = SoftwareBreakpointManager(self._session)
         self.brk_hw = HardwareBreakpointManager(self._session)
         self.modules = ModuleResolver(self._session)
+        self.symbols = SymbolResolver(self._session)
         self.disasm = DisasmEngine(self._session)
         self.assembler = Assembler()
         self.step_tracer = StepTracer(self._session)
