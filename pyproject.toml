@@ -36,3 +36,4 @@ setup = [
 
 [project.optional-dependencies]
 dev = ["pytest", "pytest-cov", "black", "flake8"]
+disasm = ["capstone>=5.0"]
