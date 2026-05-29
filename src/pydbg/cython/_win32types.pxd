@@ -14,6 +14,7 @@ cdef extern from "windows.h":
     ctypedef int BOOL
     ctypedef long LONG
     ctypedef unsigned long long ULONG_PTR
+    ctypedef unsigned long* LPDWORD
     ctypedef unsigned long long DWORD64
     ctypedef char* LPSTR
     ctypedef const char* LPCSTR
@@ -21,6 +22,9 @@ cdef extern from "windows.h":
     ctypedef unsigned char UCHAR
 
     # === Constants ===
+    DWORD WAIT_OBJECT_0
+    DWORD WAIT_TIMEOUT
+    DWORD MEM_RELEASE
     DWORD DEBUG_PROCESS
     DWORD DEBUG_ONLY_THIS_PROCESS
     DWORD CREATE_SUSPENDED
@@ -287,3 +291,24 @@ cdef extern from "tlhelp32.h":
     HANDLE CreateToolhelp32Snapshot(DWORD dwFlags, DWORD th32ProcessID)
     BOOL Thread32First(HANDLE hSnapshot, THREADENTRY32* lpte)
     BOOL Thread32Next(HANDLE hSnapshot, THREADENTRY32* lpte)
+
+
+cdef extern from "windows.h":
+    # Memory allocation in remote process
+    LPVOID VirtualAllocEx(HANDLE hProcess, LPVOID lpAddress,
+                          SIZE_T dwSize, DWORD flAllocationType, DWORD flProtect)
+    BOOL VirtualFreeEx(HANDLE hProcess, LPVOID lpAddress,
+                       SIZE_T dwSize, DWORD dwFreeType)
+
+    # Thread creation in remote process
+    HANDLE CreateRemoteThread(HANDLE hProcess, void* lpThreadAttributes,
+                              SIZE_T dwStackSize, LPVOID lpStartAddress,
+                              LPVOID lpParameter, DWORD dwCreationFlags,
+                              LPDWORD lpThreadId)
+
+    # Module/function resolution
+    void* GetProcAddress(HMODULE hModule, LPCSTR lpProcName)
+    HMODULE GetModuleHandleA(LPCSTR lpModuleName)
+
+    # Synchronization
+    DWORD WaitForSingleObject(HANDLE hHandle, DWORD dwMilliseconds)

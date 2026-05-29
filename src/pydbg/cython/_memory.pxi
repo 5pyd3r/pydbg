@@ -7,10 +7,10 @@ from _win32types cimport (
     HMODULE,
     MEMORY_BASIC_INFORMATION, MODULEINFO,
     ReadProcessMemory, WriteProcessMemory,
-    VirtualQueryEx, VirtualProtectEx,
+    VirtualQueryEx, VirtualProtectEx, VirtualAllocEx, VirtualFreeEx,
     EnumProcessModules, GetModuleFileNameExA,
     GetModuleInformation, GetLastError, CloseHandle,
-    MEM_COMMIT, MEM_RESERVE, MEM_FREE, MEM_PRIVATE,
+    MEM_COMMIT, MEM_RESERVE, MEM_FREE, MEM_RELEASE, MEM_PRIVATE,
     MEM_MAPPED, MEM_IMAGE,
     PAGE_NOACCESS, PAGE_READONLY, PAGE_READWRITE,
     PAGE_EXECUTE, PAGE_EXECUTE_READ, PAGE_EXECUTE_READWRITE,
@@ -156,3 +156,60 @@ cpdef str get_module_file_name_ex(uintptr_t h_process, uintptr_t h_module):
         raise OSError(GetLastError(), "GetModuleFileNameExA failed")
 
     return filename[:len].decode('utf-8', errors='replace')
+
+
+cpdef dict virtual_alloc_ex(uintptr_t h_process, uintptr_t addr,
+                            size_t size, int alloc_type, int protect):
+    """Allocate memory in the remote process.
+
+    Returns dict with base_address. Raises OSError on failure.
+    """
+    cdef LPVOID result = VirtualAllocEx(
+        <HANDLE>h_process,
+        <LPVOID>addr,
+        <SIZE_T>size,
+        <DWORD>alloc_type,
+        <DWORD>protect)
+
+    if result == NULL:
+        raise OSError(GetLastError(), "VirtualAllocEx failed")
+
+    return {'base_address': <uint64_t>result}
+
+
+cpdef int virtual_free_ex(uintptr_t h_process, uintptr_t addr,
+                           size_t size, int free_type):
+    """Free memory in the remote process.
+
+    Returns 0 on success. Raises OSError on failure.
+    """
+    cdef BOOL result = VirtualFreeEx(
+        <HANDLE>h_process,
+        <LPVOID>addr,
+        <SIZE_T>size,
+        <DWORD>free_type)
+
+    if result == 0:
+        raise OSError(GetLastError(), "VirtualFreeEx failed")
+
+    return 0
+
+
+cpdef dict virtual_alloc(uintptr_t h_process, size_t size,
+                          int alloc_type, int protect):
+    """Allocate memory in the remote process (null address).
+
+    Convenience wrapper: always passes NULL for lpAddress.
+    Returns dict with base_address. Raises OSError on failure.
+    """
+    return virtual_alloc_ex(h_process, 0, size, alloc_type, protect)
+
+
+cpdef int virtual_free(uintptr_t h_process, uintptr_t addr,
+                        size_t size, int free_type):
+    """Free memory in the remote process.
+
+    Convenience alias for virtual_free_ex.
+    Returns 0 on success. Raises OSError on failure.
+    """
+    return virtual_free_ex(h_process, addr, size, free_type)
