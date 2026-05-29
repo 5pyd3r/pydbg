@@ -65,3 +65,11 @@ test(
   env: test_env,
   workdir: meson.project_build_root(),
 )
+
+test(
+  'disasm',
+  py,
+  args: ['-m', 'unittest', 'tests.test_disasm'],
+  env: test_env,
+  workdir: meson.project_build_root(),
+)
