@@ -317,15 +317,12 @@ cdef extern from "windows.h":
 cdef extern from "dbghelp.h":
     DWORD MAX_SYM_NAME
 
-<<<<<<< HEAD
     # Symbol options
     DWORD SYMOPT_UNDNAME
     DWORD SYMOPT_DEFERRED_LOADS
     DWORD SYMOPT_LOAD_LINES
     DWORD SYMOPT_FAIL_CRITICAL_ERRORS
 
-=======
->>>>>>> 44d561b (feat(dump): add minidump reader and stack walker via dbghelp.dll)
     ctypedef struct SYMBOL_INFOW:
         unsigned long SizeOfStruct
         unsigned long TypeIndex

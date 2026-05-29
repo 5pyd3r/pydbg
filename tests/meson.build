@@ -97,3 +97,11 @@ test(
   env: test_env,
   workdir: meson.project_build_root(),
 )
+
+test(
+  'dump',
+  py,
+  args: ['-m', 'unittest', 'tests.test_dump'],
+  env: test_env,
+  workdir: meson.project_build_root(),
+)
