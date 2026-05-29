@@ -89,3 +89,11 @@ test(
   env: test_env,
   workdir: meson.project_build_root(),
 )
+
+test(
+  'trace',
+  py,
+  args: ['-m', 'unittest', 'tests.test_trace'],
+  env: test_env,
+  workdir: meson.project_build_root(),
+)
