@@ -10,6 +10,7 @@ from ._pydbg import (
 from .core.debugger import Debugger
 from .disasm.analysis import BasicBlock, CFGEdge, ControlFlowGraph, build_blocks, build_cfg
 from .disasm.engine import DisasmEngine, Instruction
+from .patch.assembler import Assembler
 from .core.event import DebugEvent
 from .exceptions import (
     BreakpointError,
@@ -44,4 +45,5 @@ __all__ = [
     "CFGEdge",
     "build_blocks",
     "build_cfg",
+    "Assembler",
 ]

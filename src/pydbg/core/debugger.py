@@ -3,6 +3,7 @@
 from .. import _pydbg
 from ..breakpoint.hardware import HardwareBreakpointManager
 from ..disasm.engine import DisasmEngine
+from ..patch.assembler import Assembler
 from ..breakpoint.software import SoftwareBreakpointManager
 from ..exceptions import (
     BreakpointError,
@@ -27,6 +28,7 @@ class Debugger:
         self.brk_hw = HardwareBreakpointManager(self._session)
         self.modules = ModuleResolver(self._session)
         self.disasm = DisasmEngine(self._session)
+        self.assembler = Assembler()
 
     # ── lifecycle ──────────────────────────────────────────────
 
@@ -218,6 +220,11 @@ class Debugger:
 
     def disasm_at(self, addr, size):
         return self.disasm.disasm(addr, self.memory.read(addr, size))
+
+    # ── delegated: patch ────────────────────────────────────────
+
+    def assemble(self, code, addr=0):
+        return self.assembler.assemble(code, addr)
 
     # ── exception helpers ──────────────────────────────────────
 
