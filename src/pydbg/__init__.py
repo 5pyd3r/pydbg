@@ -10,6 +10,8 @@ from ._pydbg import (
 from .core.debugger import Debugger
 from .disasm.analysis import BasicBlock, CFGEdge, ControlFlowGraph, build_blocks, build_cfg
 from .disasm.engine import DisasmEngine, Instruction
+from .dump.minidump import MinidumpReader
+from .dump.stackwalk import StackWalker
 from .hook.iat import IATHook
 from .hook.inline import InlineHook, Trampoline
 from .trace.step import StepTracer
@@ -58,4 +60,6 @@ __all__ = [
     "StepTracer",
     "CallTree",
     "CallNode",
+    "MinidumpReader",
+    "StackWalker",
 ]

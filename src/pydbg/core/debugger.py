@@ -3,6 +3,7 @@
 from .. import _pydbg
 from ..breakpoint.hardware import HardwareBreakpointManager
 from ..disasm.engine import DisasmEngine
+from ..dump.stackwalk import StackWalker
 from ..hook.iat import IATHook
 from ..hook.inline import InlineHook
 from ..patch.assembler import Assembler
@@ -37,6 +38,7 @@ class Debugger:
         self.step_tracer = StepTracer(self._session)
         self.hook_iat = IATHook(self._session)
         self.hook_inline = InlineHook(self._session)
+        self.stack_walker = StackWalker(self._session)
 
     # ── lifecycle ──────────────────────────────────────────────
 
