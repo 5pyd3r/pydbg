@@ -1,11 +1,13 @@
 # _process.pyx — Win32 process debugging API
 
 from _win32types cimport (
-    HANDLE, DWORD, BOOL, LPVOID, SIZE_T, LPCSTR,
+    HANDLE, DWORD, BOOL, LPVOID, SIZE_T, LPCSTR, LPDWORD, HMODULE,
     DEBUG_EVENT, STARTUPINFOA, PROCESS_INFORMATION,
     CreateProcessA, WaitForDebugEvent, ContinueDebugEvent,
     DebugActiveProcess, DebugActiveProcessStop,
     GetExitCodeProcess, TerminateProcess, OpenProcess,
+    CreateRemoteThread, GetProcAddress, GetModuleHandleA,
+    WaitForSingleObject,
     CloseHandle, GetLastError,
     DEBUG_PROCESS, DEBUG_ONLY_THIS_PROCESS, INFINITE,
     DBG_CONTINUE, DBG_EXCEPTION_NOT_HANDLED,
@@ -14,6 +16,7 @@ from _win32types cimport (
     EXIT_THREAD_DEBUG_EVENT, LOAD_DLL_DEBUG_EVENT,
     UNLOAD_DLL_DEBUG_EVENT, EXCEPTION_ACCESS_VIOLATION,
     EXCEPTION_BREAKPOINT, EXCEPTION_SINGLE_STEP,
+    WAIT_OBJECT_0, WAIT_TIMEOUT,
 )
 
 from libc.string cimport memset
@@ -172,3 +175,68 @@ cpdef void close_handle(unsigned long long h_handle):
     cdef BOOL result = CloseHandle(<HANDLE><LPVOID>h_handle)
     if result == 0:
         raise OSError(GetLastError(), "CloseHandle failed")
+
+
+cpdef tuple create_remote_thread(unsigned long long h_process,
+                                  unsigned long long start_addr,
+                                  unsigned long long param, int flags=0):
+    """Create a thread in the remote process.
+
+    Returns (tid, h_thread). Raises OSError on failure.
+    """
+    cdef DWORD tid = 0
+    cdef HANDLE h_thread = CreateRemoteThread(
+        <HANDLE><LPVOID>h_process,
+        NULL,
+        0,
+        <LPVOID>start_addr,
+        <LPVOID>param,
+        <DWORD>flags,
+        &tid)
+
+    if h_thread == NULL:
+        raise OSError(GetLastError(), "CreateRemoteThread failed")
+
+    return (<int>tid, <unsigned long long>h_thread)
+
+
+cpdef unsigned long long get_proc_address(unsigned long long h_module, str proc_name):
+    """Get the address of an exported function.
+
+    Returns the function address. Raises OSError on failure.
+    """
+    cdef bytes name_bytes = proc_name.encode('utf-8')
+    cdef void* addr = GetProcAddress(<HMODULE><LPVOID>h_module, <LPCSTR>name_bytes)
+
+    if addr == NULL:
+        raise OSError(GetLastError(), f"GetProcAddress failed for '{proc_name}'")
+
+    return <unsigned long long>addr
+
+
+cpdef unsigned long long get_module_handle(str module_name):
+    """Get the handle (base address) of a loaded module.
+
+    Returns the module handle. Raises OSError on failure.
+    """
+    cdef bytes name_bytes = module_name.encode('utf-8')
+    cdef HMODULE h_mod = GetModuleHandleA(<LPCSTR>name_bytes)
+
+    if h_mod == NULL:
+        raise OSError(GetLastError(), f"GetModuleHandleA failed for '{module_name}'")
+
+    return <unsigned long long>h_mod
+
+
+cpdef int wait_for_single_object(unsigned long long h_handle, int timeout_ms=10000):
+    """Wait for an object (thread, process, etc.) to become signaled.
+
+    Returns WAIT_OBJECT_0 (0) if signaled, WAIT_TIMEOUT (258) on timeout.
+    Raises OSError on failure.
+    """
+    cdef DWORD result = WaitForSingleObject(<HANDLE><LPVOID>h_handle, <DWORD>timeout_ms)
+
+    if result == <DWORD>0xFFFFFFFF:  # WAIT_FAILED
+        raise OSError(GetLastError(), "WaitForSingleObject failed")
+
+    return <int>result
