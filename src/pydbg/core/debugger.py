@@ -6,6 +6,7 @@ from ..disasm.engine import DisasmEngine
 from ..hook.iat import IATHook
 from ..hook.inline import InlineHook
 from ..patch.assembler import Assembler
+from ..trace.step import StepTracer
 from ..breakpoint.software import SoftwareBreakpointManager
 from ..exceptions import (
     BreakpointError,
@@ -31,6 +32,7 @@ class Debugger:
         self.modules = ModuleResolver(self._session)
         self.disasm = DisasmEngine(self._session)
         self.assembler = Assembler()
+        self.step_tracer = StepTracer(self._session)
         self.hook_iat = IATHook(self._session)
         self.hook_inline = InlineHook(self._session)
 
@@ -229,6 +231,9 @@ class Debugger:
 
     def assemble(self, code, addr=0):
         return self.assembler.assemble(code, addr)
+
+    def step_trace(self, h_thread):
+        self.step_tracer.step(h_thread)
 
     # ── delegated: hook ─────────────────────────────────────────
 

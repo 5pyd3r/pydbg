@@ -12,6 +12,8 @@ from .disasm.analysis import BasicBlock, CFGEdge, ControlFlowGraph, build_blocks
 from .disasm.engine import DisasmEngine, Instruction
 from .hook.iat import IATHook
 from .hook.inline import InlineHook, Trampoline
+from .trace.step import StepTracer
+from .trace.calltree import CallTree, CallNode
 from .patch.assembler import Assembler
 from .core.event import DebugEvent
 from .exceptions import (
@@ -51,4 +53,7 @@ __all__ = [
     "IATHook",
     "InlineHook",
     "Trampoline",
+    "StepTracer",
+    "CallTree",
+    "CallNode",
 ]
