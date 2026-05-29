@@ -349,3 +349,59 @@ cdef extern from "dbghelp.h":
         DWORD64 BaseOfDll, DWORD DllSize, void* Data, DWORD Flags)
     DWORD SymSetOptions(DWORD SymOptions)
     DWORD SymGetOptions()
+
+    # Minidump stream types
+    DWORD MiniDumpReadDumpStream
+
+    ctypedef struct MINIDUMP_DIRECTORY:
+        unsigned long StreamType
+        unsigned long Location_DataSize
+        unsigned long Location_Rva
+        unsigned long long Location_DataSize_high
+        unsigned long long Location_Rva_high
+
+    BOOL MiniDumpReadDumpStream(void* BaseOfDump, unsigned long StreamNumber,
+                                MINIDUMP_DIRECTORY** Dir, void** StreamPointer,
+                                unsigned long* StreamSize)
+
+    # Stack walk
+    ctypedef struct ADDRESS64:
+        unsigned long long Offset
+        unsigned short Segment
+        unsigned long Mode
+
+    ctypedef struct KDHELP64:
+        unsigned long long Thread
+        unsigned long ThCallbackStack
+        unsigned long ThCallbackBStore
+        unsigned long NextCallback
+        unsigned long FramePointer
+        unsigned long long KiCallUserMode
+        unsigned long long KeUserCallbackDispatcher
+        unsigned long long SystemRangeStart
+        unsigned long long KiUserExceptionDispatcher
+        unsigned long long StackBase
+        unsigned long long StackLimit
+        unsigned long long BuildVersion
+        unsigned long long Reserved0
+        unsigned long long Reserved1[4]
+
+    ctypedef struct STACKFRAME64:
+        ADDRESS64 AddrPC
+        ADDRESS64 AddrReturn
+        ADDRESS64 AddrFrame
+        ADDRESS64 AddrStack
+        ADDRESS64 AddrBStore
+        void* FuncTableEntry
+        unsigned long long Params[4]
+        int Far
+        int Virtual
+        unsigned long long Reserved[3]
+        KDHELP64 KdHelp
+
+    BOOL StackWalk64(unsigned long MachineType, HANDLE hProcess, HANDLE hThread,
+                     STACKFRAME64* StackFrame, void* ContextRecord,
+                     void* ReadMemoryRoutine, void* FunctionTableAccessRoutine,
+                     void* GetModuleBaseRoutine, void* TranslateAddress)
+
+    void* SymFunctionTableAccess64(HANDLE hProcess, unsigned long long AddrBase)
