@@ -3,6 +3,8 @@
 from .. import _pydbg
 from ..breakpoint.hardware import HardwareBreakpointManager
 from ..disasm.engine import DisasmEngine
+from ..hook.iat import IATHook
+from ..hook.inline import InlineHook
 from ..patch.assembler import Assembler
 from ..breakpoint.software import SoftwareBreakpointManager
 from ..exceptions import (
@@ -29,6 +31,8 @@ class Debugger:
         self.modules = ModuleResolver(self._session)
         self.disasm = DisasmEngine(self._session)
         self.assembler = Assembler()
+        self.hook_iat = IATHook(self._session)
+        self.hook_inline = InlineHook(self._session)
 
     # ── lifecycle ──────────────────────────────────────────────
 
@@ -225,6 +229,20 @@ class Debugger:
 
     def assemble(self, code, addr=0):
         return self.assembler.assemble(code, addr)
+
+    # ── delegated: hook ─────────────────────────────────────────
+
+    def iat_hook(self, module, func, new_addr):
+        return self.hook_iat.set(module, func, new_addr)
+
+    def iat_unhook(self, module, func, original_addr=None):
+        return self.hook_iat.restore(module, func, original_addr)
+
+    def inline_hook(self, target_addr, hook_addr):
+        return self.hook_inline.set(target_addr, hook_addr)
+
+    def inline_unhook(self, trampoline):
+        return self.hook_inline.restore(trampoline)
 
     # ── exception helpers ──────────────────────────────────────
 
