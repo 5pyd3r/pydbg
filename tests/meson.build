@@ -81,3 +81,11 @@ test(
   env: test_env,
   workdir: meson.project_build_root(),
 )
+
+test(
+  'hook',
+  py,
+  args: ['-m', 'unittest', 'tests.test_hook'],
+  env: test_env,
+  workdir: meson.project_build_root(),
+)
