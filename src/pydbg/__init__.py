@@ -8,6 +8,8 @@ from ._pydbg import (
     EXCEPTION_WRITE_FAULT,
 )
 from .core.debugger import Debugger
+from .disasm.analysis import BasicBlock, CFGEdge, ControlFlowGraph, build_blocks, build_cfg
+from .disasm.engine import DisasmEngine, Instruction
 from .core.event import DebugEvent
 from .exceptions import (
     BreakpointError,
@@ -35,4 +37,11 @@ __all__ = [
     "EXCEPTION_READ_FAULT",
     "EXCEPTION_WRITE_FAULT",
     "EXCEPTION_EXECUTE_FAULT",
+    "DisasmEngine",
+    "Instruction",
+    "BasicBlock",
+    "ControlFlowGraph",
+    "CFGEdge",
+    "build_blocks",
+    "build_cfg",
 ]

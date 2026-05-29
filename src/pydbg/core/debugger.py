@@ -2,6 +2,7 @@
 
 from .. import _pydbg
 from ..breakpoint.hardware import HardwareBreakpointManager
+from ..disasm.engine import DisasmEngine
 from ..breakpoint.software import SoftwareBreakpointManager
 from ..exceptions import (
     BreakpointError,
@@ -25,6 +26,7 @@ class Debugger:
         self.brk_sw = SoftwareBreakpointManager(self._session)
         self.brk_hw = HardwareBreakpointManager(self._session)
         self.modules = ModuleResolver(self._session)
+        self.disasm = DisasmEngine(self._session)
 
     # ── lifecycle ──────────────────────────────────────────────
 
@@ -211,6 +213,11 @@ class Debugger:
 
     def find_breakpoint(self, addr):
         return self.brk_sw.find(addr) or self.brk_hw.find(addr)
+
+    # ── delegated: disasm ───────────────────────────────────────
+
+    def disasm_at(self, addr, size):
+        return self.disasm.disasm(addr, self.memory.read(addr, size))
 
     # ── exception helpers ──────────────────────────────────────
 
