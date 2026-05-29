@@ -73,3 +73,11 @@ test(
   env: test_env,
   workdir: meson.project_build_root(),
 )
+
+test(
+  'patch',
+  py,
+  args: ['-m', 'unittest', 'tests.test_patch'],
+  env: test_env,
+  workdir: meson.project_build_root(),
+)
