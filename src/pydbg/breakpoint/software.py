@@ -17,10 +17,14 @@ class SoftwareBreakpointManager:
         try:
             original = _pydbg.read_process_memory(self._s.process_handle, addr, 1)
             # Make page writable before writing int3
-            _pydbg.virtual_protect_ex(
+            old_prot = _pydbg.virtual_protect_ex(
                 self._s.process_handle, addr, 1, self._PAGE_EXECUTE_READWRITE
             )
             _pydbg.write_process_memory(self._s.process_handle, addr, b"\xcc")
+            # Restore original page protection
+            _pydbg.virtual_protect_ex(
+                self._s.process_handle, addr, 1, old_prot
+            )
         except OSError as e:
             raise BreakpointError(f"set_breakpoint at 0x{addr:X}: {e}")
 
@@ -41,11 +45,15 @@ class SoftwareBreakpointManager:
 
         _, addr, original = bp_info
         try:
-            # Ensure page is writable before restoring original byte
-            _pydbg.virtual_protect_ex(
+            # Make page writable before restoring original byte
+            old_prot = _pydbg.virtual_protect_ex(
                 self._s.process_handle, addr, 1, self._PAGE_EXECUTE_READWRITE
             )
             _pydbg.write_process_memory(self._s.process_handle, addr, original)
+            # Restore original page protection
+            _pydbg.virtual_protect_ex(
+                self._s.process_handle, addr, 1, old_prot
+            )
         except OSError as e:
             raise BreakpointError(f"remove_breakpoint at 0x{addr:X}: {e}")
 

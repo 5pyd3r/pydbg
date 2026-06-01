@@ -4,16 +4,12 @@ test_target = executable(
   'target/simple_target.c',
 )
 
-# Common environment: PYTHONPATH includes project root (for tests), source (pure Python), and build (compiled extensions)
+# Common environment: PYTHONPATH includes project root (for tests).
+# The editable install (pip install -e .) handles pydbg package discovery,
+# including the compiled Cython extension at the correct import path.
 test_env = environment()
 test_env.prepend('PYTHONPATH',
   meson.project_source_root()
-)
-test_env.prepend('PYTHONPATH',
-  meson.project_source_root() / 'src'
-)
-test_env.prepend('PYTHONPATH',
-  meson.project_build_root() / 'src'
 )
 test_env.set('TEST_TARGET_PATH', test_target.full_path())
 

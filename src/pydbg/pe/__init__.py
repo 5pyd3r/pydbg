@@ -48,29 +48,36 @@ class PE:
         from .parser import PEParser
 
         source = FileSource(path)
-        parser = PEParser(source, None)
+        try:
+            parser = PEParser(source, None)
 
-        dos = parser.parse_dos_header()
-        file_hdr, opt_hdr, sections_offset = parser.parse_nt_headers(dos.e_lfanew)
+            dos = parser.parse_dos_header()
+            file_hdr, opt_hdr, sections_offset = parser.parse_nt_headers(dos.e_lfanew)
 
-        data_dirs = opt_hdr.data_directories
-        magic = opt_hdr.magic
+            data_dirs = opt_hdr.data_directories
+            magic = opt_hdr.magic
 
-        sections = parser.parse_sections(sections_offset, file_hdr.number_of_sections)
-        view = FileView(sections)
-        parser = PEParser(source, view)
+            sections = parser.parse_sections(sections_offset, file_hdr.number_of_sections)
+            view = FileView(sections)
+            parser = PEParser(source, view)
 
-        pe = PE.__new__(PE)
-        pe._source = source
-        pe._parser = parser
-        pe._view = view
-        pe.dos_header = dos
-        pe.file_header = file_hdr
-        pe.optional_header = opt_hdr
-        pe.sections = sections
-        pe.exports = parser.parse_exports(data_dirs)
-        pe.imports = parser.parse_imports(data_dirs, magic)
-        return pe
+            pe = PE.__new__(PE)
+            pe._source = source
+            pe._parser = parser
+            pe._view = view
+            pe.dos_header = dos
+            pe.file_header = file_hdr
+            pe.optional_header = opt_hdr
+            pe.sections = sections
+            pe.exports = parser.parse_exports(data_dirs)
+            pe.imports = parser.parse_imports(data_dirs, magic)
+
+            # All parsing done — close file handle immediately
+            source.close()
+            return pe
+        except Exception:
+            source.close()
+            raise
 
 
 __all__ = [
