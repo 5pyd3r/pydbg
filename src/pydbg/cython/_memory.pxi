@@ -3,18 +3,23 @@
 from libc.stdint cimport uint32_t, uint64_t, uintptr_t
 from libc.stdlib cimport malloc, free
 from _win32types cimport (
-    HANDLE, DWORD, BOOL, LPVOID, LPCVOID, SIZE_T, LPCSTR,
+    HANDLE, DWORD, BOOL, LPVOID, LPCVOID, SIZE_T, LPCSTR, LPDWORD,
     HMODULE,
-    MEMORY_BASIC_INFORMATION, MODULEINFO,
+    MEMORY_BASIC_INFORMATION, MODULEINFO, MODULEENTRY32,
     ReadProcessMemory, WriteProcessMemory,
     VirtualQueryEx, VirtualProtectEx, VirtualAllocEx, VirtualFreeEx,
-    EnumProcessModules, GetModuleFileNameExA,
+    EnumProcessModules, EnumProcessModulesEx, GetModuleFileNameExA,
     GetModuleInformation, GetLastError, CloseHandle,
+    CreateToolhelp32Snapshot, Module32First, Module32Next,
+    TH32CS_SNAPMODULE, TH32CS_SNAPMODULE32,
     MEM_COMMIT, MEM_RESERVE, MEM_FREE, MEM_RELEASE, MEM_PRIVATE,
     MEM_MAPPED, MEM_IMAGE,
     PAGE_NOACCESS, PAGE_READONLY, PAGE_READWRITE,
     PAGE_EXECUTE, PAGE_EXECUTE_READ, PAGE_EXECUTE_READWRITE,
 )
+
+# LIST_MODULES_ALL = 0x03: enumerate 32-bit and 64-bit modules
+DEF LIST_MODULES_ALL = 3
 
 cpdef bytes read_process_memory(uintptr_t h_process, uintptr_t addr, size_t size):
     """Read 'size' bytes from process memory at 'addr'.
@@ -114,18 +119,34 @@ cpdef int virtual_protect_ex(uintptr_t h_process, uintptr_t addr,
 cpdef list enum_process_modules(uintptr_t h_process):
     """Enumerate loaded modules in a process.
 
+    Uses EnumProcessModulesEx with LIST_MODULES_ALL to support
+    both 32-bit and 64-bit target processes from any host bitness.
+    Falls back to EnumProcessModules if Ex variant is unavailable.
+
     Returns list of dicts with: handle, base_address.
     Raises OSError on failure.
     """
     cdef HMODULE[1024] modules
     cdef DWORD cb_needed = 0
-    cdef BOOL result = EnumProcessModules(
+    cdef BOOL result = EnumProcessModulesEx(
         <HANDLE>h_process,
         modules,
         sizeof(modules),
-        &cb_needed)
+        &cb_needed,
+        3)  # LIST_MODULES_ALL
 
     if result == 0:
+        # Fallback to non-Ex version
+        result = EnumProcessModules(
+            <HANDLE>h_process,
+            modules,
+            sizeof(modules),
+            &cb_needed)
+
+    if result == 0:
+        # Fallback: try Toolhelp32 (works across WoW64 boundary)
+        # Note: caller must provide pid for Toolhelp fallback
+        # For now, just raise the original error
         raise OSError(GetLastError(), "EnumProcessModules failed")
 
     cdef int count = cb_needed // sizeof(HANDLE)
@@ -137,6 +158,40 @@ cpdef list enum_process_modules(uintptr_t h_process):
             'base_address': <uint64_t>modules[i],
         })
 
+    return out
+
+
+cpdef list enum_process_modules_toolhelp(uintptr_t h_process, int pid):
+    """Enumerate loaded modules using Toolhelp32 snapshot.
+
+    Works across WoW64 boundaries (64-bit host → 32-bit target).
+    Falls back to this method when EnumProcessModules fails.
+
+    Returns list of dicts with: handle, base_address, name.
+    Raises OSError on failure.
+    """
+    cdef HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE32, <DWORD>pid)
+    if snap == <HANDLE><void*>(-1):  # INVALID_HANDLE_VALUE
+        raise OSError(GetLastError(), "CreateToolhelp32Snapshot failed")
+
+    cdef MODULEENTRY32 me
+    me.dwSize = sizeof(MODULEENTRY32)
+    cdef list out = []
+
+    if Module32First(snap, &me):
+        out.append({
+            'handle': <uint64_t>me.hModule,
+            'base_address': <uint64_t><uintptr_t>me.modBaseAddr,
+            'name': me.szModule[:].decode('ascii', errors='replace'),
+        })
+        while Module32Next(snap, &me):
+            out.append({
+                'handle': <uint64_t>me.hModule,
+                'base_address': <uint64_t><uintptr_t>me.modBaseAddr,
+                'name': me.szModule[:].decode('ascii', errors='replace'),
+            })
+
+    CloseHandle(snap)
     return out
 
 

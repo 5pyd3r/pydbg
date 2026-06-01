@@ -235,11 +235,14 @@ cdef extern from "windows.h":
 
 cdef extern from "psapi.h":
     BOOL EnumProcessModules(HANDLE hProcess, HMODULE* lphModule, DWORD cb, DWORD* lpcbNeeded)
+    BOOL EnumProcessModulesEx(HANDLE hProcess, HMODULE* lphModule, DWORD cb, LPDWORD lpcbNeeded, DWORD dwFilterFlag)
     DWORD GetModuleFileNameExA(HANDLE hProcess, HMODULE hModule, char* lpFilename, DWORD nSize)
     BOOL GetModuleInformation(HANDLE hProcess, HMODULE hModule, MODULEINFO* lpmodinfo, DWORD cb)
 
 cdef extern from "tlhelp32.h":
     DWORD TH32CS_SNAPTHREAD
+    DWORD TH32CS_SNAPMODULE
+    DWORD TH32CS_SNAPMODULE32
 
     ctypedef struct THREADENTRY32:
         DWORD dwSize
@@ -250,9 +253,23 @@ cdef extern from "tlhelp32.h":
         LONG tpDeltaPri
         DWORD dwFlags
 
+    ctypedef struct MODULEENTRY32:
+        DWORD dwSize
+        DWORD th32ModuleID
+        DWORD th32ProcessID
+        DWORD GlblcntUsage
+        DWORD ProccntUsage
+        unsigned char* modBaseAddr
+        DWORD modBaseSize
+        HANDLE hModule
+        char szModule[256]
+        char szExePath[260]
+
     HANDLE CreateToolhelp32Snapshot(DWORD dwFlags, DWORD th32ProcessID)
     BOOL Thread32First(HANDLE hSnapshot, THREADENTRY32* lpte)
     BOOL Thread32Next(HANDLE hSnapshot, THREADENTRY32* lpte)
+    BOOL Module32First(HANDLE hSnapshot, MODULEENTRY32* lpte)
+    BOOL Module32Next(HANDLE hSnapshot, MODULEENTRY32* lpte)
 
 
 cdef extern from "windows.h":
