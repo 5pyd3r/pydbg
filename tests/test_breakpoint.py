@@ -91,6 +91,47 @@ class TestDebuggerBreakpointAPI(unittest.TestCase):
         dbg.close_handle(dbg._session.process_handle)
         dbg.close_handle(dbg._session.thread_handle)
 
+    def test_breakpoint_restores_page_protection(self):
+        """Verify set/remove int3 restores original page protection."""
+        from pydbg import Debugger
+
+        dbg = Debugger()
+        pid, tid = dbg.create_process(TEST_TARGET_PATH)
+        dbg.wait_event(5000)
+        dbg.continue_event(pid, tid)
+
+        # Consume events until initial breakpoint
+        for _ in range(50):
+            event = dbg.wait_event(2000)
+            if event is None or event.type == "EXIT_PROCESS":
+                break
+            if event.type == "EXCEPTION":
+                break
+            dbg.continue_event(event.pid, event.tid)
+
+        modules = dbg.enum_modules()
+        base = modules[0]["base_address"]
+
+        # Record protection before setting breakpoint
+        prot_before = dbg.query_memory(base)
+        original_prot = prot_before["protect"]
+
+        # Set breakpoint and verify protection is restored after
+        bp_id = dbg.set_breakpoint(base)
+        prot_after_set = dbg.query_memory(base)
+        self.assertEqual(prot_after_set["protect"], original_prot,
+                         "Page protection should be restored after set_breakpoint")
+
+        # Remove breakpoint and verify protection is still correct
+        dbg.remove_breakpoint(bp_id)
+        prot_after_remove = dbg.query_memory(base)
+        self.assertEqual(prot_after_remove["protect"], original_prot,
+                         "Page protection should be restored after remove_breakpoint")
+
+        dbg.terminate_process(0)
+        dbg.close_handle(dbg._session.process_handle)
+        dbg.close_handle(dbg._session.thread_handle)
+
     def test_set_hw_breakpoint_via_api(self):
         """Set hw breakpoint via high-level API."""
         from pydbg import Debugger
