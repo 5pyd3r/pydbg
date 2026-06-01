@@ -5,11 +5,11 @@ from _win32types cimport (
     DEBUG_EVENT, STARTUPINFOA, PROCESS_INFORMATION,
     CreateProcessA, WaitForDebugEvent, ContinueDebugEvent,
     DebugActiveProcess, DebugActiveProcessStop,
-    GetExitCodeProcess, TerminateProcess, OpenProcess,
+    GetExitCodeProcess, GetExitCodeThread, TerminateProcess, OpenProcess,
     CreateRemoteThread, GetProcAddress, GetModuleHandleA,
     WaitForSingleObject,
     CloseHandle, GetLastError,
-    DEBUG_PROCESS, DEBUG_ONLY_THIS_PROCESS, INFINITE,
+    DEBUG_PROCESS, DEBUG_ONLY_THIS_PROCESS, CREATE_SUSPENDED, INFINITE,
     DBG_CONTINUE, DBG_EXCEPTION_NOT_HANDLED,
     EXCEPTION_DEBUG_EVENT, CREATE_PROCESS_DEBUG_EVENT,
     CREATE_THREAD_DEBUG_EVENT, EXIT_PROCESS_DEBUG_EVENT,
@@ -60,6 +60,44 @@ cpdef tuple create_process(str path):
 
     if result == 0:
         raise OSError(GetLastError(), "CreateProcessA failed")
+
+    cdef DWORD pid = pi.dwProcessId
+    cdef DWORD tid = pi.dwThreadId
+    cdef unsigned long long h_proc = <unsigned long long>pi.hProcess
+    cdef unsigned long long h_thr = <unsigned long long>pi.hThread
+
+    return (pid, tid, h_proc, h_thr)
+
+
+cpdef tuple create_process_suspended(str path):
+    """Create a process in suspended state (no debug control).
+
+    The main thread is created but does not execute. Caller is
+    responsible for resuming the thread after injection.
+
+    Returns (pid, tid, h_process, h_thread).
+    Raises OSError on failure.
+    """
+    cdef PROCESS_INFORMATION pi
+    cdef STARTUPINFOA si
+    cdef bytes path_bytes
+
+    memset(&si, 0, sizeof(si))
+    si.cb = sizeof(si)
+    memset(&pi, 0, sizeof(pi))
+
+    path_bytes = path.encode('utf-8')
+
+    cdef BOOL result = CreateProcessA(
+        <LPCSTR>NULL,
+        <char*>path_bytes,
+        NULL, NULL, 0,
+        CREATE_SUSPENDED,
+        NULL, <LPCSTR>NULL,
+        &si, &pi)
+
+    if result == 0:
+        raise OSError(GetLastError(), "CreateProcessA failed (suspended)")
 
     cdef DWORD pid = pi.dwProcessId
     cdef DWORD tid = pi.dwThreadId
@@ -157,6 +195,20 @@ cpdef int get_exit_code(unsigned long long h_process):
     return exit_code
 
 
+cpdef int get_exit_code_thread(unsigned long long h_thread):
+    """Get the exit code of a thread.
+
+    For threads created via CreateRemoteThread, this returns the
+    return value of the thread function (e.g., LoadLibraryA result).
+    Raises OSError on failure.
+    """
+    cdef DWORD exit_code
+    cdef BOOL result = GetExitCodeThread(<HANDLE><LPVOID>h_thread, &exit_code)
+    if result == 0:
+        raise OSError(GetLastError(), "GetExitCodeThread failed")
+    return exit_code
+
+
 cpdef void terminate_process(unsigned long long h_process, int exit_code=1):
     """Terminate a process.
 
@@ -165,6 +217,18 @@ cpdef void terminate_process(unsigned long long h_process, int exit_code=1):
     cdef BOOL result = TerminateProcess(<HANDLE><LPVOID>h_process, <unsigned int>exit_code)
     if result == 0:
         raise OSError(GetLastError(), "TerminateProcess failed")
+
+
+cpdef unsigned long long open_process(int pid, int access=0x1F0FFF):
+    """Open a process by PID.
+
+    Default access: PROCESS_ALL_ACCESS (0x1F0FFF).
+    Returns process handle. Raises OSError on failure.
+    """
+    cdef HANDLE h_proc = OpenProcess(<DWORD>access, 0, <DWORD>pid)
+    if h_proc == NULL:
+        raise OSError(GetLastError(), f"OpenProcess failed for pid {pid}")
+    return <unsigned long long>h_proc
 
 
 cpdef void close_handle(unsigned long long h_handle):
