@@ -12,19 +12,20 @@ HookManager          — 统一接口，事件循环分发
 
 ## 核心原理
 
-### Inline Hook
+### Inline Hook（JMP + trampoline）
 
 ```
-原始函数:  [被覆盖的指令(≥5B)] [后续指令...]
-Trampoline: [被覆盖的指令] [JMP回原始函数+偏移]  ← 可执行内存
+原始函数:  [JMP rel32 → trampoline] [后续指令...]
+Trampoline: [被覆盖的指令(偏移已修正)] [JMP rel32 → 原函数+N]
 Hook回调:   Python函数，接收 (dbg, event, hook_info, mgr)
 ```
 
-1. 读取目标地址的指令，累计 ≥ 5 字节（一条 JMP rel32 的最小长度）
-2. 在远程进程分配 RWX 内存，写入：被覆盖的指令 + 间接 JMP 回原函数
-3. 设置断点（INT3）在目标地址
-4. 断点触发 → Python 回调执行
-5. `call_original()`：恢复原始字节，设置 RIP = 目标地址，原函数从头执行
+1. 读取目标地址的指令，累计 ≥ 5 字节
+2. 修正相对指令偏移（CALL/JMP/Jcc 的 rel32 需要重算目标地址）
+3. 在 ±2GB 范围内分配 RWX 内存，写入：修正后的指令 + JMP 回原函数
+4. 覆盖目标地址：`E9 rel32`（JMP 到 trampoline）
+5. 在 trampoline 入口设断点 → 触发 Python 回调
+6. `call_original()`：移除断点，RIP = trampoline → 原函数正常执行
 
 ### IAT Hook
 
