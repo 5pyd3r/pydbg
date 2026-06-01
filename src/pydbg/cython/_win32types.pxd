@@ -248,6 +248,7 @@ cdef extern from "windows.h":
     BOOL DebugActiveProcess(DWORD dwProcessId)
     BOOL DebugActiveProcessStop(DWORD dwProcessId)
     BOOL GetExitCodeProcess(HANDLE hProcess, DWORD* lpExitCode)
+    BOOL GetExitCodeThread(HANDLE hThread, DWORD* lpExitCode)
     BOOL TerminateProcess(HANDLE hProcess, unsigned int uExitCode)
     HANDLE OpenProcess(DWORD dwDesiredAccess, BOOL bInheritHandle, DWORD dwProcessId)
     BOOL CloseHandle(HANDLE hObject)
