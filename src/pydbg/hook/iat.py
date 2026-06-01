@@ -82,11 +82,12 @@ class IATHook:
         if base == 0:
             return None
         try:
-            from ..pe import PeReader
-            pe = PeReader.from_bytes(mem.read(base, 4096))
-            for imp in pe.imports():
-                if imp.name and imp.name.decode('ascii', errors='ignore').lower() == func_name.lower():
-                    return imp.iat_rva + base
+            from ..pe import PE
+            # Read enough data to cover headers + section table + import directory
+            pe = PE(mem.read(base, 0x10000))
+            for imp in pe.imports:
+                if imp.name and imp.name.lower() == func_name.lower():
+                    return imp.rva
         except Exception:
             pass
         return None
