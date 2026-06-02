@@ -116,11 +116,18 @@ cpdef int virtual_protect_ex(uintptr_t h_process, uintptr_t addr,
     return old_protect
 
 
-cpdef list enum_process_modules(uintptr_t h_process):
+cpdef list enum_process_modules(uintptr_t h_process, int filter_flag=3):
     """Enumerate loaded modules in a process.
 
-    Uses EnumProcessModulesEx with LIST_MODULES_ALL to support
-    both 32-bit and 64-bit target processes from any host bitness.
+    Uses EnumProcessModulesEx with configurable filter flag:
+      0 = LIST_MODULES_DEFAULT (same as EnumProcessModules)
+      1 = LIST_MODULES_32BIT (only 32-bit modules — use for WoW64 targets)
+      2 = LIST_MODULES_64BIT (only 64-bit modules)
+      3 = LIST_MODULES_ALL (all modules, default)
+
+    For 32-bit WoW64 targets from a 64-bit host, pass filter_flag=1
+    to get correct 32-bit module addresses.
+
     Falls back to EnumProcessModules if Ex variant is unavailable.
 
     Returns list of dicts with: handle, base_address.
@@ -133,7 +140,7 @@ cpdef list enum_process_modules(uintptr_t h_process):
         modules,
         sizeof(modules),
         &cb_needed,
-        3)  # LIST_MODULES_ALL
+        <DWORD>filter_flag)
 
     if result == 0:
         # Fallback to non-Ex version

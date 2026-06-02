@@ -4,7 +4,7 @@
 
 1. pydbg PE 解析器分析 PE 结构
 2. Capstone 反汇编解压桩代码（Section 1）
-3. 编写 32 位 injector.exe（C 程序）绕过 WoW64 边界限制
+3. 使用 pydbg `dll_injector.py` 注入 DLL（CreateRemoteThread + LoadLibraryA）
 4. 注入 32 位进程，dump 解密后的 Section 0
 5. Capstone 完整反汇编 DllMain 及所有子函数
 
@@ -129,12 +129,20 @@ Key: `HijackInstall` (默认=1)
 
 ## 7. 注入方法
 
-使用 32 位 C 程序 (injector.exe) 绕过 64 位 Python 的 WoW64 限制：
-1. `OpenProcess(PROCESS_ALL_ACCESS)` 打开 32 位目标
-2. `VirtualAllocEx` 分配内存
-3. `WriteProcessMemory` 写入 DLL 路径
-4. `CreateRemoteThread(LoadLibraryA, path)` 注入
-5. `WaitForSingleObject` 等待完成
-6. `GetExitCodeThread` 获取 DLL 基址
+使用 pydbg 的 `dll_injector.py` 注入 DLL，完全基于 pydbg Cython API：
 
-编译：`clang --target=i686-pc-windows-msvc -fuse-ld=lld -o injector.exe injector.c`
+```bash
+# 注入到运行中的 32 位进程
+python demo/dll_injector.py --pid <PID> --dll demo\injected.dll
+
+# 创建进程挂起 → 注入 → 恢复
+python demo/dll_injector.py --exe target.exe --dll demo\injected.dll
+```
+
+底层流程：
+1. `open_process` 打开目标进程
+2. `virtual_alloc_ex` 分配远程内存
+3. `write_process_memory` 写入 DLL 路径
+4. `create_remote_thread(LoadLibraryA, path)` 注入
+5. `wait_for_single_object` 等待完成
+6. `get_exit_code_thread` 获取 DLL 基址
