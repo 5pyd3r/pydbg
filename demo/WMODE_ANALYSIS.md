@@ -127,7 +127,112 @@ Key: `HijackInstall` (默认=1)
 | 0x1000425B | ".text" | PE 节名 |
 | 0x10004283 | ".reloc" | PE 节名 |
 
-## 7. 注入方法
+## 7. XMOD 加载器 (sub_10001D05)
+
+XMOD 是自定义的 PE-like 格式，加载流程：
+
+```
+sub_10001D05 (XMOD Loader)
+├── 验证 XHDR 签名 (0x52444858 = "XHDR")
+├── [1] sub_10001AB4 — FindModule
+│   ├── GetModuleHandleA 获取模块基址
+│   ├── 验证 MZ 签名 (0x5A4D)
+│   ├── 验证 PE 签名 (0x4550)
+│   └── 验证 PE32 magic (0x10B)
+├── [2] 复制 sections 到目标地址
+│   └── 按 section table 逐个 memcpy
+├── [3] sub_10001BA5 — Relocation fixups
+│   └── 处理 .reloc 表，修正绝对地址引用
+├── [4] sub_10001BFF — Import resolution
+│   ├── 遍历 import directory
+│   ├── LoadLibraryA 加载 DLL
+│   └── GetProcAddress 解析函数地址
+├── [5] sub_10001C66 — Section protection
+│   └── VirtualProtect 设置各 section 权限
+├── [6] sub_100020DE — VirtualProtect 设置页面保护
+└── 调用 XMOD entry point (DLL_PROCESS_ATTACH)
+```
+
+### 完整性验证 (sub_100012D0 + sub_10001312)
+
+XMOD 加载前使用 **MD5** 验证数据完整性：
+
+- `sub_10001312` — 标准 MD5 实现（初始化常量 0x67452301, 0xefcdab89, 0x98badcfe, 0x10325476）
+- `sub_100012D0` — 计算 MD5 并与存储的哈希比对
+
+### 加载器数据 (offset 0x3000)
+
+XMOD 加载器配置包含 API 导入表：
+
+| 偏移 | API 名称 |
+|------|----------|
+| 0x4008 | ExitProcess |
+| 0x4015 | GetModuleFileNameA |
+| 0x4029 | GetModuleHandleA |
+| 0x403B | GetPrivateProfileIntA |
+| 0x4052 | GetProcAddress |
+| 0x4062 | GetSystemInfo |
+| 0x4071 | GlobalAlloc |
+| 0x407E | GlobalFree |
+| 0x408A | LoadLibraryA |
+| 0x4098 | VirtualAlloc |
+| 0x40A6 | VirtualFree |
+| 0x40B3 | VirtualProtect |
+| 0x40C3 | _lclose |
+| 0x40CC | _llseek |
+| 0x40D5 | _lopen |
+| 0x40DD | _lread |
+| 0x40E5 | lstrcpyA |
+| 0x40EF | lstrlenA |
+
+## 8. 窗口化 Hook 安装 (sub_100019B3)
+
+当 `HijackInstall=1` 时，安装 DirectDraw 窗口化 hook：
+
+```
+sub_100019B3 (HijackInstall)
+├── sub_10001C9B — SEH 初始化
+├── sub_10001AB4 — FindModule (定位目标模块)
+├── sub_10001B12 — PatchMemory (修改入口指令)
+│   ├── 搜索 0xE8 (CALL) 指令位置
+│   └── 写入 JMP hook 跳转
+└── sub_10001C92 — 恢复/清理
+```
+
+`sub_10001B12` 是核心 patch 函数：
+1. `VirtualProtect` → PAGE_EXECUTE_READWRITE
+2. 交换旧值/新值
+3. `VirtualProtect` → 恢复原保护
+
+## 9. 注入方法
+
+## 10. 函数参考表
+
+| 地址 | 名称 | 功能 |
+|------|------|------|
+| 0x10001000 | IAT Table | API 间接跳转表 (20 个槽位) |
+| 0x10001065 | bit_count | 计算非零 DWORD 块的位长度 |
+| 0x10001080 | bignum_mul | 大数乘法 (128 位) |
+| 0x10001110 | bignum_cmp | 大数比较 |
+| 0x10001128 | bignum_sub | 大数减法 + 右移 |
+| 0x100011A5 | decompress | 解压主函数 |
+| 0x100012D0 | xmod_verify | XMOD 完整性验证 (MD5) |
+| 0x10001312 | md5_init | MD5 哈希初始化 + padding |
+| 0x100015A8 | lcg_decrypt | LCG PRNG XOR 解密 |
+| 0x1000187F | error_msgs | 错误消息字符串表 |
+| 0x10001977 | version_str | "XeN'z XMOD2DLL adapter" |
+| 0x100019B3 | hijack_install | 窗口化 hook 安装 |
+| 0x10001A2F | alt_init | 备用初始化路径 |
+| 0x10001AB4 | find_module | 查找模块并验证 PE 头 |
+| 0x10001B12 | patch_mem | 内存 patch (改保护→写→恢复) |
+| 0x10001B7C | reloc_fixup | 重定位修复 + 导入解析 |
+| 0x10001BFF | import_resolve | 遍历 import directory 解析 |
+| 0x10001C66 | section_protect | 设置 section 内存保护 |
+| 0x10001C9B | seh_setup | SEH 异常处理初始化 |
+| 0x10001D05 | xmod_loader | XMOD PE 加载器 |
+| 0x10001E0A | DllMain | DLL 入口点 |
+| 0x1000209C-0x2108 | API jumps | IAT 间接跳转桩 |
+| 0x100020BA | resolve_apis | API 解析入口 |
 
 使用 pydbg 的 `dll_injector.py` 注入 DLL，完全基于 pydbg Cython API：
 
