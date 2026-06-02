@@ -190,46 +190,6 @@ cdef extern from "windows.h":
         DWORD dwProcessId
         DWORD dwThreadId
 
-    ctypedef struct CONTEXT:
-        DWORD64 P1Home
-        DWORD64 P2Home
-        DWORD64 P3Home
-        DWORD64 P4Home
-        DWORD64 P5Home
-        DWORD64 P6Home
-        DWORD ContextFlags
-        DWORD MxCsr
-        WORD SegCs
-        WORD SegDs
-        WORD SegEs
-        WORD SegFs
-        WORD SegGs
-        WORD SegSs
-        DWORD EFlags
-        DWORD64 Dr0
-        DWORD64 Dr1
-        DWORD64 Dr2
-        DWORD64 Dr3
-        DWORD64 Dr6
-        DWORD64 Dr7
-        DWORD64 Rax
-        DWORD64 Rcx
-        DWORD64 Rdx
-        DWORD64 Rbx
-        DWORD64 Rsp
-        DWORD64 Rbp
-        DWORD64 Rsi
-        DWORD64 Rdi
-        DWORD64 R8
-        DWORD64 R9
-        DWORD64 R10
-        DWORD64 R11
-        DWORD64 R12
-        DWORD64 R13
-        DWORD64 R14
-        DWORD64 R15
-        DWORD64 Rip
-
     # === Win32 API functions ===
     BOOL CreateProcessA(
         LPCSTR lpApplicationName,
@@ -264,13 +224,14 @@ cdef extern from "windows.h":
         SIZE_T dwSize, DWORD flNewProtect, DWORD* lpflOldProtect)
 
     HANDLE OpenThread(DWORD dwDesiredAccess, BOOL bInheritHandle, DWORD dwThreadId)
-    BOOL GetThreadContext(HANDLE hThread, CONTEXT* lpContext)
-    BOOL SetThreadContext(HANDLE hThread, CONTEXT* lpContext)
+    BOOL GetThreadContext(HANDLE hThread, void* lpContext)
+    BOOL SetThreadContext(HANDLE hThread, void* lpContext)
     DWORD SuspendThread(HANDLE hThread)
     DWORD ResumeThread(HANDLE hThread)
     DWORD GetThreadId(HANDLE hThread)
     BOOL GetThreadTimes(HANDLE hThread, void* lpCreationTime, void* lpExitTime,
         void* lpKernelTime, void* lpUserTime)
+    BOOL IsWow64Process(HANDLE hProcess, BOOL* Wow64Process)
 
 cdef extern from "psapi.h":
     BOOL EnumProcessModules(HANDLE hProcess, HMODULE* lphModule, DWORD cb, DWORD* lpcbNeeded)
@@ -406,3 +367,206 @@ cdef extern from "dbghelp.h":
                      void* GetModuleBaseRoutine, void* TranslateAddress)
 
     void* SymFunctionTableAccess64(HANDLE hProcess, unsigned long long AddrBase)
+
+
+# ── CONTEXT helper functions ──────────────────────────────────────────
+# The Windows CONTEXT struct has different fields on x86 vs x64.
+# We access it exclusively through these inline C helpers so that
+# the same Cython source compiles on both architectures.
+
+cdef extern from *:
+    """
+    #include <windows.h>
+    #include <string.h>
+
+    /* Size of the native CONTEXT struct */
+    static inline int pydbg_ctx_sizeof(void) { return (int)sizeof(CONTEXT); }
+
+    /* Initialize a CONTEXT with the given flags */
+    static inline void pydbg_ctx_init(void* pctx, unsigned long flags) {
+        memset(pctx, 0, sizeof(CONTEXT));
+        ((CONTEXT*)pctx)->ContextFlags = flags;
+    }
+
+    /* ContextFlags */
+    static inline unsigned long pydbg_ctx_get_flags(void* pctx) {
+        return ((CONTEXT*)pctx)->ContextFlags;
+    }
+    static inline void pydbg_ctx_set_flags(void* pctx, unsigned long f) {
+        ((CONTEXT*)pctx)->ContextFlags = f;
+    }
+
+    /* Instruction pointer */
+    static inline unsigned long long pydbg_ctx_get_ip(void* pctx) {
+    #ifdef _WIN64
+        return ((CONTEXT*)pctx)->Rip;
+    #else
+        return ((CONTEXT*)pctx)->Eip;
+    #endif
+    }
+    static inline void pydbg_ctx_set_ip(void* pctx, unsigned long long v) {
+    #ifdef _WIN64
+        ((CONTEXT*)pctx)->Rip = v;
+    #else
+        ((CONTEXT*)pctx)->Eip = (DWORD)v;
+    #endif
+    }
+
+    /* Stack pointer */
+    static inline unsigned long long pydbg_ctx_get_sp(void* pctx) {
+    #ifdef _WIN64
+        return ((CONTEXT*)pctx)->Rsp;
+    #else
+        return ((CONTEXT*)pctx)->Esp;
+    #endif
+    }
+    static inline void pydbg_ctx_set_sp(void* pctx, unsigned long long v) {
+    #ifdef _WIN64
+        ((CONTEXT*)pctx)->Rsp = v;
+    #else
+        ((CONTEXT*)pctx)->Esp = (DWORD)v;
+    #endif
+    }
+
+    /* Base pointer */
+    static inline unsigned long long pydbg_ctx_get_bp(void* pctx) {
+    #ifdef _WIN64
+        return ((CONTEXT*)pctx)->Rbp;
+    #else
+        return ((CONTEXT*)pctx)->Ebp;
+    #endif
+    }
+    static inline void pydbg_ctx_set_bp(void* pctx, unsigned long long v) {
+    #ifdef _WIN64
+        ((CONTEXT*)pctx)->Rbp = v;
+    #else
+        ((CONTEXT*)pctx)->Ebp = (DWORD)v;
+    #endif
+    }
+
+    /* EFLAGS */
+    static inline unsigned long pydbg_ctx_get_eflags(void* pctx) {
+        return ((CONTEXT*)pctx)->EFlags;
+    }
+    static inline void pydbg_ctx_set_eflags(void* pctx, unsigned long v) {
+        ((CONTEXT*)pctx)->EFlags = v;
+    }
+
+    /* General-purpose registers by index.
+       x64: 0=Rax 1=Rcx 2=Rdx 3=Rbx 4=Rsp 5=Rbp 6=Rsi 7=Rdi
+            8=R8  9=R9  10=R10 11=R11 12=R12 13=R13 14=R14 15=R15
+       x86: 0=Eax 1=Ecx 2=Edx 3=Ebx 4=Esp 5=Ebp 6=Esi 7=Edi */
+    static inline unsigned long long pydbg_ctx_get_gp(void* pctx, int idx) {
+        CONTEXT* ctx = (CONTEXT*)pctx;
+    #ifdef _WIN64
+        switch(idx) {
+            case 0:  return ctx->Rax;  case 1:  return ctx->Rcx;
+            case 2:  return ctx->Rdx;  case 3:  return ctx->Rbx;
+            case 4:  return ctx->Rsp;  case 5:  return ctx->Rbp;
+            case 6:  return ctx->Rsi;  case 7:  return ctx->Rdi;
+            case 8:  return ctx->R8;   case 9:  return ctx->R9;
+            case 10: return ctx->R10;  case 11: return ctx->R11;
+            case 12: return ctx->R12;  case 13: return ctx->R13;
+            case 14: return ctx->R14;  case 15: return ctx->R15;
+        }
+    #else
+        switch(idx) {
+            case 0: return ctx->Eax;  case 1: return ctx->Ecx;
+            case 2: return ctx->Edx;  case 3: return ctx->Ebx;
+            case 4: return ctx->Esp;  case 5: return ctx->Ebp;
+            case 6: return ctx->Esi;  case 7: return ctx->Edi;
+        }
+    #endif
+        return 0;
+    }
+    static inline void pydbg_ctx_set_gp(void* pctx, int idx, unsigned long long v) {
+        CONTEXT* ctx = (CONTEXT*)pctx;
+    #ifdef _WIN64
+        switch(idx) {
+            case 0:  ctx->Rax = v; break;  case 1:  ctx->Rcx = v; break;
+            case 2:  ctx->Rdx = v; break;  case 3:  ctx->Rbx = v; break;
+            case 4:  ctx->Rsp = v; break;  case 5:  ctx->Rbp = v; break;
+            case 6:  ctx->Rsi = v; break;  case 7:  ctx->Rdi = v; break;
+            case 8:  ctx->R8  = v; break;  case 9:  ctx->R9  = v; break;
+            case 10: ctx->R10 = v; break;  case 11: ctx->R11 = v; break;
+            case 12: ctx->R12 = v; break;  case 13: ctx->R13 = v; break;
+            case 14: ctx->R14 = v; break;  case 15: ctx->R15 = v; break;
+        }
+    #else
+        switch(idx) {
+            case 0: ctx->Eax = (DWORD)v; break;  case 1: ctx->Ecx = (DWORD)v; break;
+            case 2: ctx->Edx = (DWORD)v; break;  case 3: ctx->Ebx = (DWORD)v; break;
+            case 4: ctx->Esp = (DWORD)v; break;  case 5: ctx->Ebp = (DWORD)v; break;
+            case 6: ctx->Esi = (DWORD)v; break;  case 7: ctx->Edi = (DWORD)v; break;
+        }
+    #endif
+    }
+
+    /* Debug registers: Dr0-Dr3, Dr6, Dr7 (register index: 0,1,2,3,6,7) */
+    static inline unsigned long long pydbg_ctx_get_dr(void* pctx, int reg) {
+        CONTEXT* ctx = (CONTEXT*)pctx;
+        switch(reg) {
+            case 0: return (unsigned long long)ctx->Dr0;
+            case 1: return (unsigned long long)ctx->Dr1;
+            case 2: return (unsigned long long)ctx->Dr2;
+            case 3: return (unsigned long long)ctx->Dr3;
+            case 6: return (unsigned long long)ctx->Dr6;
+            case 7: return (unsigned long long)ctx->Dr7;
+        }
+        return 0;
+    }
+    static inline void pydbg_ctx_set_dr(void* pctx, int reg, unsigned long long v) {
+        CONTEXT* ctx = (CONTEXT*)pctx;
+    #ifdef _WIN64
+        switch(reg) {
+            case 0: ctx->Dr0 = v; break;  case 1: ctx->Dr1 = v; break;
+            case 2: ctx->Dr2 = v; break;  case 3: ctx->Dr3 = v; break;
+            case 6: ctx->Dr6 = v; break;  case 7: ctx->Dr7 = v; break;
+        }
+    #else
+        switch(reg) {
+            case 0: ctx->Dr0 = (DWORD)v; break;  case 1: ctx->Dr1 = (DWORD)v; break;
+            case 2: ctx->Dr2 = (DWORD)v; break;  case 3: ctx->Dr3 = (DWORD)v; break;
+            case 6: ctx->Dr6 = (DWORD)v; break;  case 7: ctx->Dr7 = (DWORD)v; break;
+        }
+    #endif
+    }
+
+    /* Segment registers: 0=CS 1=DS 2=ES 3=FS 4=GS 5=SS */
+    static inline unsigned short pydbg_ctx_get_seg(void* pctx, int reg) {
+        CONTEXT* ctx = (CONTEXT*)pctx;
+        switch(reg) {
+            case 0: return ctx->SegCs;  case 1: return ctx->SegDs;
+            case 2: return ctx->SegEs;  case 3: return ctx->SegFs;
+            case 4: return ctx->SegGs;  case 5: return ctx->SegSs;
+        }
+        return 0;
+    }
+
+    /* Host architecture: 32 or 64 */
+    static inline int pydbg_host_arch(void) {
+    #ifdef _WIN64
+        return 64;
+    #else
+        return 32;
+    #endif
+    }
+    """
+    int pydbg_ctx_sizeof()
+    void pydbg_ctx_init(void* pctx, unsigned long flags)
+    unsigned long pydbg_ctx_get_flags(void* pctx)
+    void pydbg_ctx_set_flags(void* pctx, unsigned long f)
+    unsigned long long pydbg_ctx_get_ip(void* pctx)
+    void pydbg_ctx_set_ip(void* pctx, unsigned long long v)
+    unsigned long long pydbg_ctx_get_sp(void* pctx)
+    void pydbg_ctx_set_sp(void* pctx, unsigned long long v)
+    unsigned long long pydbg_ctx_get_bp(void* pctx)
+    void pydbg_ctx_set_bp(void* pctx, unsigned long long v)
+    unsigned long pydbg_ctx_get_eflags(void* pctx)
+    void pydbg_ctx_set_eflags(void* pctx, unsigned long v)
+    unsigned long long pydbg_ctx_get_gp(void* pctx, int idx)
+    void pydbg_ctx_set_gp(void* pctx, int idx, unsigned long long v)
+    unsigned long long pydbg_ctx_get_dr(void* pctx, int reg)
+    void pydbg_ctx_set_dr(void* pctx, int reg, unsigned long long v)
+    unsigned short pydbg_ctx_get_seg(void* pctx, int reg)
+    int pydbg_host_arch()

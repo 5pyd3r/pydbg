@@ -8,6 +8,11 @@ class IATHook:
         self._s = session
         self._hooks = {}  # (module_name, func_name) -> (iat_rva, original_addr)
 
+    def _ptr_size(self):
+        """Return pointer size in bytes for the target process."""
+        arch = getattr(self._s, 'target_arch', 64)
+        return 8 if arch == 64 else 4
+
     def set(self, module_name, func_name, new_addr):
         mem = self._get_memory()
         modules = self._get_modules()
@@ -22,19 +27,21 @@ class IATHook:
                 f"Function '{func_name}' not found in IAT of '{module_name}'"
             )
 
-        original = int.from_bytes(mem.read(iat_addr, 8), 'little')
-        mem.write(iat_addr, new_addr.to_bytes(8, 'little'))
+        ptr_sz = self._ptr_size()
+        original = int.from_bytes(mem.read(iat_addr, ptr_sz), 'little')
+        mem.write(iat_addr, new_addr.to_bytes(ptr_sz, 'little'))
 
         key = (module_name, func_name)
         self._hooks[key] = (iat_addr, original)
         return original
 
     def restore(self, module_name, func_name, original_addr=None):
+        ptr_sz = self._ptr_size()
         key = (module_name, func_name)
         if key in self._hooks:
             iat_addr, saved_original = self._hooks.pop(key)
             mem = self._get_memory()
-            mem.write(iat_addr, saved_original.to_bytes(8, 'little'))
+            mem.write(iat_addr, saved_original.to_bytes(ptr_sz, 'little'))
         elif original_addr is not None:
             mem = self._get_memory()
             modules = self._get_modules()
@@ -46,7 +53,7 @@ class IATHook:
                 raise PydbgError(
                     f"Function '{func_name}' not found in IAT of '{module_name}'"
                 )
-            mem.write(iat_addr, original_addr.to_bytes(8, 'little'))
+            mem.write(iat_addr, original_addr.to_bytes(ptr_sz, 'little'))
 
     def find(self, module_name, func_name):
         mem = self._get_memory()
@@ -57,7 +64,8 @@ class IATHook:
         iat_addr = self._find_iat_addr(mod, func_name, mem)
         if iat_addr is None:
             return None
-        return int.from_bytes(mem.read(iat_addr, 8), 'little')
+        ptr_sz = self._ptr_size()
+        return int.from_bytes(mem.read(iat_addr, ptr_sz), 'little')
 
     def list_hooks(self):
         return dict(self._hooks)

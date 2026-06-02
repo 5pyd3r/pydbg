@@ -2,7 +2,7 @@
 
 import unittest
 
-from tests import TEST_TARGET_PATH
+from tests import TEST_TARGET_PATH, IP_REG, SP_REG, GP_REG
 
 try:
     from pydbg import _pydbg
@@ -29,12 +29,14 @@ class TestThreadContext(unittest.TestCase):
         _pydbg.close_handle(self.h_thr)
 
     def test_get_thread_context(self):
-        """Verify get_thread_context returns x64 registers."""
+        """Verify get_thread_context returns registers for host architecture."""
         ctx = _pydbg.get_thread_context(self.h_thr)
-        self.assertIn("rip", ctx)
-        self.assertIn("rsp", ctx)
-        self.assertIn("rax", ctx)
-        self.assertIsInstance(ctx["rip"], int)
+        self.assertIn(IP_REG, ctx)
+        self.assertIn(SP_REG, ctx)
+        self.assertIn(GP_REG, ctx)
+        self.assertIn("eflags", ctx)
+        self.assertIn("arch", ctx)
+        self.assertIsInstance(ctx[IP_REG], int)
 
     def test_open_thread(self):
         """Verify open_thread returns valid handle."""
@@ -68,8 +70,8 @@ class TestDebuggerThreadAPI(unittest.TestCase):
 
         h_thread = dbg.open_thread(tid)
         regs = dbg.get_registers(h_thread)
-        self.assertIn("rip", regs)
-        self.assertIn("rsp", regs)
+        self.assertIn(IP_REG, regs)
+        self.assertIn(SP_REG, regs)
 
         _pydbg.close_handle(h_thread)
         dbg.detach()

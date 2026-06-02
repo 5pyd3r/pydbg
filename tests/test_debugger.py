@@ -2,7 +2,7 @@
 
 import unittest
 
-from tests import TEST_TARGET_PATH
+from tests import TEST_TARGET_PATH, IP_REG
 
 try:
     from pydbg import _pydbg
@@ -166,10 +166,10 @@ class TestRemoveHwBreakpoint(unittest.TestCase):
 
         h_thread = dbg.open_thread(tid)
         regs = dbg.get_registers(h_thread)
-        bp_id = dbg.set_hw_breakpoint(regs["rip"], condition="x", length=1, slot=0)
+        bp_id = dbg.set_hw_breakpoint(regs[IP_REG], condition="x", length=1, slot=0)
 
         dbg.remove_breakpoint(bp_id)
-        self.assertIsNone(dbg.find_breakpoint(regs["rip"]))
+        self.assertIsNone(dbg.find_breakpoint(regs[IP_REG]))
 
         dbg.terminate_process(0)
         dbg.close_handle(dbg._session.process_handle)

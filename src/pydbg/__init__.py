@@ -1,3 +1,5 @@
+import struct as _struct
+
 from ._pydbg import (
     EXCEPTION_ACCESS_VIOLATION,
     EXCEPTION_BREAKPOINT,
@@ -29,8 +31,11 @@ from .exceptions import (
 )
 
 __version__ = "0.1.0"
+HOST_ARCH = _struct.calcsize("P") * 8  # 32 or 64
+
 __all__ = [
     "Debugger",
+    "HOST_ARCH",
     "DebugEvent",
     "PydbgError",
     "ProcessError",

@@ -2,7 +2,7 @@
 
 import unittest
 
-from tests import TEST_TARGET_PATH
+from tests import TEST_TARGET_PATH, IP_REG
 
 try:
     from pydbg import _pydbg
@@ -79,7 +79,7 @@ class TestDebuggerBreakpointAPI(unittest.TestCase):
         # Get a code address
         h_thread = dbg.open_thread(tid)
         regs = dbg.get_registers(h_thread)
-        addr = regs["rip"]
+        addr = regs[IP_REG]
 
         bp_id = dbg.set_breakpoint(addr)
         self.assertGreater(bp_id, 0)
@@ -143,7 +143,7 @@ class TestDebuggerBreakpointAPI(unittest.TestCase):
 
         h_thread = dbg.open_thread(tid)
         regs = dbg.get_registers(h_thread)
-        addr = regs["rip"]
+        addr = regs[IP_REG]
 
         bp_id = dbg.set_hw_breakpoint(addr, "x", 1, 0)
         self.assertGreater(bp_id, 0)

@@ -1,4 +1,5 @@
 import unittest
+from tests import HOST_ARCH
 from pydbg.disasm.engine import DisasmEngine, Instruction
 from pydbg.disasm.analysis import BasicBlock, ControlFlowGraph, CFGEdge
 from pydbg.disasm.analysis import build_blocks, build_cfg
@@ -34,7 +35,8 @@ class TestDisasmEngine(unittest.TestCase):
 
     def test_mode_default(self):
         engine = DisasmEngine()
-        self.assertEqual(engine.mode(), "x64")
+        expected = "x64" if HOST_ARCH == 64 else "x86"
+        self.assertEqual(engine.mode(), expected)
 
     def test_mode_explicit_x86(self):
         engine = DisasmEngine(mode="x86")
@@ -45,7 +47,7 @@ class TestDisasmEngine(unittest.TestCase):
         self.assertEqual(engine.mode(), "x64")
 
     def test_disasm_basic(self):
-        engine = DisasmEngine()
+        engine = DisasmEngine(mode="x64")
         insns = engine.disasm(0x1000, X64_RET)
         self.assertEqual(len(insns), 2)
         self.assertEqual(insns[0].mnemonic, "mov")
@@ -56,7 +58,7 @@ class TestDisasmEngine(unittest.TestCase):
         self.assertTrue(insns[1].is_ret)
 
     def test_disasm_instruction_properties(self):
-        engine = DisasmEngine()
+        engine = DisasmEngine(mode="x64")
         insns = engine.disasm(0x1000, X64_RET)
         ret = insns[1]
         self.assertEqual(ret.mnemonic, "ret")
@@ -66,7 +68,7 @@ class TestDisasmEngine(unittest.TestCase):
         self.assertFalse(ret.is_cond)
 
     def test_iter_disasm(self):
-        engine = DisasmEngine()
+        engine = DisasmEngine(mode="x64")
         results = list(engine.iter_disasm(0x0, X64_RET))
         self.assertEqual(len(results), 2)
 
@@ -79,18 +81,18 @@ class TestDisasmEngine(unittest.TestCase):
         self.assertEqual(insns[0].mnemonic, "xor")
 
     def test_disasm_raw_bytes_field(self):
-        engine = DisasmEngine()
+        engine = DisasmEngine(mode="x64")
         insns = engine.disasm(0x0, b'\xc3')
         self.assertEqual(insns[0].raw_bytes, b'\xc3')
 
     def test_disasm_groups(self):
-        engine = DisasmEngine()
+        engine = DisasmEngine(mode="x64")
         insns = engine.disasm(0x0, X64_RET)
         ret = insns[1]
         self.assertIn('ret', ret.groups)
 
     def test_conditional_jump_detection(self):
-        engine = DisasmEngine()
+        engine = DisasmEngine(mode="x64")
         insns = engine.disasm(0x1000, X64_COND)
         jne = [i for i in insns if i.mnemonic == 'jne']
         self.assertEqual(len(jne), 1)
@@ -132,7 +134,7 @@ class TestBasicBlocks(unittest.TestCase):
         self.assertEqual(build_blocks([]), [])
 
     def test_single_block(self):
-        engine = DisasmEngine()
+        engine = DisasmEngine(mode="x64")
         insns = engine.disasm(0x1000, X64_RET)
         blocks = build_blocks(insns)
         self.assertEqual(len(blocks), 1)
@@ -140,13 +142,13 @@ class TestBasicBlocks(unittest.TestCase):
         self.assertEqual(len(blocks[0].instructions), 2)
 
     def test_conditional_split(self):
-        engine = DisasmEngine()
+        engine = DisasmEngine(mode="x64")
         insns = engine.disasm(0x1000, X64_COND)
         blocks = build_blocks(insns)
         self.assertGreaterEqual(len(blocks), 2)
 
     def test_call_split(self):
-        engine = DisasmEngine()
+        engine = DisasmEngine(mode="x64")
         insns = engine.disasm(0x1000, X64_CALL)
         blocks = build_blocks(insns)
         self.assertGreaterEqual(len(blocks), 2)
@@ -168,7 +170,7 @@ class TestControlFlowGraph(unittest.TestCase):
         self.assertEqual(cfg.blocks, {})
 
     def test_simple_cfg(self):
-        engine = DisasmEngine()
+        engine = DisasmEngine(mode="x64")
         insns = engine.disasm(0x1000, X64_RET)
         blocks = build_blocks(insns)
         cfg = build_cfg(blocks)
@@ -177,7 +179,7 @@ class TestControlFlowGraph(unittest.TestCase):
         self.assertEqual(len(cfg.blocks), 1)
 
     def test_conditional_cfg(self):
-        engine = DisasmEngine()
+        engine = DisasmEngine(mode="x64")
         insns = engine.disasm(0x1000, X64_COND)
         blocks = build_blocks(insns)
         cfg = build_cfg(blocks)

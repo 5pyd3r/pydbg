@@ -23,8 +23,9 @@ class InlineHook:
         from ..memory.manager import MemoryManager
 
         mem = MemoryManager(self._s)
-        engine = DisasmEngine(mode="x64")
-        asm = Assembler(mode="x64")
+        mode = "x64" if getattr(self._s, 'target_arch', 64) == 64 else "x86"
+        engine = DisasmEngine(mode=mode)
+        asm = Assembler(mode=mode)
 
         original_bytes = self._read_min_5_bytes(mem, engine, target_addr)
         if len(original_bytes) < 5:
