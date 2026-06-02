@@ -211,6 +211,8 @@ Cython 扩展统一入口：`src/pydbg/cython/_pydbg.pyx`，通过 `include` 合
 
 ## 开发
 
+### 常规方式
+
 ```bash
 # 安装开发依赖
 pip install meson ninja cython flake8
@@ -222,13 +224,30 @@ meson compile -C build
 # 测试
 meson test -C build --print-errorlogs
 
-# 单个测试套件
-meson test -C build -v pe      # PE 解析器
-meson test -C build -v debugger # 调试器集成测试
-
 # 代码风格检查
 flake8 src/ tests/ --max-line-length=120
 ```
+
+### 使用 Embedded Python 本地验证双架构
+
+无需同时安装 32/64 位 Python，使用 `devtools/` 脚本下载 embedded 版本即可本地验证：
+
+```powershell
+# 首次：下载并配置 embedded Python (x64 + x86)
+.\devtools\setup-embedded.ps1
+
+# 构建并测试当前架构
+.\devtools\build-test.ps1
+
+# 指定架构
+.\devtools\build-test.ps1 -Arch x86
+.\devtools\build-test.ps1 -Arch x64
+
+# 同时验证两个架构
+.\devtools\build-test.ps1 -Arch all
+```
+
+最终验证以 CI 为准（GitHub Actions 同时跑 x64/x86）。
 
 ## License
 
