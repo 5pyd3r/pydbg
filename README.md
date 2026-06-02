@@ -3,7 +3,7 @@
 Windows 原生二进制调试器 —— 基于 Cython 封装 Win32 Debug API，提供 Pythonic 的高层接口。
 
 [![CI](https://github.com/5pyd3r/pydbg/actions/workflows/ci.yml/badge.svg)](https://github.com/5pyd3r/pydbg/actions/workflows/ci.yml)
-![Platform](https://img.shields.io/badge/platform-Windows%20x64-blue)
+![Platform](https://img.shields.io/badge/platform-Windows%20x64%20%7C%20x86-blue)
 ![Python](https://img.shields.io/badge/python-3.8%2B-blue)
 
 ## 功能
@@ -19,7 +19,8 @@ Windows 原生二进制调试器 —— 基于 Cython 封装 Win32 Debug API，�
 
 ## 安装
 
-> **仅支持 Windows x64。** 调试 API 依赖 Win32 原生函数。
+> **支持 Windows x64 和 x86。** 调试 API 依赖 Win32 原生函数。
+> 扩展根据 Python 解释器位数自动编译为对应架构。
 
 ```bash
 pip install .
@@ -75,7 +76,8 @@ bp_id = dbg.set_hw_breakpoint(addr, condition="x", length=1, slot=0)
 
 # 寄存器操作
 h_thread = dbg.open_thread(tid)
-regs = dbg.get_registers(h_thread)    # {"rip": ..., "rax": ..., ...}
+regs = dbg.get_registers(h_thread)    # x64: {"rip": ..., "rax": ..., ...}
+                                       # x86: {"eip": ..., "eax": ..., ...}
 dbg.set_register(h_thread, "rip", new_value)
 dbg.step(h_thread)                    # 单步执行
 
@@ -114,8 +116,8 @@ for mod in dbg.enum_modules():
 | 方法 | 说明 |
 |------|------|
 | `open_thread(tid)` | 打开线程句柄 |
-| `get_registers(h_thread)` | 获取寄存器上下文 |
-| `set_registers(h_thread, ctx)` | 设置寄存器上下文 |
+| `get_registers(h_thread)` | 获取寄存器上下文（返回架构适配的寄存器名） |
+| `set_registers(h_thread, ctx)` | 设置寄存器上下文（接受 x86/x64 寄存器名） |
 | `set_register(h_thread, name, value)` | 设置单个寄存器 |
 | `suspend_thread(h_thread)` / `resume_thread(h_thread)` | 挂起/恢复线程 |
 | `step(h_thread)` | 单步执行（设置 TF 标志） |
@@ -179,12 +181,30 @@ for exp in pe.exports:
 
 ```
 Debugger (core/debugger.py)           — 门面，生命周期 + 事件循环
-  ├── _session: DebugSession          — 纯状态数据类 (core/session.py)
+  ├── _session: DebugSession          — 纯状态数据类，含 host_arch / target_arch (core/session.py)
   ├── memory: MemoryManager           — 读写/查询/保护 (memory/manager.py)
   ├── thread: ThreadManager           — 上下文/挂起/单步 (thread/manager.py)
   ├── brk_sw: SoftwareBreakpointManager — int3 断点 (breakpoint/software.py)
   ├── brk_hw: HardwareBreakpointManager — 调试寄存器断点 (breakpoint/hardware.py)
   └── modules: ModuleResolver         — 枚举模块、解析文件名 (module/resolver.py)
+```
+
+### 32/64 位支持
+
+扩展编译时根据 Python 解释器位数自动选择架构。运行时特性：
+
+- **寄存器名** — `get_thread_context()` 返回架构适配的寄存器名（x64: `rax`/`rip`，x86: `eax`/`eip`）
+- **目标检测** — `create_process()` 通过 `IsWow64Process` 自动检测目标进程位数，存入 `session.target_arch`
+- **Hook 适配** — `InlineHook` 和 `IATHook` 根据 `target_arch` 自动选择反汇编模式和指针大小
+
+```python
+from pydbg import Debugger, HOST_ARCH
+
+dbg = Debugger()
+print(f"Host: {HOST_ARCH}-bit")  # 64 或 32
+
+pid, tid = dbg.create_process("target.exe")
+print(f"Target: {dbg._session.target_arch}-bit")
 ```
 
 Cython 扩展统一入口：`src/pydbg/cython/_pydbg.pyx`，通过 `include` 合并所有子模块（`_process.pxi`、`_memory.pxi`、`_thread.pxi`、`_exception.pxi`、`_bp.pxi`）。
