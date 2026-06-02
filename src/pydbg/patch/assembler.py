@@ -9,7 +9,10 @@ from ..exceptions import PydbgError
 class Assembler:
     """Keystone-based x86/x64 assembler (Intel syntax)."""
 
-    def __init__(self, mode="x64"):
+    def __init__(self, mode=None):
+        if mode is None:
+            import struct
+            mode = "x64" if struct.calcsize("P") == 8 else "x86"
         if mode not in ("x86", "x64"):
             raise PydbgError(f"Unknown mode '{mode}'. Expected 'x86' or 'x64'.")
         self._mode = mode

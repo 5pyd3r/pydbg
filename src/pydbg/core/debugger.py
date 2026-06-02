@@ -52,7 +52,25 @@ class Debugger:
         self._session.thread_handle = h_thr
         self._session.pid = pid
         self._session.tid = tid
+        self._session.target_arch = self._detect_target_arch(h_proc)
         return (pid, tid)
+
+    def _detect_target_arch(self, h_process):
+        """Detect if target process is 32-bit (WoW64) or 64-bit."""
+        import struct
+        import ctypes
+        if struct.calcsize("P") == 8:
+            # 64-bit host: check if target is WoW64 (32-bit)
+            try:
+                is_wow64 = ctypes.c_int(0)
+                ctypes.windll.kernel32.IsWow64Process(
+                    ctypes.c_void_p(h_process), ctypes.byref(is_wow64))
+                return 32 if is_wow64.value else 64
+            except Exception:
+                return 64
+        else:
+            # 32-bit host: always 32-bit
+            return 32
 
     def attach(self, pid):
         try:

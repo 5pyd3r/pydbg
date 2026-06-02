@@ -1,14 +1,15 @@
-# _bp.pyx — Hardware breakpoint management via x64 debug registers
+# _bp.pyx — Hardware breakpoint management via debug registers
 
-from libc.stdint cimport uint64_t
+from libc.stdlib cimport malloc, free
 
 from _win32types cimport (
-    HANDLE, DWORD, BOOL, LPVOID, DWORD64, WORD, CONTEXT,
+    HANDLE, DWORD, BOOL, LPVOID,
     GetThreadContext, SetThreadContext, GetLastError,
     CONTEXT_DEBUG_REGISTERS,
+    pydbg_ctx_sizeof, pydbg_ctx_init,
+    pydbg_ctx_get_dr, pydbg_ctx_set_dr,
+    pydbg_ctx_set_flags,
 )
-
-from libc.string cimport memset
 
 # Condition encoding for Dr7
 HW_BREAKPOINT_EXECUTE = 0
@@ -27,16 +28,19 @@ HW_BREAKPOINT_8_BYTE = 2
 #   Local enable at bits 0, 2, 4, 6
 
 
-cdef CONTEXT _get_context(HANDLE h_thread):
-    """Get thread CONTEXT with debug registers."""
-    cdef CONTEXT ctx
-    memset(&ctx, 0, sizeof(ctx))
-    ctx.ContextFlags = CONTEXT_DEBUG_REGISTERS
-    if GetThreadContext(h_thread, &ctx) == 0:
+cdef void* _get_context(HANDLE h_thread):
+    """Get thread CONTEXT with debug registers. Caller must free()."""
+    cdef int ctx_size = pydbg_ctx_sizeof()
+    cdef void* ctx = malloc(ctx_size)
+    if ctx == NULL:
+        raise MemoryError("Failed to allocate CONTEXT")
+    pydbg_ctx_init(ctx, CONTEXT_DEBUG_REGISTERS)
+    if GetThreadContext(h_thread, ctx) == 0:
+        free(ctx)
         raise OSError(GetLastError(), "GetThreadContext failed")
     return ctx
 
-cpdef int set_hw_breakpoint(unsigned long long h_thread, int slot, uint64_t addr,
+cpdef int set_hw_breakpoint(unsigned long long h_thread, int slot, unsigned long long addr,
                              int condition, int length) except? -1:
     """Set a hardware breakpoint.
 
@@ -63,38 +67,37 @@ cpdef int set_hw_breakpoint(unsigned long long h_thread, int slot, uint64_t addr
     if condition == 0 and length != 0:
         raise ValueError("execute breakpoints must be 1 byte")
 
-    cdef CONTEXT ctx = _get_context(<HANDLE><LPVOID>h_thread)
+    cdef void* ctx = _get_context(<HANDLE><LPVOID>h_thread)
 
     # Set address register
-    if slot == 0:
-        ctx.Dr0 = addr
-    elif slot == 1:
-        ctx.Dr1 = addr
-    elif slot == 2:
-        ctx.Dr2 = addr
-    else:
-        ctx.Dr3 = addr
+    pydbg_ctx_set_dr(ctx, slot, addr)
+
+    # Read current Dr7, modify, write back
+    cdef unsigned long long dr7 = pydbg_ctx_get_dr(ctx, 7)
 
     # Clear existing condition/length for this slot
-    cdef uint64_t mask
-    mask = <uint64_t>(0xF << (16 + slot * 4))
-    ctx.Dr7 &= ~mask
+    cdef unsigned long long mask = <unsigned long long>(0xF << (16 + slot * 4))
+    dr7 &= ~mask
 
     # Set condition (bits 16-17, 20-21, 24-25, 28-29)
-    ctx.Dr7 |= <uint64_t>(condition << (16 + slot * 4))
+    dr7 |= <unsigned long long>(condition << (16 + slot * 4))
     # Set length (bits 18-19, 22-23, 26-27, 30-31)
-    ctx.Dr7 |= <uint64_t>(length << (18 + slot * 4))
+    dr7 |= <unsigned long long>(length << (18 + slot * 4))
 
     # Enable local breakpoint (bit 0, 2, 4, 6)
-    ctx.Dr7 |= <uint64_t>(1 << (slot * 2))
+    dr7 |= <unsigned long long>(1 << (slot * 2))
+
+    pydbg_ctx_set_dr(ctx, 7, dr7)
 
     # Clear DR6 status bits (they're write-1-to-clear)
-    ctx.Dr6 = 0
+    pydbg_ctx_set_dr(ctx, 6, 0)
 
-    ctx.ContextFlags = CONTEXT_DEBUG_REGISTERS
-    if SetThreadContext(<HANDLE><LPVOID>h_thread, &ctx) == 0:
+    pydbg_ctx_set_flags(ctx, CONTEXT_DEBUG_REGISTERS)
+    if SetThreadContext(<HANDLE><LPVOID>h_thread, ctx) == 0:
+        free(ctx)
         raise OSError(GetLastError(), "SetThreadContext failed")
 
+    free(ctx)
     return 0
 
 
@@ -115,28 +118,27 @@ cpdef int clear_hw_breakpoint(unsigned long long h_thread, int slot) except? -1:
     if slot < 0 or slot > 3:
         raise ValueError(f"slot must be 0-3, got {slot}")
 
-    cdef CONTEXT ctx = _get_context(<HANDLE><LPVOID>h_thread)
+    cdef void* ctx = _get_context(<HANDLE><LPVOID>h_thread)
 
     # Clear address register
-    if slot == 0:
-        ctx.Dr0 = 0
-    elif slot == 1:
-        ctx.Dr1 = 0
-    elif slot == 2:
-        ctx.Dr2 = 0
-    else:
-        ctx.Dr3 = 0
+    pydbg_ctx_set_dr(ctx, slot, 0)
+
+    # Read current Dr7, modify, write back
+    cdef unsigned long long dr7 = pydbg_ctx_get_dr(ctx, 7)
 
     # Clear condition/length for this slot
-    cdef uint64_t mask
-    mask = <uint64_t>(0xF << (16 + slot * 4))
-    ctx.Dr7 &= ~mask
+    cdef unsigned long long mask = <unsigned long long>(0xF << (16 + slot * 4))
+    dr7 &= ~mask
 
     # Disable local breakpoint
-    ctx.Dr7 &= ~<uint64_t>(1 << (slot * 2))
+    dr7 &= ~<unsigned long long>(1 << (slot * 2))
 
-    ctx.ContextFlags = CONTEXT_DEBUG_REGISTERS
-    if SetThreadContext(<HANDLE><LPVOID>h_thread, &ctx) == 0:
+    pydbg_ctx_set_dr(ctx, 7, dr7)
+
+    pydbg_ctx_set_flags(ctx, CONTEXT_DEBUG_REGISTERS)
+    if SetThreadContext(<HANDLE><LPVOID>h_thread, ctx) == 0:
+        free(ctx)
         raise OSError(GetLastError(), "SetThreadContext failed")
 
+    free(ctx)
     return 0

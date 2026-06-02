@@ -39,7 +39,12 @@ class DisasmEngine:
         if capstone is None:
             raise PydbgError("capstone is not installed")
         if self._requested_mode == "auto":
-            self._arch_mode = "x64"
+            # Use session's target architecture if available, else host arch
+            if self._session is not None and hasattr(self._session, 'target_arch'):
+                self._arch_mode = "x64" if self._session.target_arch == 64 else "x86"
+            else:
+                import struct
+                self._arch_mode = "x64" if struct.calcsize("P") == 8 else "x86"
         elif self._requested_mode in ("x86", "x64"):
             self._arch_mode = self._requested_mode
         else:

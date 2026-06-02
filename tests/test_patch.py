@@ -1,6 +1,6 @@
 import unittest
 
-
+from tests import HOST_ARCH
 from pydbg.patch.assembler import Assembler
 from pydbg.exceptions import PydbgError
 
@@ -9,7 +9,8 @@ class TestAssembler(unittest.TestCase):
 
     def test_mode_default(self):
         asm = Assembler()
-        self.assertEqual(asm.mode(), "x64")
+        expected = "x64" if HOST_ARCH == 64 else "x86"
+        self.assertEqual(asm.mode(), expected)
 
     def test_mode_x86(self):
         asm = Assembler(mode="x86")
@@ -25,9 +26,14 @@ class TestAssembler(unittest.TestCase):
         self.assertEqual(code, b'\xc3')
 
     def test_assemble_multi_newline(self):
-        asm = Assembler()
-        code = asm.assemble("push rbp\nmov rbp, rsp")
-        self.assertEqual(code, b'\x55\x48\x89\xE5')
+        if HOST_ARCH == 64:
+            asm = Assembler(mode="x64")
+            code = asm.assemble("push rbp\nmov rbp, rsp")
+            self.assertEqual(code, b'\x55\x48\x89\xE5')
+        else:
+            asm = Assembler(mode="x86")
+            code = asm.assemble("push ebp\nmov ebp, esp")
+            self.assertEqual(code, b'\x55\x89\xE5')
 
     def test_assemble_multi_semicolon(self):
         asm = Assembler()
