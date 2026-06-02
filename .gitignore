@@ -1,4 +1,6 @@
 build/
+build-x64/
+build-x86/
 __pycache__/
 *.pyc
 *.pyo
@@ -10,3 +12,5 @@ __pycache__/
 *.o
 *.dylib
 .claude/
+devtools/python-x64/
+devtools/python-x86/
