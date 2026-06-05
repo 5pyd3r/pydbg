@@ -132,7 +132,7 @@ cpdef object wait_for_debug_event(int timeout_ms=10000):
     result = WaitForDebugEvent(&de, <DWORD>timeout_ms)
     if result == 0:
         err = GetLastError()
-        if err == 1460:  # ERROR_TIMEOUT
+        if err == 1460 or err == 121:  # ERROR_TIMEOUT or ERROR_SEM_TIMEOUT
             return None
         raise OSError(err, "WaitForDebugEvent failed")
 

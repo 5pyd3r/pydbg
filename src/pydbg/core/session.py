@@ -16,3 +16,6 @@ class DebugSession:
     target_arch: int = struct.calcsize("P") * 8  # 32 or 64, auto-detected
     bp_counter: int = 0
     breakpoints: dict = field(default_factory=dict)  # id -> (type, addr, extra)
+    # Breakpoint lifecycle: tid -> (bp_id, addr, original_bytes)
+    # Tracks breakpoints that have been hit and are pending single-step + restore
+    pending_single_step: dict = field(default_factory=dict)

@@ -1,5 +1,6 @@
 """Tests for process debugging: create, wait, continue, detach."""
 
+import struct
 import unittest
 
 from tests import TEST_TARGET_PATH
@@ -106,6 +107,77 @@ class TestDebuggerAPI(unittest.TestCase):
         dbg.detach()
         dbg.close_handle(dbg._session.process_handle)
         dbg.close_handle(dbg._session.thread_handle)
+
+    def test_attach_sets_process_handle(self):
+        """Verify attach() opens process handle so read_memory works immediately."""
+        from pydbg import Debugger
+
+        # Create process with native API (not through Debugger, so we can attach later)
+        pid, tid, h_proc, h_thr = _pydbg.create_process(TEST_TARGET_PATH)
+        # Consume CREATE_PROCESS event
+        _pydbg.wait_for_debug_event(5000)
+        _pydbg.continue_debug_event(pid, tid)
+        # Consume until initial breakpoint
+        for _ in range(20):
+            event = _pydbg.wait_for_debug_event(2000)
+            if event is None:
+                break
+            if event.get("event_name") == "EXCEPTION":
+                break
+            _pydbg.continue_debug_event(event["pid"], event["tid"])
+        # Detach so we can re-attach via Debugger
+        _pydbg.debug_active_process_stop(pid)
+        _pydbg.close_handle(h_proc)
+        _pydbg.close_handle(h_thr)
+
+        # Now attach via high-level API
+        dbg = Debugger()
+        dbg.attach(pid)
+
+        # Process handle should be set automatically
+        self.assertIsNotNone(dbg._session.process_handle)
+        self.assertNotEqual(dbg._session.process_handle, 0)
+
+        # read_memory should work without manual handle setup
+        modules = dbg.enum_modules()
+        self.assertGreater(len(modules), 0)
+        base = modules[0]["base_address"]
+        # Read MZ header
+        data = dbg.read_memory(base, 2)
+        self.assertEqual(data, b"MZ")
+
+        # Target arch should be detected
+        self.assertIn(dbg._session.target_arch, (32, 64))
+
+        dbg.detach(pid)
+        dbg.close_handle(dbg._session.process_handle)
+
+    def test_attach_detects_target_arch(self):
+        """Verify attach() detects target architecture."""
+        from pydbg import Debugger
+
+        pid, tid, h_proc, h_thr = _pydbg.create_process(TEST_TARGET_PATH)
+        _pydbg.wait_for_debug_event(5000)
+        _pydbg.continue_debug_event(pid, tid)
+        for _ in range(20):
+            event = _pydbg.wait_for_debug_event(2000)
+            if event is None:
+                break
+            if event.get("event_name") == "EXCEPTION":
+                break
+            _pydbg.continue_debug_event(event["pid"], event["tid"])
+        _pydbg.debug_active_process_stop(pid)
+        _pydbg.close_handle(h_proc)
+        _pydbg.close_handle(h_thr)
+
+        dbg = Debugger()
+        dbg.attach(pid)
+
+        expected = struct.calcsize("P") * 8
+        self.assertEqual(dbg._session.target_arch, expected)
+
+        dbg.detach(pid)
+        dbg.close_handle(dbg._session.process_handle)
 
 
 if __name__ == "__main__":
