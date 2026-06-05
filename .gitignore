@@ -14,3 +14,4 @@ __pycache__/
 .claude/
 devtools/python-x64/
 devtools/python-x86/
+.worktrees/

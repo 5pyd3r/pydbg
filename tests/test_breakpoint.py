@@ -156,5 +156,119 @@ class TestDebuggerBreakpointAPI(unittest.TestCase):
         dbg.close_handle(dbg._session.thread_handle)
 
 
+class TestBreakpointLifecycle(unittest.TestCase):
+    """Tests for automatic breakpoint lifecycle management."""
+
+    def setUp(self):
+        self.pid, self.tid, self.h_proc, self.h_thr = _pydbg.create_process(
+            TEST_TARGET_PATH
+        )
+        _pydbg.wait_for_debug_event(5000)
+        _pydbg.continue_debug_event(self.pid, self.tid)
+        # Consume until initial breakpoint
+        for _ in range(20):
+            event = _pydbg.wait_for_debug_event(2000)
+            if event is None or event.get("event_name") == "EXIT_PROCESS":
+                break
+            if event.get("event_name") == "EXCEPTION":
+                break
+            _pydbg.continue_debug_event(event["pid"], event["tid"])
+
+    def tearDown(self):
+        _pydbg.terminate_process(self.h_proc, 0)
+        for _ in range(50):
+            try:
+                event = _pydbg.wait_for_debug_event(2000)
+                if event is None:
+                    break
+                _pydbg.continue_debug_event(event["pid"], event["tid"])
+                if event.get("event_name") == "EXIT_PROCESS":
+                    break
+            except OSError:
+                break
+        _pydbg.close_handle(self.h_proc)
+        _pydbg.close_handle(self.h_thr)
+
+    def test_handle_breakpoint_hit_removes_int3(self):
+        """Verify handle_breakpoint_hit restores original byte and sets TF."""
+        from pydbg import Debugger
+
+        dbg = Debugger()
+        dbg._session.pid = self.pid
+        dbg._session.process_handle = self.h_proc
+
+        modules = dbg.enum_modules()
+        base = modules[0]["base_address"]
+        original_byte = dbg.read_memory(base, 1)
+
+        # Set breakpoint (writes INT3)
+        bp_id = dbg.set_breakpoint(base)
+        self.assertEqual(dbg.read_memory(base, 1), b"\xcc")
+
+        # Simulate breakpoint hit lifecycle
+        handled = dbg.brk_sw.handle_breakpoint_hit(self.tid, base)
+        self.assertTrue(handled, "breakpoint hit should be handled")
+
+        # INT3 should be removed — original byte restored
+        self.assertEqual(dbg.read_memory(base, 1), original_byte)
+
+        # Pending single-step should be scheduled
+        self.assertIn(self.tid, dbg._session.pending_single_step)
+
+        dbg.remove_breakpoint(bp_id)
+
+    def test_handle_single_step_restores_int3(self):
+        """Verify handle_single_step restores INT3 after single-step."""
+        from pydbg import Debugger
+
+        dbg = Debugger()
+        dbg._session.pid = self.pid
+        dbg._session.process_handle = self.h_proc
+
+        modules = dbg.enum_modules()
+        base = modules[0]["base_address"]
+
+        # Set breakpoint and simulate hit
+        bp_id = dbg.set_breakpoint(base)
+        dbg.brk_sw.handle_breakpoint_hit(self.tid, base)
+        # INT3 is now removed, pending single-step is set
+
+        # Simulate single-step event
+        handled = dbg.brk_sw.handle_single_step(self.tid)
+        self.assertTrue(handled, "single-step should be handled")
+
+        # INT3 should be restored
+        self.assertEqual(dbg.read_memory(base, 1), b"\xcc")
+
+        # Pending single-step should be cleared
+        self.assertNotIn(self.tid, dbg._session.pending_single_step)
+
+        dbg.remove_breakpoint(bp_id)
+
+    def test_lifecycle_full_cycle(self):
+        """Full cycle: set BP -> hit -> remove INT3 -> single-step -> restore INT3."""
+        from pydbg import Debugger
+
+        dbg = Debugger()
+        dbg._session.pid = self.pid
+        dbg._session.process_handle = self.h_proc
+
+        modules = dbg.enum_modules()
+        base = modules[0]["base_address"]
+        original_byte = dbg.read_memory(base, 1)
+
+        bp_id = dbg.set_breakpoint(base)
+
+        # Step 1: breakpoint hit — removes INT3, sets TF
+        dbg.brk_sw.handle_breakpoint_hit(self.tid, base)
+        self.assertEqual(dbg.read_memory(base, 1), original_byte)
+
+        # Step 2: single-step — restores INT3
+        dbg.brk_sw.handle_single_step(self.tid)
+        self.assertEqual(dbg.read_memory(base, 1), b"\xcc")
+
+        dbg.remove_breakpoint(bp_id)
+
+
 if __name__ == "__main__":
     unittest.main()

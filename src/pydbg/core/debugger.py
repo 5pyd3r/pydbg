@@ -79,6 +79,16 @@ class Debugger:
             raise ProcessError(f"Failed to attach to pid {pid}: {e}")
         self._session.pid = pid
 
+        # Open process handle so memory/thread operations work immediately
+        try:
+            h_proc = _pydbg.open_process(pid)
+            self._session.process_handle = h_proc
+            self._session.target_arch = self._detect_target_arch(h_proc)
+        except OSError:
+            # Non-fatal: attach succeeded but handle open failed
+            # User can still use wait_event / continue_event
+            pass
+
     def detach(self, pid=None):
         target = pid or self._session.pid
         if target is None:
@@ -148,6 +158,22 @@ class Debugger:
             event = self.wait_event(timeout_ms)
             if event is None:
                 continue
+
+            # Auto-handle breakpoint lifecycle before user callback
+            if event.type == "EXCEPTION":
+                code = event.exception_code
+                addr = event.exception_addr
+
+                if code == 0x80000003:  # EXCEPTION_BREAKPOINT
+                    # Try to handle breakpoint lifecycle (remove INT3 -> single-step)
+                    if self.brk_sw.handle_breakpoint_hit(event.tid, addr):
+                        self.continue_event(event.pid, event.tid)
+                        continue  # Don't deliver internal breakpoint to user
+                elif code == 0x80000004:  # EXCEPTION_SINGLE_STEP
+                    # Restore INT3 if this was from our breakpoint lifecycle
+                    if self.brk_sw.handle_single_step(event.tid):
+                        self.continue_event(event.pid, event.tid)
+                        continue  # Don't deliver internal single-step to user
 
             result = callback(event)
             if result is False:
