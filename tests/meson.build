@@ -109,3 +109,11 @@ test(
   env: test_env,
   workdir: meson.project_build_root(),
 )
+
+test(
+  'child_process',
+  py,
+  args: ['-m', 'unittest', 'tests.test_child_process'],
+  env: test_env,
+  workdir: meson.project_build_root(),
+)

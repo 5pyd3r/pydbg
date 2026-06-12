@@ -34,8 +34,12 @@ _EVENT_NAMES = {
     # RIP_INFO: "RIP_INFO",
 }
 
-cpdef tuple create_process(str path):
+cpdef tuple create_process(str path, bint debug_children=False):
     """Create a process under debug control.
+
+    Args:
+        path: Path to executable.
+        debug_children: If True, also debug child processes.
 
     Returns (pid, tid, h_process, h_thread).
     Raises OSError on failure.
@@ -50,11 +54,15 @@ cpdef tuple create_process(str path):
 
     path_bytes = path.encode('utf-8')
 
+    cdef DWORD flags = DEBUG_PROCESS
+    if not debug_children:
+        flags |= DEBUG_ONLY_THIS_PROCESS
+
     cdef BOOL result = CreateProcessA(
         <LPCSTR>NULL,
         <char*>path_bytes,
         NULL, NULL, 0,
-        DEBUG_PROCESS | DEBUG_ONLY_THIS_PROCESS,
+        flags,
         NULL, <LPCSTR>NULL,
         &si, &pi)
 
@@ -151,6 +159,8 @@ cpdef object wait_for_debug_event(int timeout_ms=10000):
         event['first_chance'] = de.u.Exception.dwFirstChance
     elif code == CREATE_PROCESS_DEBUG_EVENT:
         event['base_of_image'] = <unsigned long long>de.u.CreateProcessInfo.lpBaseOfImage
+        event['child_process_handle'] = <unsigned long long>de.u.CreateProcessInfo.hProcess
+        event['child_thread_handle'] = <unsigned long long>de.u.CreateProcessInfo.hThread
     elif code == EXIT_PROCESS_DEBUG_EVENT:
         event['exit_code'] = de.u.ExitProcess.dwExitCode
     elif code == CREATE_THREAD_DEBUG_EVENT:
