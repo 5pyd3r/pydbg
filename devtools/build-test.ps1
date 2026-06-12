@@ -44,6 +44,10 @@ function Build-And-Test($name) {
     & $python -m meson compile -C $build
     if ($LASTEXITCODE -ne 0) { Write-Host "[fail] build" -ForegroundColor Red; return $false }
 
+    # Install capstone (standard package has both win32 and win_amd64 wheels)
+    Write-Host "[pip] install capstone" -ForegroundColor Yellow
+    & $python -m pip install "capstone>=5.0" 2>&1 | Out-Null
+
     # Install
     Write-Host "[install] pip install -e ." -ForegroundColor Yellow
     Push-Location $ROOT_DIR

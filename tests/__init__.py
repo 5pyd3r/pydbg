@@ -1,7 +1,9 @@
 import os
 import struct
 
-TEST_TARGET_PATH = os.environ.get('TEST_TARGET_PATH', 'simple_target.exe')
+_TEST_DIR = os.path.dirname(os.path.abspath(__file__))
+_DEFAULT_TARGET = os.path.join(_TEST_DIR, 'target', 'simple_target.exe')
+TEST_TARGET_PATH = os.environ.get('TEST_TARGET_PATH', _DEFAULT_TARGET)
 
 # Architecture-aware register name helpers
 HOST_ARCH = struct.calcsize("P") * 8  # 32 or 64
