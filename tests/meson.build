@@ -101,3 +101,11 @@ test(
   env: test_env,
   workdir: meson.project_build_root(),
 )
+
+test(
+  'comprehensive',
+  py,
+  args: ['-m', 'unittest', 'tests.test_comprehensive'],
+  env: test_env,
+  workdir: meson.project_build_root(),
+)
