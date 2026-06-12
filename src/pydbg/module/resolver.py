@@ -16,6 +16,12 @@ class ModuleResolver:
         except OSError as e:
             raise MemError(f"EnumProcessModules: {e}")
 
+    def enumerate_handle(self, h_process):
+        try:
+            return _pydbg.enum_process_modules(h_process)
+        except OSError as e:
+            raise MemError(f"EnumProcessModules: {e}")
+
     def get_filename(self, h_module):
         try:
             return _pydbg.get_module_file_name_ex(self._s.process_handle, h_module)

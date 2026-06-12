@@ -16,9 +16,10 @@ class DebugEvent:
         "exception_name",
         "exception_info",
         "raw",
+        "is_child",
     )
 
-    def __init__(self, event_dict):
+    def __init__(self, event_dict, is_child=False):
         self.raw = event_dict
         self.type = event_dict.get("event_name", "UNKNOWN")
         self.pid = event_dict.get("pid", 0)
@@ -28,6 +29,7 @@ class DebugEvent:
         self.first_chance = event_dict.get("first_chance")
         self.exception_name = None
         self.exception_info = None
+        self.is_child = is_child
         if self.exception_code is not None:
             self.exception_name = _pydbg.exception_code_to_str(self.exception_code)
             self.exception_info = _pydbg.get_exception_info(

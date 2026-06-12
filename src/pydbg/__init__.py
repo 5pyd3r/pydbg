@@ -20,6 +20,7 @@ from .trace.step import StepTracer
 from .symbol.resolver import SymbolResolver
 from .trace.calltree import CallTree, CallNode
 from .patch.assembler import Assembler
+from .core.session import ChildProcessInfo
 from .core.event import DebugEvent
 from .exceptions import (
     BreakpointError,
@@ -36,6 +37,7 @@ HOST_ARCH = _struct.calcsize("P") * 8  # 32 or 64
 __all__ = [
     "Debugger",
     "HOST_ARCH",
+    "ChildProcessInfo",
     "DebugEvent",
     "PydbgError",
     "ProcessError",

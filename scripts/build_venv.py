@@ -100,7 +100,7 @@ def build(arch="x64"):
     else:
         print(f"[warn] no .pyd found in {pyd_pattern}")
 
-    # Copy test target executable
+    # Copy test target executables
     test_target = os.path.join(build_dir, "tests", "simple_target.exe")
     if os.path.exists(test_target):
         target_name = f"simple_target_{arch}.exe" if arch == "x64" else "simple_target.exe"
@@ -108,19 +108,29 @@ def build(arch="x64"):
         shutil.copy2(test_target, dst)
         print(f"  copied {target_name}")
 
+    # Copy child_target.exe (compiled separately, not built by meson)
+    child_src = os.path.join(ROOT, "tests", "target", f"child_target{'_x64' if arch == 'x64' else ''}.exe")
+    if not os.path.exists(child_src):
+        # Try compiling from source
+        child_c = os.path.join(ROOT, "tests", "target", "child_target.c")
+        if os.path.exists(child_c):
+            print(f"[warn] child_target_{arch}.exe not found, skipping")
+
     # Test: run with PYTHONPATH=src so pydbg is importable
     print("[test] running tests")
     test_env = env.copy()
     test_env["PYTHONPATH"] = os.path.join(ROOT, "src")
     if arch == "x64":
         test_env["TEST_TARGET_PATH"] = os.path.join(ROOT, "tests", "target", "simple_target_x64.exe")
+        test_env["TEST_CHILD_TARGET"] = os.path.join(ROOT, "tests", "target", "child_target_x64.exe")
     else:
         test_env["TEST_TARGET_PATH"] = os.path.join(ROOT, "tests", "target", "simple_target.exe")
+        test_env["TEST_CHILD_TARGET"] = os.path.join(ROOT, "tests", "target", "child_target.exe")
     r = subprocess.run(
         [python, "-m", "unittest", "tests.test_process", "tests.test_memory",
          "tests.test_thread", "tests.test_breakpoint", "tests.test_debugger",
          "tests.test_pe", "tests.test_trace", "tests.test_dump", "tests.test_hook",
-         "tests.test_comprehensive"],
+         "tests.test_comprehensive", "tests.test_child_process"],
         env=test_env, cwd=ROOT, capture_output=True, text=True
     )
     # Print summary
