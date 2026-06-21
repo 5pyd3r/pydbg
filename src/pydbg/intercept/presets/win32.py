@@ -1,0 +1,116 @@
+"""Win32 API preset definitions for game-related functions."""
+
+WIN32_API_PRESET = {
+    "CreateWindowExA": {
+        "dll": "user32.dll",
+        "params": [
+            {"name": "dwExStyle", "type": "dword"},
+            {"name": "lpClassName", "type": "string"},
+            {"name": "lpWindowName", "type": "string"},
+            {"name": "dwStyle", "type": "dword"},
+            {"name": "X", "type": "int"},
+            {"name": "Y", "type": "int"},
+            {"name": "nWidth", "type": "int"},
+            {"name": "nHeight", "type": "int"},
+            {"name": "hWndParent", "type": "pointer"},
+            {"name": "hMenu", "type": "pointer"},
+            {"name": "hInstance", "type": "pointer"},
+            {"name": "lpParam", "type": "pointer"},
+        ],
+        "ret_type": "pointer",
+        "convention": "stdcall",
+    },
+    "CreateWindowExW": {
+        "dll": "user32.dll",
+        "params": [
+            {"name": "dwExStyle", "type": "dword"},
+            {"name": "lpClassName", "type": "wstring"},
+            {"name": "lpWindowName", "type": "wstring"},
+            {"name": "dwStyle", "type": "dword"},
+            {"name": "X", "type": "int"},
+            {"name": "Y", "type": "int"},
+            {"name": "nWidth", "type": "int"},
+            {"name": "nHeight", "type": "int"},
+            {"name": "hWndParent", "type": "pointer"},
+            {"name": "hMenu", "type": "pointer"},
+            {"name": "hInstance", "type": "pointer"},
+            {"name": "lpParam", "type": "pointer"},
+        ],
+        "ret_type": "pointer",
+        "convention": "stdcall",
+    },
+    "PeekMessageA": {
+        "dll": "user32.dll",
+        "params": [
+            {"name": "lpMsg", "type": "pointer"},
+            {"name": "hWnd", "type": "pointer"},
+            {"name": "wMsgFilterMin", "type": "dword"},
+            {"name": "wMsgFilterMax", "type": "dword"},
+            {"name": "wRemoveMsg", "type": "dword"},
+        ],
+        "ret_type": "bool",
+        "convention": "stdcall",
+    },
+    "PeekMessageW": {
+        "dll": "user32.dll",
+        "params": [
+            {"name": "lpMsg", "type": "pointer"},
+            {"name": "hWnd", "type": "pointer"},
+            {"name": "wMsgFilterMin", "type": "dword"},
+            {"name": "wMsgFilterMax", "type": "dword"},
+            {"name": "wRemoveMsg", "type": "dword"},
+        ],
+        "ret_type": "bool",
+        "convention": "stdcall",
+    },
+    "GetMessageA": {
+        "dll": "user32.dll",
+        "params": [
+            {"name": "lpMsg", "type": "pointer"},
+            {"name": "hWnd", "type": "pointer"},
+            {"name": "wMsgFilterMin", "type": "dword"},
+            {"name": "wMsgFilterMax", "type": "dword"},
+        ],
+        "ret_type": "bool",
+        "convention": "stdcall",
+    },
+    "GetMessageW": {
+        "dll": "user32.dll",
+        "params": [
+            {"name": "lpMsg", "type": "pointer"},
+            {"name": "hWnd", "type": "pointer"},
+            {"name": "wMsgFilterMin", "type": "dword"},
+            {"name": "wMsgFilterMax", "type": "dword"},
+        ],
+        "ret_type": "bool",
+        "convention": "stdcall",
+    },
+    "DispatchMessageA": {
+        "dll": "user32.dll",
+        "params": [
+            {"name": "lpMsg", "type": "pointer"},
+        ],
+        "ret_type": "pointer",
+        "convention": "stdcall",
+    },
+    "DispatchMessageW": {
+        "dll": "user32.dll",
+        "params": [
+            {"name": "lpMsg", "type": "pointer"},
+        ],
+        "ret_type": "pointer",
+        "convention": "stdcall",
+    },
+    "timeGetTime": {
+        "dll": "winmm.dll",
+        "params": [],
+        "ret_type": "dword",
+        "convention": "stdcall",
+    },
+    "IsDebuggerPresent": {
+        "dll": "kernel32.dll",
+        "params": [],
+        "ret_type": "bool",
+        "convention": "stdcall",
+    },
+}
