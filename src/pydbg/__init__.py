@@ -22,6 +22,17 @@ from .trace.calltree import CallTree, CallNode
 from .patch.assembler import Assembler
 from .core.session import ChildProcessInfo
 from .core.event import DebugEvent
+from .stealth.anti_aware import AntiAware
+from .intercept.api_hook import APIInterceptor, APICall
+from .intercept.call_graph import CallGraphBuilder, CallEdge
+from .intercept.presets import load_preset as load_api_preset
+from .intercept.presets.ddraw import DDRAW_VTABLE_METHODS, decode_hresult
+from .resource.pe_resource import PEResourceParser, ResourceEntry
+from .resource.recognizer import ResourceRecognizer
+from .trace.execution import ExecutionTracer, TraceEvent
+from .trace.dataflow import DataFlowTracker
+from .analysis.workbench import AnalysisWorkbench
+from .analysis.game_analyzer import GameAnalyzer
 from .exceptions import (
     BreakpointError,
     MemError,
@@ -69,4 +80,14 @@ __all__ = [
     "CallNode",
     "MinidumpReader",
     "StackWalker",
+    "AntiAware",
+    "APIInterceptor", "APICall",
+    "CallGraphBuilder", "CallEdge",
+    "load_api_preset",
+    "DDRAW_VTABLE_METHODS", "decode_hresult",
+    "PEResourceParser", "ResourceEntry",
+    "ResourceRecognizer",
+    "ExecutionTracer", "TraceEvent",
+    "DataFlowTracker",
+    "AnalysisWorkbench", "GameAnalyzer",
 ]
