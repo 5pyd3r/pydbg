@@ -33,6 +33,7 @@ from .trace.execution import ExecutionTracer, TraceEvent
 from .trace.dataflow import DataFlowTracker
 from .analysis.workbench import AnalysisWorkbench
 from .analysis.game_analyzer import GameAnalyzer
+from .memory.monitor import MemoryMonitor, MemoryChange, Watchpoint
 from .exceptions import (
     BreakpointError,
     MemError,
@@ -90,4 +91,5 @@ __all__ = [
     "ExecutionTracer", "TraceEvent",
     "DataFlowTracker",
     "AnalysisWorkbench", "GameAnalyzer",
+    "MemoryMonitor", "MemoryChange", "Watchpoint",
 ]
