@@ -17,7 +17,10 @@ class SymbolResolver:
         except ImportError:
             raise PydbgError("_pydbg extension not available")
         sp = search_path or ""
-        _pydbg.sym_initialize(self._s.process_handle, sp, 1 if invade else 0)
+        try:
+            _pydbg.sym_initialize(self._s.process_handle, sp, 1 if invade else 0)
+        except OSError as e:
+            raise PydbgError(f"SymInitialize failed: {e}")
         self._initialized = True
 
     def cleanup(self):
@@ -27,7 +30,10 @@ class SymbolResolver:
             from .. import _pydbg
         except ImportError:
             raise PydbgError("_pydbg extension not available")
-        _pydbg.sym_cleanup(self._s.process_handle)
+        try:
+            _pydbg.sym_cleanup(self._s.process_handle)
+        except OSError as e:
+            raise PydbgError(f"SymCleanup failed: {e}")
         self._initialized = False
 
     def from_name(self, name):

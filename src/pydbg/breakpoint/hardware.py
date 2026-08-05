@@ -51,11 +51,12 @@ class HardwareBreakpointManager:
         if bp_id not in self._s.breakpoints:
             raise BreakpointError(f"Breakpoint {bp_id} not found")
 
-        bp_info = self._s.breakpoints.pop(bp_id)
+        bp_info = self._s.breakpoints[bp_id]
         if bp_info[0] != "hw":
             raise BreakpointError(
                 f"Breakpoint {bp_id} is not a hardware breakpoint (type={bp_info[0]})"
             )
+        del self._s.breakpoints[bp_id]
 
         _, addr, slot = bp_info
         self.clear(slot)

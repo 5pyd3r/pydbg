@@ -270,5 +270,151 @@ class TestBreakpointLifecycle(unittest.TestCase):
         dbg.remove_breakpoint(bp_id)
 
 
+class TestSoftwareBreakpointManagerFixes(unittest.TestCase):
+    """Regression tests for SoftwareBreakpointManager bug fixes."""
+
+    def test_remove_does_not_pop_on_type_mismatch(self):
+        """remove() must not mutate breakpoints dict when type is wrong."""
+        from pydbg.core.session import DebugSession
+        from pydbg.breakpoint.software import SoftwareBreakpointManager
+        from pydbg.exceptions import BreakpointError
+
+        session = DebugSession()
+        session.breakpoints[7] = ("hw", 0x1000, 0)  # a hardware entry
+        mgr = SoftwareBreakpointManager(session)
+        with self.assertRaises(BreakpointError):
+            mgr.remove(7)
+        self.assertIn(7, session.breakpoints)  # must NOT have been popped
+
+    def test_remove_not_found_raises(self):
+        """remove() of an unknown id raises without mutating the dict."""
+        from pydbg.core.session import DebugSession
+        from pydbg.breakpoint.software import SoftwareBreakpointManager
+        from pydbg.exceptions import BreakpointError
+
+        session = DebugSession()
+        mgr = SoftwareBreakpointManager(session)
+        with self.assertRaises(BreakpointError):
+            mgr.remove(999)
+        self.assertEqual(session.breakpoints, {})
+
+    def test_hw_remove_does_not_pop_on_type_mismatch(self):
+        """HardwareBreakpointManager.remove must not pop on type mismatch."""
+        from pydbg.core.session import DebugSession
+        from pydbg.breakpoint.hardware import HardwareBreakpointManager
+        from pydbg.exceptions import BreakpointError
+
+        session = DebugSession()
+        session.breakpoints[8] = ("int3", 0x2000, b"\x90")
+        mgr = HardwareBreakpointManager(session)
+        with self.assertRaises(BreakpointError):
+            mgr.remove(8)
+        self.assertIn(8, session.breakpoints)
+
+    @unittest.skipUnless(_has_cython, "requires Cython extension")
+    def test_handle_bp_hit_tf_failure_rearms_int3(self):
+        """If TF cannot be set, INT3 must be re-armed (no permanent removal)."""
+        from unittest import mock
+        from tests.helpers import create_debugger, teardown, entry_point
+
+        dbg, pid, tid = create_debugger()
+        try:
+            entry = entry_point(dbg)
+            bp_id = dbg.set_breakpoint(entry)
+            self.assertEqual(dbg.read_memory(entry, 1), b"\xcc")
+            with mock.patch("pydbg.breakpoint.software._pydbg.open_thread",
+                            side_effect=OSError(5, "mock")):
+                handled = dbg.brk_sw.handle_breakpoint_hit(tid, entry)
+            self.assertTrue(handled)
+            # INT3 must be restored even though TF could not be set
+            self.assertEqual(dbg.read_memory(entry, 1), b"\xcc")
+            dbg.remove_breakpoint(bp_id)
+        finally:
+            teardown(dbg)
+
+
+class TestBPDeliveryAPI(unittest.TestCase):
+    """Live coverage for the branch's new BP delivery API."""
+
+    @unittest.skipUnless(_has_cython, "requires Cython extension")
+    def test_manual_bp_lifecycle(self):
+        """wait_event/continue_event + handle_bp_manual/handle_ss_manual."""
+        from pydbg.exceptions import BreakpointError
+        from tests.helpers import create_debugger, teardown, entry_point
+
+        dbg, pid, tid = create_debugger()
+        try:
+            entry = entry_point(dbg)
+            orig = dbg.read_memory(entry, 1)  # original byte before INT3
+            bp_id = dbg.set_breakpoint(entry)
+            dbg.continue_event(pid, tid)
+
+            bp_seen = ss_seen = False
+            for _ in range(100):
+                ev = dbg.wait_event(2000)
+                if ev is None:
+                    break
+                if ev.type == "EXCEPTION":
+                    if ev.exception_code == 0x80000003 and ev.exception_addr == entry:
+                        handled = dbg.handle_bp_manual(ev.tid, ev.exception_addr)
+                        self.assertTrue(handled)
+                        # INT3 removed at delivery time -> original byte back
+                        self.assertEqual(dbg.read_memory(entry, 1), orig)
+                        bp_seen = True
+                        dbg.continue_event(ev.pid, ev.tid)
+                        continue
+                    if ev.exception_code == 0x80000004:  # single-step
+                        handled = dbg.handle_ss_manual(ev.tid)
+                        self.assertTrue(handled)
+                        # INT3 re-armed after single-step
+                        self.assertEqual(dbg.read_memory(entry, 1), b"\xcc")
+                        ss_seen = True
+                        dbg.continue_event(ev.pid, ev.tid)
+                        continue
+                dbg.continue_event(ev.pid, ev.tid)
+                if ev.type == "EXIT_PROCESS":
+                    break
+            self.assertTrue(bp_seen, "breakpoint was not hit")
+            self.assertTrue(ss_seen, "single-step was not handled")
+            try:
+                dbg.remove_breakpoint(bp_id)
+            except BreakpointError:
+                pass  # process may have already exited; INT3 is moot
+        finally:
+            teardown(dbg)
+
+    @unittest.skipUnless(_has_cython, "requires Cython extension")
+    def test_remove_all_breakpoints_restores_bytes(self):
+        from tests.helpers import create_debugger, teardown, entry_point
+
+        dbg, pid, tid = create_debugger()
+        try:
+            entry = entry_point(dbg)
+            orig1 = dbg.read_memory(entry, 1)
+            orig2 = dbg.read_memory(entry + 2, 1)
+            dbg.set_breakpoint(entry)
+            dbg.set_breakpoint(entry + 2)
+            self.assertEqual(dbg.read_memory(entry, 1), b"\xcc")
+            dbg.remove_all_breakpoints()
+            self.assertEqual(dbg.read_memory(entry, 1), orig1)
+            self.assertEqual(dbg.read_memory(entry + 2, 1), orig2)
+            self.assertEqual(dbg._session.breakpoints, {})
+            self.assertIsNone(dbg.find_breakpoint(entry))
+        finally:
+            teardown(dbg)
+
+    @unittest.skipUnless(_has_cython, "requires Cython extension")
+    def test_handle_bp_manual_unknown_addr_returns_false(self):
+        from tests.helpers import create_debugger, teardown
+
+        dbg, pid, tid = create_debugger()
+        try:
+            # no breakpoint set -> not ours
+            self.assertFalse(dbg.handle_bp_manual(tid, 0x99999999))
+            self.assertFalse(dbg.handle_ss_manual(tid))
+        finally:
+            teardown(dbg)
+
+
 if __name__ == "__main__":
     unittest.main()

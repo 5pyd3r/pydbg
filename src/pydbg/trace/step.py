@@ -1,5 +1,3 @@
-from ..exceptions import ThreadError
-
 EXCEPTION_SINGLE_STEP = 0x80000004
 
 
@@ -10,10 +8,7 @@ class StepTracer:
         self._s = session
 
     def step(self, h_thread):
-        try:
-            from ..thread.manager import ThreadManager
-        except ImportError:
-            raise ThreadError("ThreadManager not available")
+        from ..thread.manager import ThreadManager
         tm = ThreadManager(self._s)
         regs = tm.get_context(h_thread)
         regs['eflags'] = regs.get('eflags', 0) | 0x100
@@ -25,10 +20,7 @@ class StepTracer:
                 event.raw.get('exception_code') == EXCEPTION_SINGLE_STEP)
 
     def clear_tf(self, h_thread):
-        try:
-            from ..thread.manager import ThreadManager
-        except ImportError:
-            raise ThreadError("ThreadManager not available")
+        from ..thread.manager import ThreadManager
         tm = ThreadManager(self._s)
         regs = tm.get_context(h_thread)
         regs['eflags'] = regs.get('eflags', 0) & ~0x100

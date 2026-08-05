@@ -3,6 +3,13 @@ import unittest
 from pydbg.trace.step import StepTracer, EXCEPTION_SINGLE_STEP
 from pydbg.trace.calltree import CallTree, CallNode
 
+try:
+    from pydbg import _pydbg  # noqa: F401
+
+    _has_cython = True
+except ImportError:
+    _has_cython = False
+
 
 class TestStepTracer(unittest.TestCase):
 
@@ -121,6 +128,29 @@ class TestCallTree(unittest.TestCase):
         self.assertIs(tree.current_node(), tree.root)
         node = tree.on_call(0x1000, 0x2000)
         self.assertIs(tree.current_node(), node)
+
+
+class TestStepTracerLive(unittest.TestCase):
+    """Live TF-flag stepping coverage."""
+
+    @unittest.skipUnless(_has_cython, "requires Cython extension")
+    def test_step_sets_tf_and_clear_restores(self):
+        from tests.helpers import create_debugger, teardown
+        from pydbg.trace.step import StepTracer
+
+        dbg, pid, tid = create_debugger()
+        try:
+            h_thread = dbg.open_thread(tid)
+            tracer = StepTracer(dbg._session)
+            tracer.step(h_thread)
+            regs = dbg.get_registers(h_thread)
+            self.assertTrue(regs["eflags"] & 0x100)
+            tracer.clear_tf(h_thread)
+            regs2 = dbg.get_registers(h_thread)
+            self.assertFalse(regs2["eflags"] & 0x100)
+            dbg.close_handle(h_thread)
+        finally:
+            teardown(dbg)
 
 
 if __name__ == '__main__':

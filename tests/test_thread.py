@@ -79,5 +79,71 @@ class TestDebuggerThreadAPI(unittest.TestCase):
         dbg.close_handle(dbg._session.thread_handle)
 
 
+# Arch-safe invalid tid/pid for ThreadManager error-path tests. Must fit the
+# signed 32-bit C `int` param used by _pydbg.open_thread/enumerate_threads on
+# both x64 and x86 Windows (0xFFFFFFF0 would raise OverflowError at the
+# Python->Cython boundary instead of reaching the Win32 call). No real
+# tid/pid is this large, so OpenThread fails with ERROR_INVALID_PARAMETER.
+INVALID_TID = 0x7FFFFFF0
+
+
+class TestThreadManagerCoverage(unittest.TestCase):
+    """Live-process coverage for ThreadManager error paths, step, get_ids."""
+
+    @unittest.skipUnless(_has_cython, "requires Cython extension")
+    def setUp(self):
+        from tests.helpers import create_debugger
+        self.dbg, self.pid, self.tid = create_debugger()
+
+    def tearDown(self):
+        from tests.helpers import teardown
+        teardown(self.dbg)
+
+    def test_step_sets_trap_flag(self):
+        h_thread = self.dbg.open_thread(self.tid)
+        self.dbg.step(h_thread)  # sets TF (0x100)
+        regs = self.dbg.get_registers(h_thread)
+        self.assertTrue(regs["eflags"] & 0x100)
+        # clear TF so the paused process does not single-step unexpectedly
+        self.dbg.set_register(h_thread, "eflags", regs["eflags"] & ~0x100)
+        self.dbg.close_handle(h_thread)
+
+    def test_get_ids(self):
+        tids = self.dbg.thread.get_ids(self.pid)
+        self.assertIsInstance(tids, list)
+        self.assertIn(self.tid, tids)
+
+    def test_open_invalid_tid_raises(self):
+        from pydbg.exceptions import ThreadError
+        with self.assertRaises(ThreadError):
+            self.dbg.thread.open(INVALID_TID)
+
+    def test_get_context_invalid_handle_raises(self):
+        from pydbg.exceptions import ThreadError
+        with self.assertRaises(ThreadError):
+            self.dbg.thread.get_context(0)
+
+    def test_set_context_invalid_handle_raises(self):
+        from pydbg.exceptions import ThreadError
+        with self.assertRaises(ThreadError):
+            self.dbg.thread.set_context(0, {})
+
+    def test_suspend_invalid_handle_raises(self):
+        from pydbg.exceptions import ThreadError
+        with self.assertRaises(ThreadError):
+            self.dbg.thread.suspend(0)
+
+    def test_resume_invalid_handle_raises(self):
+        from pydbg.exceptions import ThreadError
+        with self.assertRaises(ThreadError):
+            self.dbg.thread.resume(0)
+
+    def test_enumerate_unknown_pid_empty(self):
+        # CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, pid) succeeds for any
+        # pid -- the pid only filters the snapshot -- so an unknown/out-of-range
+        # pid yields an empty list rather than raising.
+        self.assertEqual(self.dbg.thread.enumerate(INVALID_TID), [])
+
+
 if __name__ == "__main__":
     unittest.main()

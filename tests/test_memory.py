@@ -121,5 +121,85 @@ class TestModuleEnum(unittest.TestCase):
         self.assertTrue(len(filename) > 0)
 
 
+# Named constants for readability (used by TestMemoryManagerCoverage).
+NULL_PAGE = 0x1
+PAGE_READWRITE = 0x04
+
+
+class TestMemoryManagerCoverage(unittest.TestCase):
+    """Live-process coverage for MemoryManager error paths and handle variants."""
+
+    @unittest.skipUnless(_has_cython, "requires Cython extension")
+    def setUp(self):
+        from tests.helpers import create_debugger
+        self.dbg, self.pid, self.tid = create_debugger()
+
+    def tearDown(self):
+        from tests.helpers import teardown
+        teardown(self.dbg)
+
+    def test_write_roundtrip(self):
+        from tests.helpers import alloc_writable
+        base = alloc_writable(self.dbg, 0x1000)
+        self.assertNotEqual(base, 0)
+        payload = b"\xde\xad\xbe\xef"
+        self.dbg.write_memory(base, payload)
+        self.assertEqual(self.dbg.read_memory(base, 4), payload)
+
+    def test_protect_and_query(self):
+        from tests.helpers import alloc_writable
+        base = alloc_writable(self.dbg, 0x1000)
+        self.assertNotEqual(base, 0)
+        old = self.dbg.protect_memory(base, 0x100, PAGE_READWRITE)
+        q = self.dbg.query_memory(base)
+        self.assertEqual(q["protect"] & 0xFF, PAGE_READWRITE)
+        self.dbg.protect_memory(base, 0x100, old)  # restore
+        q2 = self.dbg.query_memory(base)
+        self.assertEqual(q2["protect"] & 0xFF, old & 0xFF)
+
+    def test_read_invalid_addr_raises(self):
+        from pydbg.exceptions import MemError
+        with self.assertRaises(MemError):
+            self.dbg.memory.read(NULL_PAGE, 4)
+
+    def test_write_invalid_addr_raises(self):
+        from pydbg.exceptions import MemError
+        with self.assertRaises(MemError):
+            self.dbg.memory.write(NULL_PAGE, b"x")
+
+    def test_query_invalid_addr_raises(self):
+        import struct
+
+        from pydbg.exceptions import MemError
+        # VirtualQueryEx succeeds on free regions (e.g. 0x1 returns a
+        # MEM_FREE region), so use an all-ones address outside the process
+        # address space to force the ERROR_INVALID_PARAMETER path.
+        # Max uintptr for the host arch: 0xFFFFFFFF on 32-bit,
+        # 0xFFFFFFFFFFFFFFFF on 64-bit (keeps this test arch-safe).
+        invalid_addr = (1 << (struct.calcsize("P") * 8)) - 1
+        with self.assertRaises(MemError):
+            self.dbg.memory.query(invalid_addr)
+
+    def test_protect_invalid_addr_raises(self):
+        from pydbg.exceptions import MemError
+        with self.assertRaises(MemError):
+            self.dbg.memory.protect(NULL_PAGE, 1, PAGE_READWRITE)
+
+    def test_handle_variants(self):
+        from pydbg.exceptions import MemError
+        from tests.helpers import module_base
+        h = self.dbg._session.process_handle
+        base = module_base(self.dbg)
+        self.assertEqual(self.dbg.memory.read_handle(h, base, 2), b"MZ")
+        with self.assertRaises(MemError):
+            self.dbg.memory.read_handle(0, base, 2)
+        with self.assertRaises(MemError):
+            self.dbg.memory.write_handle(0, base, b"x")
+        with self.assertRaises(MemError):
+            self.dbg.memory.query_handle(0, base)
+        with self.assertRaises(MemError):
+            self.dbg.memory.protect_handle(0, base, 1, 0x04)
+
+
 if __name__ == "__main__":
     unittest.main()

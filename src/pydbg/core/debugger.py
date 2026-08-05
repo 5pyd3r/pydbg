@@ -219,22 +219,47 @@ class Debugger:
             pass
 
     def run(self, callback, timeout_ms=10000):
+        """Event-driven debug loop. Runs until process exits or callback returns False.
+
+        User software breakpoints are always delivered to the callback
+        (GDB-style): when one of our breakpoints is hit, the INT3 is already
+        removed, the instruction pointer is rewound onto the breakpoint, and a
+        single-step is pending — so the callback sees the original instruction
+        in place. Return False from the callback to stop at the breakpoint (the
+        process stays paused; use wait_event()/continue_event() +
+        handle_ss_manual() to resume), or return None to transparently step
+        over it and continue. The internal single-step that re-arms the INT3
+        is handled internally and never delivered. Breakpoints set by the
+        system (e.g. the loader breakpoint) are not ours and are always
+        delivered as ordinary EXCEPTION events.
+
+        Args:
+            callback: Called for each debug event. Return False to stop.
+            timeout_ms: WaitForDebugEvent timeout in ms.
+        """
         exit_code = 1
         while True:
             event = self.wait_event(timeout_ms)
             if event is None:
                 continue
 
-            # Auto-handle breakpoint lifecycle before user callback
+            # Auto-handle breakpoint lifecycle
             if event.type == "EXCEPTION":
                 code = event.exception_code
                 addr = event.exception_addr
 
                 if code == 0x80000003:  # EXCEPTION_BREAKPOINT
-                    # Try to handle breakpoint lifecycle (remove INT3 -> single-step)
+                    # Remove INT3, rewind IP, set TF for single-step.
                     if self.brk_sw.handle_breakpoint_hit(event.tid, addr):
+                        # Our breakpoint: deliver to callback with the original
+                        # byte restored and single-step pending. The next
+                        # EXCEPTION_SINGLE_STEP re-arms the INT3 internally.
+                        result = callback(event)
+                        if result is False:
+                            break
+                        # Continue to let the single-step happen
                         self.continue_event(event.pid, event.tid)
-                        continue  # Don't deliver internal breakpoint to user
+                        continue
                 elif code == 0x80000004:  # EXCEPTION_SINGLE_STEP
                     # Restore INT3 if this was from our breakpoint lifecycle
                     if self.brk_sw.handle_single_step(event.tid):
@@ -253,6 +278,37 @@ class Debugger:
             self.continue_event(event.pid, event.tid)
 
         return exit_code
+
+    def handle_bp_manual(self, tid, addr):
+        """Manually handle breakpoint hit when using wait_event()/continue_event().
+
+        Call this after receiving EXCEPTION_BREAKPOINT to properly manage
+        the INT3 lifecycle (remove INT3 -> single-step -> re-arm).
+
+        Returns True if the breakpoint was one of ours and was handled.
+
+        Example:
+            event = dbg.wait_event()
+            if event.type == 'EXCEPTION' and event.exception_code == 0x80000003:
+                if dbg.handle_bp_manual(event.tid, event.exception_addr):
+                    # Read memory at bp address (original byte is restored)
+                    data = dbg.read_memory(event.exception_addr, 16)
+                    # Continue — single-step + re-arm happens automatically
+                dbg.continue_event(event.pid, event.tid)
+        """
+        return self.brk_sw.handle_breakpoint_hit(tid, addr)
+
+    def handle_ss_manual(self, tid):
+        """Manually handle single-step after breakpoint. Call after EXCEPTION_SINGLE_STEP."""
+        return self.brk_sw.handle_single_step(tid)
+
+    def remove_all_breakpoints(self):
+        """Remove all software breakpoints, restoring original bytes.
+        Call before detach() to avoid leaving stale INT3 bytes in code."""
+        for bp_id in list(self._session.breakpoints.keys()):
+            bp_info = self._session.breakpoints.get(bp_id)
+            if bp_info and bp_info[0] == "int3":
+                self.remove_breakpoint(bp_id)
 
     # ── delegated: memory ──────────────────────────────────────
 
@@ -280,6 +336,28 @@ class Debugger:
 
     def get_module_filename(self, h_module):
         return self.modules.get_filename(h_module)
+
+    def find_module(self, name):
+        """Find a module by basename (e.g. 'kernel32.dll')."""
+        return self.modules.find_module(name)
+
+    # ── delegated: symbols ──────────────────────────────────────
+
+    def symbol_initialize(self, search_path=None, invade=True):
+        """Initialize dbghelp symbol handler. Call before symbol lookups."""
+        self.symbols.initialize(search_path, invade)
+
+    def symbol_cleanup(self):
+        """Release dbghelp symbol resources."""
+        self.symbols.cleanup()
+
+    def symbol_from_name(self, name):
+        """Look up symbol address by name."""
+        return self.symbols.from_name(name)
+
+    def symbol_from_addr(self, address):
+        """Look up symbol name by address."""
+        return self.symbols.from_addr(address)
 
     # ── delegated: thread ──────────────────────────────────────
 
