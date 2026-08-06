@@ -4,6 +4,13 @@ import unittest
 from pydbg.hook.iat import IATHook
 from pydbg.hook.inline import InlineHook, Trampoline
 
+try:
+    from pydbg import _pydbg  # noqa: F401
+
+    _has_cython = True
+except ImportError:
+    _has_cython = False
+
 
 class TestTrampoline(unittest.TestCase):
 
@@ -176,6 +183,101 @@ class TestInlineHook(unittest.TestCase):
         hook._hooks[0x1000] = t
         self.assertIn(0x1000, hook._hooks)
         self.assertEqual(hook._hooks[0x1000].original_code, b'\x55\x48\x89\xE5')
+
+
+class TestInlineHookLive(unittest.TestCase):
+    """Live inline hook on a safe allocated stub (never executed)."""
+
+    @unittest.skipUnless(_has_cython, "requires Cython extension")
+    def test_set_and_restore_live(self):
+        from pydbg.hook.inline import Trampoline
+        from pydbg.exceptions import PydbgError
+        from tests.helpers import create_debugger, teardown, alloc_writable
+
+        dbg, pid, tid = create_debugger()
+        try:
+            target = alloc_writable(dbg, 0x40)
+            stub = alloc_writable(dbg, 0x10)
+            self.assertNotEqual(target, 0)
+            self.assertNotEqual(stub, 0)
+            dbg.write_memory(target, b"\x90" * 0x40)  # nops
+            dbg.write_memory(stub, b"\xc3" * 0x10)    # rets (never executed)
+
+            try:
+                tramp = dbg.hook_inline.set(target, stub)
+            except PydbgError as exc:
+                # Relocation-range failure if VirtualAllocEx placed regions
+                # >2GB apart (JMP rel32). This is environment-dependent.
+                self.skipTest(f"inline hook relocation failed: {exc}")
+
+            self.assertIsInstance(tramp, Trampoline)
+            self.assertNotEqual(tramp.addr, 0)
+            self.assertEqual(tramp.original_code, b"\x90" * 5)
+            # target first byte is now a relative JMP (0xE9)
+            self.assertEqual(dbg.read_memory(target, 1), b"\xe9")
+
+            dbg.hook_inline.restore(tramp)
+            self.assertEqual(dbg.read_memory(target, 5), b"\x90" * 5)
+            self.assertEqual(dbg.hook_inline._hooks, {})
+        finally:
+            teardown(dbg)
+
+    @unittest.skipUnless(_has_cython, "requires Cython extension")
+    def test_set_close_range_hook(self):
+        from tests.helpers import create_debugger, teardown, alloc_writable
+
+        dbg, pid, tid = create_debugger()
+        try:
+            region = alloc_writable(dbg, 0x1000)
+            self.assertNotEqual(region, 0)
+            target = region + 0x10
+            stub = region + 0x30  # 0x20 apart -> within rel8 (128-byte) range
+            dbg.write_memory(target, b"\x90" * 0x40)
+            dbg.write_memory(stub, b"\xc3" * 0x10)
+            tramp = dbg.hook_inline.set(target, stub)
+            self.assertEqual(dbg.read_memory(target, 1), b"\xe9")
+            dbg.hook_inline.restore(tramp)
+            self.assertEqual(dbg.read_memory(target, 5), b"\x90" * 5)
+        finally:
+            teardown(dbg)
+
+
+class TestInlineHookErrors(unittest.TestCase):
+    """Deterministic error paths for InlineHook.set/restore."""
+
+    def test_set_short_code_raises(self):
+        from unittest import mock
+        from pydbg.core.session import DebugSession
+        from pydbg.hook.inline import InlineHook
+        from pydbg.exceptions import PydbgError
+
+        hook = InlineHook(DebugSession())
+        with mock.patch.object(hook, "_read_min_5_bytes", return_value=b"\x90\x90"):
+            with mock.patch.object(hook, "_alloc", return_value=0x1000):
+                with self.assertRaises(PydbgError):
+                    hook.set(0x400000, 0x500000)
+
+    def test_set_alloc_failure_raises(self):
+        from unittest import mock
+        from pydbg.core.session import DebugSession
+        from pydbg.hook.inline import InlineHook
+        from pydbg.exceptions import PydbgError
+
+        hook = InlineHook(DebugSession())
+        with mock.patch.object(hook, "_read_min_5_bytes",
+                               return_value=b"\x90" * 8):
+            with mock.patch.object(hook, "_alloc", return_value=0):
+                with self.assertRaises(PydbgError):
+                    hook.set(0x400000, 0x500000)
+
+    def test_restore_unknown_trampoline_is_noop(self):
+        from pydbg.core.session import DebugSession
+
+        hook = InlineHook(DebugSession())
+        tramp = Trampoline(addr=0x2000, size=10, original_code=b"\x90" * 5)
+        # not in _hooks -> restore should not raise
+        hook.restore(tramp)
+        self.assertEqual(hook._hooks, {})
 
 
 if __name__ == '__main__':

@@ -13,53 +13,21 @@ class SoftwareBreakpointManager:
     def __init__(self, session):
         self._s = session
 
-    def set(self, addr):
-        try:
-            original = _pydbg.read_process_memory(self._s.process_handle, addr, 1)
-            # Make page writable before writing int3
-            old_prot = _pydbg.virtual_protect_ex(
-                self._s.process_handle, addr, 1, self._PAGE_EXECUTE_READWRITE
-            )
-            _pydbg.write_process_memory(self._s.process_handle, addr, b"\xcc")
-            # Restore original page protection
-            _pydbg.virtual_protect_ex(
-                self._s.process_handle, addr, 1, old_prot
-            )
-        except OSError as e:
-            raise BreakpointError(f"set_breakpoint at 0x{addr:X}: {e}")
-
-        self._s.bp_counter += 1
-        bp_id = self._s.bp_counter
-        self._s.breakpoints[bp_id] = ("int3", addr, original)
-        return bp_id
-
     def remove(self, bp_id):
         if bp_id not in self._s.breakpoints:
             raise BreakpointError(f"Breakpoint {bp_id} not found")
 
-        bp_info = self._s.breakpoints.pop(bp_id)
+        bp_info = self._s.breakpoints[bp_id]
         if bp_info[0] != "int3":
             raise BreakpointError(
                 f"Breakpoint {bp_id} is not a software breakpoint (type={bp_info[0]})"
             )
+        del self._s.breakpoints[bp_id]
 
         addr = bp_info[1]
         original = bp_info[2]
         h_process = bp_info[3] if len(bp_info) > 3 else self._s.process_handle
         self._restore_byte_handle(h_process, addr, original)
-
-    def _restore_byte(self, addr, original):
-        """Restore original byte at addr."""
-        try:
-            old_prot = _pydbg.virtual_protect_ex(
-                self._s.process_handle, addr, 1, self._PAGE_EXECUTE_READWRITE
-            )
-            _pydbg.write_process_memory(self._s.process_handle, addr, original)
-            _pydbg.virtual_protect_ex(
-                self._s.process_handle, addr, 1, old_prot
-            )
-        except OSError as e:
-            raise BreakpointError(f"restore_byte at 0x{addr:X}: {e}")
 
     def set_handle(self, h_process, addr):
         """Set INT3 breakpoint using explicit process handle."""
@@ -89,19 +57,6 @@ class SoftwareBreakpointManager:
         except OSError as e:
             raise BreakpointError(f"restore_byte at 0x{addr:X}: {e}")
 
-    def _write_int3(self, addr):
-        """Write INT3 byte at addr."""
-        try:
-            old_prot = _pydbg.virtual_protect_ex(
-                self._s.process_handle, addr, 1, self._PAGE_EXECUTE_READWRITE
-            )
-            _pydbg.write_process_memory(self._s.process_handle, addr, b"\xcc")
-            _pydbg.virtual_protect_ex(
-                self._s.process_handle, addr, 1, old_prot
-            )
-        except OSError as e:
-            raise BreakpointError(f"write_int3 at 0x{addr:X}: {e}")
-
     def _write_int3_handle(self, h_process, addr):
         """Write INT3 byte at addr using explicit handle."""
         try:
@@ -130,15 +85,25 @@ class SoftwareBreakpointManager:
         # Restore original byte (remove INT3)
         self._restore_byte_handle(h_process, bp_addr, original)
 
-        # Set single-step flag (TF) on the thread
+        # Set single-step flag (TF) on the thread and rewind the instruction
+        # pointer one byte back onto the breakpoint address. After an INT3
+        # exception the IP already points past the breakpoint; backing it up
+        # makes the single-step re-execute the original instruction instead of
+        # the middle of it (which would corrupt the process).
         try:
             h_thread = _pydbg.open_thread(tid)
             regs = _pydbg.get_thread_context(h_thread)
             regs["eflags"] = regs.get("eflags", 0) | 0x100
+            if "rip" in regs:
+                regs["rip"] -= 1
+            elif "eip" in regs:
+                regs["eip"] -= 1
             _pydbg.set_thread_context(h_thread, regs)
             _pydbg.close_handle(h_thread)
         except OSError:
-            # If we can't set TF, just continue — breakpoint won't auto-restore
+            # Cannot set TF — re-arm the breakpoint so the code is not left
+            # with a permanently-removed INT3.
+            self._write_int3_handle(h_process, bp_addr)
             return True
 
         # Schedule restore on next single-step event

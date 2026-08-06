@@ -19,13 +19,11 @@ class InlineHook:
 
     def set(self, target_addr, hook_addr):
         from ..disasm.engine import DisasmEngine
-        from ..patch.assembler import Assembler
         from ..memory.manager import MemoryManager
 
         mem = MemoryManager(self._s)
         mode = "x64" if getattr(self._s, 'target_arch', 64) == 64 else "x86"
         engine = DisasmEngine(mode=mode)
-        asm = Assembler(mode=mode)
 
         original_bytes = self._read_min_5_bytes(mem, engine, target_addr)
         if len(original_bytes) < 5:
@@ -39,14 +37,14 @@ class InlineHook:
         if trampoline_addr == 0:
             raise PydbgError("Failed to allocate trampoline memory")
 
-        jmp_back_code = asm.assemble(
-            f"jmp {target_addr + len(original_bytes)}",
-            trampoline_addr + len(original_bytes)
+        jmp_back_code = self._build_abs_jmp(
+            trampoline_addr + len(original_bytes),
+            target_addr + len(original_bytes),
         )
         trampoline_code = original_bytes + jmp_back_code
         mem.write(trampoline_addr, trampoline_code)
 
-        jmp_code = asm.assemble(f"jmp {hook_addr}", target_addr)
+        jmp_code = self._build_abs_jmp(target_addr, hook_addr)
         if len(jmp_code) != 5:
             raise PydbgError(f"Expected 5-byte JMP, got {len(jmp_code)} bytes")
         mem.write(target_addr, jmp_code)
@@ -72,6 +70,22 @@ class InlineHook:
             mem.write(target_addr, trampoline.original_code)
             self._free(mem, trampoline.addr, trampoline.size)
             del self._hooks[target_addr]
+
+    @staticmethod
+    def _build_abs_jmp(from_addr, to_addr):
+        """Build a 5-byte near JMP (E9 rel32) to an absolute address.
+
+        Keystone emits a short rel8 JMP when the target is within 128 bytes,
+        which the hook layout does not support; building E9 explicitly keeps
+        the JMP exactly 5 bytes in all cases.
+        """
+        rel = to_addr - (from_addr + 5)
+        if not (-(1 << 31) <= rel < (1 << 31)):
+            raise PydbgError(
+                f"Hook target 0x{to_addr:X} is out of range of 0x{from_addr:X} "
+                f"for a 5-byte JMP"
+            )
+        return b"\xE9" + (rel & 0xFFFFFFFF).to_bytes(4, "little")
 
     def _read_min_5_bytes(self, mem, engine, addr):
         data = mem.read(addr, 16)

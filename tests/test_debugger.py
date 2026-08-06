@@ -292,5 +292,52 @@ class TestFindBreakpoint(unittest.TestCase):
         self.assertIsNone(dbg.find_breakpoint(0xDEADBEEF))
 
 
+class TestRunLoopDeliverBP(unittest.TestCase):
+    """run() delivers user BP hits to the callback (GDB-style, always on)."""
+
+    @unittest.skipUnless(_has_cython, "requires Cython extension")
+    def test_user_breakpoint_delivered_by_default(self):
+        from pydbg.exceptions import BreakpointError
+        from tests.helpers import create_debugger, teardown, entry_point
+
+        dbg, pid, tid = create_debugger()
+        try:
+            entry = entry_point(dbg)
+            orig = dbg.read_memory(entry, 1)  # original byte before INT3
+            bp_id = dbg.set_breakpoint(entry)
+
+            delivered = []
+            finished = {"exit": None}
+            state = {"events": 0}
+
+            def callback(event):
+                state["events"] += 1
+                if (event.type == "EXCEPTION"
+                        and event.exception_code == 0x80000003
+                        and event.exception_addr == entry):
+                    # INT3 already removed at delivery time
+                    delivered.append(dbg.read_memory(entry, 1))
+                if event.type == "EXIT_PROCESS":
+                    finished["exit"] = event.raw.get("exit_code", -1)
+                    return False
+                if state["events"] > 5000:
+                    return False  # watchdog: fail instead of hanging
+                return None
+
+            # Resume the loader so the process can reach our BP, then run.
+            # No deliver_bp param: user BPs are always delivered now.
+            dbg.continue_event(pid, tid)
+            dbg.run(callback, timeout_ms=5000)
+
+            self.assertEqual(len(delivered), 1, "expected exactly one BP delivery")
+            self.assertEqual(delivered[0], orig)
+            try:
+                dbg.remove_breakpoint(bp_id)
+            except BreakpointError:
+                pass  # process has exited; nothing to restore
+        finally:
+            teardown(dbg)
+
+
 if __name__ == "__main__":
     unittest.main()

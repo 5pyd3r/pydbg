@@ -16,18 +16,24 @@ class MinidumpReader:
     def __init__(self, path):
         self._path = path
         self._data = None
+        self._buffer = None
 
     def _load(self):
         if self._data is not None:
             return
         with open(self._path, 'rb') as f:
             self._data = f.read()
+        # Keep a stable ctypes buffer. id(bytes) points at the object header,
+        # not the char data, so dbghelp would read garbage.
+        import ctypes
+        self._buffer = ctypes.create_string_buffer(self._data, len(self._data))
 
     def get_stream(self, stream_type):
         self._load()
         try:
+            import ctypes
             from .. import _pydbg
             return _pydbg.mini_dump_read_dump_stream(
-                id(self._data), stream_type)
+                ctypes.addressof(self._buffer), stream_type)
         except OSError as e:
             raise PydbgError(f"MiniDumpReadDumpStream failed: {e}")

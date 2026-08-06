@@ -117,3 +117,19 @@ test(
   env: test_env,
   workdir: meson.project_build_root(),
 )
+
+test(
+  'module',
+  py,
+  args: ['-m', 'unittest', 'tests.test_module'],
+  env: test_env,
+  workdir: meson.project_build_root(),
+)
+
+test(
+  'symbol',
+  py,
+  args: ['-m', 'unittest', 'tests.test_symbol'],
+  env: test_env,
+  workdir: meson.project_build_root(),
+)

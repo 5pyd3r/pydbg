@@ -14,4 +14,8 @@ __pycache__/
 .claude/
 devtools/python-x64/
 devtools/python-x86/
+venv-x64/
+venv-x86/
 .worktrees/
+.pytest_cache/
+.coverage
