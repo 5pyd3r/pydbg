@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Build pydbg with venv Python, handling Git/MSVC PATH conflicts."""
+"""Build pydbg with venv Python, handling Git/MSVC PATH conflicts.
+
+x64-only: pydbg is built for a 64-bit host (WOW64 32-bit targets are
+supported for debugging, but the extension itself is always x64).
+"""
 import subprocess
 import os
 import sys
@@ -23,14 +27,11 @@ def clean_path():
     return ";".join(clean)
 
 
-def setup_env(arch="x64"):
-    """Set up build environment with MSVC tools."""
-    venv_scripts = os.path.join(ROOT, f"venv-{arch}", "Scripts")
-    msvc_bin = MSVC_BIN if arch == "x64" else MSVC_BIN.replace("HostX64\\x64", "HostX64\\x86")
-    msvc_lib = MSVC_LIB if arch == "x64" else MSVC_LIB.replace("\\x64", "\\x86")
-    sdk_lib_arch = "x64" if arch == "x64" else "x86"
+def setup_env():
+    """Set up the x64 build environment with MSVC tools."""
+    venv_scripts = os.path.join(ROOT, "venv-x64", "Scripts")
     env = os.environ.copy()
-    env["PATH"] = venv_scripts + ";" + msvc_bin + ";" + clean_path()
+    env["PATH"] = venv_scripts + ";" + MSVC_BIN + ";" + clean_path()
     env["INCLUDE"] = ";".join([
         MSVC_INCLUDE,
         os.path.join(SDK_INCLUDE, "ucrt"),
@@ -39,46 +40,40 @@ def setup_env(arch="x64"):
         os.path.join(SDK_INCLUDE, "winrt"),
     ])
     env["LIB"] = ";".join([
-        msvc_lib,
-        os.path.join(SDK_LIB, "ucrt", sdk_lib_arch),
-        os.path.join(SDK_LIB, "um", sdk_lib_arch),
+        MSVC_LIB,
+        os.path.join(SDK_LIB, "ucrt", "x64"),
+        os.path.join(SDK_LIB, "um", "x64"),
     ])
     return env
 
 
-def build(arch="x64"):
-    """Build pydbg for the given architecture."""
-    venv = os.path.join(ROOT, f"venv-{arch}")
+def build():
+    """Build pydbg for x64."""
+    venv = os.path.join(ROOT, "venv-x64")
     meson = os.path.join(venv, "Scripts", "meson.exe")
-    build_dir = os.path.join(ROOT, f"build-venv-{arch}")
+    build_dir = os.path.join(ROOT, "build-venv-x64")
     python = os.path.join(venv, "Scripts", "python.exe")
 
     if not os.path.exists(meson):
-        print(f"[error] venv-{arch} not found. Run setup_venv.ps1 first.")
+        print("[error] venv-x64 not found. Run setup_venv.ps1 first.")
         return False
 
-    env = setup_env(arch)
-    if arch == "x86":
-        native = os.path.join(ROOT, "native-x86-venv.ini")
-    else:
-        native = None
+    env = setup_env()
 
     # Clean old build
     if os.path.exists(build_dir):
         shutil.rmtree(build_dir)
 
     # Setup
-    print(f"[configure] meson setup build-venv-{arch}")
+    print("[configure] meson setup build-venv-x64")
     cmd = [meson, "setup", build_dir, "--buildtype=release"]
-    if native and os.path.exists(native):
-        cmd += ["--native-file", native]
     r = subprocess.run(cmd, env=env, cwd=ROOT, capture_output=True, text=True)
     if r.returncode != 0:
         print(f"[fail] setup:\n{r.stderr[-500:]}")
         return False
 
     # Compile
-    print(f"[build] meson compile -C build-venv-{arch}")
+    print("[build] meson compile -C build-venv-x64")
     r = subprocess.run([meson, "compile", "-C", build_dir], env=env, cwd=ROOT,
                        capture_output=True, text=True)
     if r.returncode != 0:
@@ -103,29 +98,17 @@ def build(arch="x64"):
     # Copy test target executables
     test_target = os.path.join(build_dir, "tests", "simple_target.exe")
     if os.path.exists(test_target):
-        target_name = f"simple_target_{arch}.exe" if arch == "x64" else "simple_target.exe"
+        target_name = "simple_target_x64.exe"
         dst = os.path.join(ROOT, "tests", "target", target_name)
         shutil.copy2(test_target, dst)
         print(f"  copied {target_name}")
-
-    # Copy child_target.exe (compiled separately, not built by meson)
-    child_src = os.path.join(ROOT, "tests", "target", f"child_target{'_x64' if arch == 'x64' else ''}.exe")
-    if not os.path.exists(child_src):
-        # Try compiling from source
-        child_c = os.path.join(ROOT, "tests", "target", "child_target.c")
-        if os.path.exists(child_c):
-            print(f"[warn] child_target_{arch}.exe not found, skipping")
 
     # Test: run with PYTHONPATH=src so pydbg is importable
     print("[test] running tests")
     test_env = env.copy()
     test_env["PYTHONPATH"] = os.path.join(ROOT, "src")
-    if arch == "x64":
-        test_env["TEST_TARGET_PATH"] = os.path.join(ROOT, "tests", "target", "simple_target_x64.exe")
-        test_env["TEST_CHILD_TARGET"] = os.path.join(ROOT, "tests", "target", "child_target_x64.exe")
-    else:
-        test_env["TEST_TARGET_PATH"] = os.path.join(ROOT, "tests", "target", "simple_target.exe")
-        test_env["TEST_CHILD_TARGET"] = os.path.join(ROOT, "tests", "target", "child_target.exe")
+    test_env["TEST_TARGET_PATH"] = os.path.join(ROOT, "tests", "target", "simple_target_x64.exe")
+    test_env["TEST_CHILD_TARGET"] = os.path.join(ROOT, "tests", "target", "child_target_x64.exe")
     r = subprocess.run(
         [python, "-m", "unittest", "tests.test_process", "tests.test_memory",
          "tests.test_thread", "tests.test_breakpoint", "tests.test_debugger",
@@ -141,10 +124,9 @@ def build(arch="x64"):
         print("[fail] tests failed")
         return False
 
-    print(f"[pass] build-venv-{arch} OK")
+    print("[pass] build-venv-x64 OK")
     return True
 
 
 if __name__ == "__main__":
-    arch = sys.argv[1] if len(sys.argv) > 1 else "x64"
-    sys.exit(0 if build(arch) else 1)
+    sys.exit(0 if build() else 1)

@@ -352,3 +352,93 @@ class TestWow64Attach(unittest.TestCase):
                     dbg.close_handle(ph)
                 except Exception:
                     pass
+
+    def test_attach_hw_breakpoint(self):
+        import subprocess
+        from pydbg import Debugger
+
+        proc = subprocess.Popen(
+            [TEST_WOW64_TARGET],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        dbg = Debugger()
+        h = None
+        try:
+            dbg.attach(proc.pid)
+            tid = None
+            event = dbg.wait_event(5000)
+            if event is not None:
+                tid = event.tid
+                dbg.continue_event(event.pid, event.tid)
+            # Drain like _launch(run=True): continue everything (including the
+            # 64-bit bootstrap breakpoints 0x80000003) until the 32-bit image
+            # is mapped and the WX86 loader breakpoint 0x4000001F has passed,
+            # so main() is running. Setting a hw-bp while the process runs
+            # (suspend-first, per the WOW64 quirk in hardware.py) reliably arms
+            # Dr0 — setting it while paused at the loader breakpoint does not
+            # take effect on WOW64 attach.
+            saw_image = False
+            for _ in range(50):
+                event = dbg.wait_event(2000)
+                if event is None or event.type == "EXIT_PROCESS":
+                    break
+                if tid is None:
+                    tid = event.tid
+                dbg.continue_event(event.pid, event.tid)
+                if event.type == "EXCEPTION":
+                    if saw_image:
+                        break
+                    continue
+                try:
+                    if _module_by_name(dbg, os.path.basename(TEST_WOW64_TARGET)):
+                        saw_image = True
+                except Exception:
+                    pass
+
+            self.assertIsNotNone(tid)
+            # thread_handle must now be set (Fix 1)
+            self.assertIsNotNone(dbg._session.thread_handle)
+
+            exe = _module_by_name(dbg, os.path.basename(TEST_WOW64_TARGET))
+            self.assertIsNotNone(exe, "32-bit exe not enumerated after attach")
+            base = exe["base_address"]
+            addr = _export_address(dbg, TEST_WOW64_TARGET, base, "target_add")
+            bp_id = dbg.set_hw_breakpoint(addr, "x", 1, 0)
+            dbg.continue_event(dbg._session.pid, tid)
+
+            hit = False
+            start = time.time()
+            for _ in range(100):
+                if time.time() - start > 15:
+                    break
+                ev = dbg.wait_event(2000)
+                if ev is None:
+                    continue
+                if ev.type == "EXCEPTION" and ev.exception_code in (0x80000004, 0x4000001E):
+                    h = dbg.open_thread(tid)
+                    regs = dbg.get_registers(h)
+                    self.assertTrue(regs["dr6"] & 1)
+                    self.assertEqual(regs["eip"], addr)
+                    hit = True
+                    dbg.brk_hw.clear(0)
+                    dbg.continue_event(ev.pid, ev.tid)
+                    break
+                dbg.continue_event(ev.pid, ev.tid)
+            self.assertTrue(hit, "Dr0 breakpoint not hit after attach")
+            try:
+                dbg.remove_breakpoint(bp_id)
+            except Exception:
+                pass
+        finally:
+            if h is not None:
+                try:
+                    dbg.close_handle(h)
+                except Exception:
+                    pass
+            try:
+                dbg.detach()
+            except Exception:
+                pass
+            proc.kill()
+            proc.wait()

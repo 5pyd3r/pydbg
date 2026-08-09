@@ -98,15 +98,23 @@ class Debugger:
             raise ProcessError(f"Failed to attach to pid {pid}: {e}")
         self._session.pid = pid
 
-        # Open process handle so memory/thread operations work immediately
+        # Open process handle so memory/thread operations work immediately.
+        # If full access fails, still detect the target architecture via a
+        # query-only handle so a WOW64 target never falls back to native-64
+        # register contexts.
         try:
             h_proc = _pydbg.open_process(pid)
             self._session.process_handle = h_proc
             self._session.target_arch = self._detect_target_arch(h_proc)
         except OSError:
-            # Non-fatal: attach succeeded but handle open failed
-            # User can still use wait_event / continue_event
-            pass
+            try:
+                q = _pydbg.open_process(pid, 0x1000)  # PROCESS_QUERY_LIMITED_INFORMATION
+                try:
+                    self._session.target_arch = self._detect_target_arch(q)
+                finally:
+                    _pydbg.close_handle(q)
+            except OSError:
+                pass  # arch stays default; wait_event/continue_event still usable
 
     def detach(self, pid=None):
         target = pid or self._session.pid
@@ -116,6 +124,16 @@ class Debugger:
             _pydbg.debug_active_process_stop(target)
         except OSError as e:
             raise ProcessError(f"Failed to detach from pid {target}: {e}")
+        # Close main-session handles so repeated attach/detach cycles don't leak.
+        if target == self._session.pid:
+            for name in ("thread_handle", "process_handle"):
+                h = getattr(self._session, name, None)
+                if h:
+                    try:
+                        _pydbg.close_handle(h)
+                    except OSError:
+                        pass
+                    setattr(self._session, name, None)
 
     def terminate_process(self, exit_code=1, pid=None):
         h = self._get_process_handle(pid)
@@ -178,6 +196,16 @@ class Debugger:
         if (event.type == "EXIT_PROCESS"
                 and event.pid in self._session.child_processes):
             self._unregister_child(event)
+
+        # Attach mode: open the main thread handle from the CREATE_PROCESS
+        # event so hardware breakpoints work after attach().
+        if (event.type == "CREATE_PROCESS"
+                and event.pid == self._session.pid
+                and self._session.thread_handle is None):
+            try:
+                self._session.thread_handle = _pydbg.open_thread(event.tid)
+            except OSError:
+                pass  # non-fatal; thread ops fail later if open failed
 
         return event
 

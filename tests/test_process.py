@@ -103,10 +103,10 @@ class TestDebuggerAPI(unittest.TestCase):
 
         dbg.continue_event(pid, tid)
 
-        # Terminate
+        # Terminate: detach() now closes + clears the main-session handles
         dbg.detach()
-        dbg.close_handle(dbg._session.process_handle)
-        dbg.close_handle(dbg._session.thread_handle)
+        self.assertIsNone(dbg._session.process_handle)
+        self.assertIsNone(dbg._session.thread_handle)
 
     def test_attach_sets_process_handle(self):
         """Verify attach() opens process handle so read_memory works immediately."""
@@ -149,8 +149,9 @@ class TestDebuggerAPI(unittest.TestCase):
         # Target arch should be detected
         self.assertIn(dbg._session.target_arch, (32, 64))
 
+        # detach() closes + clears the main-session process handle
         dbg.detach(pid)
-        dbg.close_handle(dbg._session.process_handle)
+        self.assertIsNone(dbg._session.process_handle)
 
     def test_attach_detects_target_arch(self):
         """Verify attach() detects target architecture."""
@@ -176,8 +177,9 @@ class TestDebuggerAPI(unittest.TestCase):
         expected = struct.calcsize("P") * 8
         self.assertEqual(dbg._session.target_arch, expected)
 
+        # detach() closes + clears the main-session process handle
         dbg.detach(pid)
-        dbg.close_handle(dbg._session.process_handle)
+        self.assertIsNone(dbg._session.process_handle)
 
 
 if __name__ == "__main__":

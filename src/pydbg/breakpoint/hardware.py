@@ -18,6 +18,10 @@ class HardwareBreakpointManager:
             raise BreakpointError(f"Invalid condition '{condition}', use x/w/rw")
         if length not in self.LEN_MAP:
             raise BreakpointError(f"Invalid length {length}, use 1/2/4/8")
+        if self._s.target_arch == 32 and length == 8:
+            raise BreakpointError(
+                "8-byte hardware breakpoints are not supported on x86/WOW64 targets"
+            )
 
         machine = self._s.target_arch
         # WOW64 平台怪癖：运行中的线程直接 Wow64SetThreadContext 写 Dr0-3
@@ -39,7 +43,11 @@ class HardwareBreakpointManager:
             raise BreakpointError(f"set_hw_breakpoint: {e}")
         finally:
             if suspended:
-                _pydbg.resume_thread(self._s.thread_handle)
+                try:
+                    _pydbg.resume_thread(self._s.thread_handle)
+                except OSError:
+                    # 线程可能已退出；忽略，避免顶替主异常
+                    pass
 
         self._s.bp_counter += 1
         bp_id = self._s.bp_counter
@@ -58,7 +66,11 @@ class HardwareBreakpointManager:
             raise BreakpointError(f"clear_hw_breakpoint: {e}")
         finally:
             if suspended:
-                _pydbg.resume_thread(self._s.thread_handle)
+                try:
+                    _pydbg.resume_thread(self._s.thread_handle)
+                except OSError:
+                    # 线程可能已退出；忽略，避免顶替主异常
+                    pass
 
     def find(self, addr):
         for bp_id, bp_info in self._s.breakpoints.items():

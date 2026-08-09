@@ -74,6 +74,8 @@ cpdef int set_hw_breakpoint(unsigned long long h_thread, int slot, unsigned long
         raise ValueError(f"length must be 0, 1, 2, or 3, got {length}")
     if condition == 0 and length != 0:
         raise ValueError("execute breakpoints must be 1 byte")
+    if machine == 32 and length == 2:
+        raise ValueError("8-byte breakpoints not supported on x86/WOW64")
 
     cdef void* ctx = _get_context(<HANDLE><LPVOID>h_thread, machine)
 
