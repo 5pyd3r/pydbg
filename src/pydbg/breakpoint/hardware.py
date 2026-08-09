@@ -19,16 +19,27 @@ class HardwareBreakpointManager:
         if length not in self.LEN_MAP:
             raise BreakpointError(f"Invalid length {length}, use 1/2/4/8")
 
+        machine = self._s.target_arch
+        # WOW64 平台怪癖：运行中的线程直接 Wow64SetThreadContext 写 Dr0-3
+        # 约 3/4 概率不生效，须先 SuspendThread。净挂起计数保持 0。
+        suspended = False
         try:
+            if machine == 32:
+                _pydbg.suspend_thread(self._s.thread_handle)
+                suspended = True
             _pydbg.set_hw_breakpoint(
                 self._s.thread_handle,
                 slot,
                 addr,
                 self.COND_MAP[condition],
                 self.LEN_MAP[length],
+                machine,
             )
         except (OSError, ValueError) as e:
             raise BreakpointError(f"set_hw_breakpoint: {e}")
+        finally:
+            if suspended:
+                _pydbg.resume_thread(self._s.thread_handle)
 
         self._s.bp_counter += 1
         bp_id = self._s.bp_counter
@@ -36,10 +47,18 @@ class HardwareBreakpointManager:
         return bp_id
 
     def clear(self, slot):
+        machine = self._s.target_arch
+        suspended = False
         try:
-            _pydbg.clear_hw_breakpoint(self._s.thread_handle, slot)
+            if machine == 32:
+                _pydbg.suspend_thread(self._s.thread_handle)
+                suspended = True
+            _pydbg.clear_hw_breakpoint(self._s.thread_handle, slot, machine)
         except (OSError, ValueError) as e:
             raise BreakpointError(f"clear_hw_breakpoint: {e}")
+        finally:
+            if suspended:
+                _pydbg.resume_thread(self._s.thread_handle)
 
     def find(self, addr):
         for bp_id, bp_info in self._s.breakpoints.items():

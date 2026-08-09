@@ -8,6 +8,8 @@ from ._pydbg import (
     EXCEPTION_READ_FAULT,
     EXCEPTION_SINGLE_STEP,
     EXCEPTION_WRITE_FAULT,
+    STATUS_WX86_BREAKPOINT,
+    STATUS_WX86_SINGLE_STEP,
 )
 from .core.debugger import Debugger
 from .disasm.analysis import BasicBlock, CFGEdge, ControlFlowGraph, build_blocks, build_cfg
@@ -52,6 +54,8 @@ __all__ = [
     "EXCEPTION_READ_FAULT",
     "EXCEPTION_WRITE_FAULT",
     "EXCEPTION_EXECUTE_FAULT",
+    "STATUS_WX86_BREAKPOINT",
+    "STATUS_WX86_SINGLE_STEP",
     "DisasmEngine",
     "Instruction",
     "BasicBlock",

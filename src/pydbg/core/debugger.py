@@ -248,19 +248,15 @@ class Debugger:
                 code = event.exception_code
                 addr = event.exception_addr
 
-                if code == 0x80000003:  # EXCEPTION_BREAKPOINT
+                if code == _pydbg.EXCEPTION_BREAKPOINT or code == _pydbg.STATUS_WX86_BREAKPOINT:
                     # Remove INT3, rewind IP, set TF for single-step.
                     if self.brk_sw.handle_breakpoint_hit(event.tid, addr):
-                        # Our breakpoint: deliver to callback with the original
-                        # byte restored and single-step pending. The next
-                        # EXCEPTION_SINGLE_STEP re-arms the INT3 internally.
                         result = callback(event)
                         if result is False:
                             break
-                        # Continue to let the single-step happen
                         self.continue_event(event.pid, event.tid)
                         continue
-                elif code == 0x80000004:  # EXCEPTION_SINGLE_STEP
+                elif code == _pydbg.EXCEPTION_SINGLE_STEP or code == _pydbg.STATUS_WX86_SINGLE_STEP:
                     # Restore INT3 if this was from our breakpoint lifecycle
                     if self.brk_sw.handle_single_step(event.tid):
                         self.continue_event(event.pid, event.tid)
@@ -287,9 +283,15 @@ class Debugger:
 
         Returns True if the breakpoint was one of ours and was handled.
 
+        Note: WOW64 (32-bit target on a 64-bit host) reports breakpoints as
+        STATUS_WX86_BREAKPOINT (0x4000001F) instead of EXCEPTION_BREAKPOINT;
+        check for either code (or for the single-step counterpart
+        STATUS_WX86_SINGLE_STEP 0x4000001E).
+
         Example:
             event = dbg.wait_event()
-            if event.type == 'EXCEPTION' and event.exception_code == 0x80000003:
+            if (event.type == 'EXCEPTION'
+                    and event.exception_code in (0x80000003, 0x4000001F)):
                 if dbg.handle_bp_manual(event.tid, event.exception_addr):
                     # Read memory at bp address (original byte is restored)
                     data = dbg.read_memory(event.exception_addr, 16)
