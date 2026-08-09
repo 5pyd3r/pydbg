@@ -5,7 +5,7 @@ from _win32types cimport (
     HANDLE, DWORD, BOOL, LPVOID,
     OpenThread, GetThreadContext, SetThreadContext,
     Wow64GetThreadContext, Wow64SetThreadContext, WOW64_CONTEXT_ALL,
-    SuspendThread, ResumeThread, GetLastError,
+    SuspendThread, ResumeThread, GetThreadId, GetLastError,
     CloseHandle,
     THREAD_ALL_ACCESS, CONTEXT_ALL,
     CONTEXT_DEBUG_REGISTERS, CONTEXT_INTEGER, CONTEXT_CONTROL,
@@ -46,6 +46,14 @@ cpdef unsigned long long open_thread(int thread_id, int access=THREAD_ALL_ACCESS
 cpdef int get_host_arch():
     """Return host architecture: 32 or 64."""
     return pydbg_host_arch()
+
+
+cpdef unsigned long long get_thread_id(unsigned long long h_thread):
+    """Return the thread ID for a thread handle. Raises OSError on failure."""
+    cdef DWORD tid = GetThreadId(<HANDLE><LPVOID>h_thread)
+    if tid == 0:
+        raise OSError(GetLastError(), "GetThreadId failed")
+    return <unsigned long long>tid
 
 
 cpdef dict get_thread_context(unsigned long long h_thread, int machine=64):

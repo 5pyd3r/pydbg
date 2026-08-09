@@ -72,6 +72,8 @@ class Debugger:
         self._session.pid = pid
         self._session.tid = tid
         self._session.target_arch = self._detect_target_arch(h_proc)
+        self._session.register_pid_arch(pid, self._session.target_arch)
+        self._session.register_tid_arch(tid, self._session.target_arch)
         return (pid, tid)
 
     def _detect_target_arch(self, h_process):
@@ -115,6 +117,8 @@ class Debugger:
                     _pydbg.close_handle(q)
             except OSError:
                 pass  # arch stays default; wait_event/continue_event still usable
+
+        self._session.register_pid_arch(pid, self._session.target_arch)
 
     def detach(self, pid=None):
         target = pid or self._session.pid
@@ -197,6 +201,19 @@ class Debugger:
                 and event.pid in self._session.child_processes):
             self._unregister_child(event)
 
+        # Track per-thread architecture so cross-arch children resolve the
+        # correct register context.
+        if event.type == "CREATE_THREAD":
+            self._session.register_tid_arch(
+                event.tid, self._session.pid_arch.get(event.pid) or self._session.target_arch
+            )
+
+        # The main process's CREATE_PROCESS (idempotent; covers attach mode
+        # where create_process wasn't used).
+        if event.type == "CREATE_PROCESS" and event.pid == self._session.pid:
+            self._session.register_pid_arch(event.pid, self._session.target_arch)
+            self._session.register_tid_arch(event.tid, self._session.target_arch)
+
         # Attach mode: open the main thread handle from the CREATE_PROCESS
         # event so hardware breakpoints work after attach().
         if (event.type == "CREATE_PROCESS"
@@ -229,6 +246,14 @@ class Debugger:
             thread_handle=h_thr,
             base_of_image=event.raw.get("base_of_image", 0),
         )
+        # Detect the child's architecture so its threads get the right
+        # register context even when it differs from the parent's.
+        if h_proc:
+            info.target_arch = self._detect_target_arch(h_proc) or self._session.target_arch
+        else:
+            info.target_arch = self._session.target_arch
+        self._session.register_pid_arch(event.pid, info.target_arch)
+        self._session.register_tid_arch(event.tid, info.target_arch)
         self._session.child_processes[event.pid] = info
 
     def _unregister_child(self, event):

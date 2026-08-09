@@ -34,7 +34,7 @@ from .exceptions import (
 )
 
 __version__ = "0.1.0"
-HOST_ARCH = _struct.calcsize("P") * 8  # 64 under the x64-only build policy (defensive: reflects the running interpreter)
+HOST_ARCH = _struct.calcsize("P") * 8  # 64 under the x64-only build policy
 
 __all__ = [
     "Debugger",

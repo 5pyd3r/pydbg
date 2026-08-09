@@ -92,7 +92,7 @@ class SoftwareBreakpointManager:
         # the middle of it (which would corrupt the process).
         try:
             h_thread = _pydbg.open_thread(tid)
-            machine = self._s.target_arch
+            machine = self._s.arch_for_tid(tid)
             regs = _pydbg.get_thread_context(h_thread, machine)
             regs["eflags"] = regs.get("eflags", 0) | 0x100
             if "rip" in regs:

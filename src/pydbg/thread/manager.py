@@ -16,15 +16,24 @@ class ThreadManager:
         except OSError as e:
             raise ThreadError(f"OpenThread for tid {tid}: {e}")
 
+    def _machine_for(self, h_thread):
+        """Resolve the machine (32/64) for a thread handle, falling back to the
+        main target architecture when the thread cannot be resolved."""
+        try:
+            tid = _pydbg.get_thread_id(h_thread)
+            return self._s.arch_for_tid(tid)
+        except OSError:
+            return self._s.target_arch
+
     def get_context(self, h_thread):
         try:
-            return _pydbg.get_thread_context(h_thread, self._s.target_arch)
+            return _pydbg.get_thread_context(h_thread, self._machine_for(h_thread))
         except OSError as e:
             raise ThreadError(f"GetThreadContext: {e}")
 
     def set_context(self, h_thread, context):
         try:
-            _pydbg.set_thread_context(h_thread, context, self._s.target_arch)
+            _pydbg.set_thread_context(h_thread, context, self._machine_for(h_thread))
         except OSError as e:
             raise ThreadError(f"SetThreadContext: {e}")
 

@@ -442,3 +442,70 @@ class TestWow64Attach(unittest.TestCase):
                 pass
             proc.kill()
             proc.wait()
+
+
+class TestWow64ArchMapping(unittest.TestCase):
+    def test_arch_for_tid_falls_back_to_main(self):
+        from pydbg.core.session import DebugSession
+
+        s = DebugSession()
+        s.target_arch = 32
+        s.register_pid_arch(100, 32)
+        s.register_tid_arch(200, 64)
+        self.assertEqual(s.arch_for_tid(200), 64)
+        self.assertEqual(s.arch_for_tid(999), 32)  # fallback to main
+
+
+@unittest.skipUnless(_wow64_available(), "requires 64-bit host")
+class TestWow64ChildProcess(unittest.TestCase):
+    def test_cross_arch_child_gets_correct_machine(self):
+        from pydbg import Debugger
+        from tests.helpers import teardown
+
+        spawn = os.path.join(_TEST_DIR, "target", "spawn_child.exe")
+        child = os.path.join(_TEST_DIR, "target", "child_target_x64.exe")
+        if not (os.path.exists(spawn) and os.path.exists(child)):
+            self.skipTest("spawn_child.exe / child_target_x64.exe not built")
+        dbg = Debugger()
+        dbg.set_debug_children(True)
+        try:
+            parent_pid, _ = dbg.create_process(f'"{spawn}" "{child}"')
+            child_pid = child_tid = None
+            for _ in range(100):
+                ev = dbg.wait_event(2000)
+                if ev is None:
+                    break
+                if ev.type == "CREATE_PROCESS" and ev.pid != parent_pid:
+                    child_pid = ev.pid
+                    child_tid = ev.tid
+                    dbg.continue_event(ev.pid, ev.tid)
+                    break
+                dbg.continue_event(ev.pid, ev.tid)
+                if ev.type == "EXIT_PROCESS" and ev.pid == parent_pid:
+                    break
+
+            self.assertIsNotNone(child_pid, "x64 child CREATE_PROCESS not seen")
+            # parent is WOW64 (32); child_target_x64 is native x64
+            self.assertEqual(dbg._session.arch_for_tid(child_tid), 64)
+            h = dbg.open_thread(child_tid)
+            regs = dbg.get_registers(h)
+            dbg.close_handle(h)
+            self.assertEqual(regs["arch"], "x64")
+            self.assertIn("rip", regs)
+            # Drain the child's exit so no orphaned events leak into later
+            # tests (same isolation hazard that affects test_child_process).
+            # Terminate the child first: it is paused at the loader breakpoint
+            # and would not exit within a bounded wait otherwise.
+            try:
+                dbg.terminate_process(0, pid=child_pid)
+            except Exception:
+                pass
+            for _ in range(50):
+                ev = dbg.wait_event(2000)
+                if ev is None:
+                    break
+                dbg.continue_event(ev.pid, ev.tid)
+                if ev.type == "EXIT_PROCESS" and ev.pid == child_pid:
+                    break
+        finally:
+            teardown(dbg)
