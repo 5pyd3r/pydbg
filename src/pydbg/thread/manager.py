@@ -18,13 +18,13 @@ class ThreadManager:
 
     def get_context(self, h_thread):
         try:
-            return _pydbg.get_thread_context(h_thread)
+            return _pydbg.get_thread_context(h_thread, self._s.target_arch)
         except OSError as e:
             raise ThreadError(f"GetThreadContext: {e}")
 
     def set_context(self, h_thread, context):
         try:
-            _pydbg.set_thread_context(h_thread, context)
+            _pydbg.set_thread_context(h_thread, context, self._s.target_arch)
         except OSError as e:
             raise ThreadError(f"SetThreadContext: {e}")
 

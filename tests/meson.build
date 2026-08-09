@@ -133,3 +133,11 @@ test(
   env: test_env,
   workdir: meson.project_build_root(),
 )
+
+test(
+  'wow64',
+  py,
+  args: ['-m', 'unittest', 'tests.test_wow64'],
+  env: test_env,
+  workdir: meson.project_build_root(),
+)

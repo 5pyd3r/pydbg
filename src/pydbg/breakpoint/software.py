@@ -92,13 +92,14 @@ class SoftwareBreakpointManager:
         # the middle of it (which would corrupt the process).
         try:
             h_thread = _pydbg.open_thread(tid)
-            regs = _pydbg.get_thread_context(h_thread)
+            machine = self._s.target_arch
+            regs = _pydbg.get_thread_context(h_thread, machine)
             regs["eflags"] = regs.get("eflags", 0) | 0x100
             if "rip" in regs:
                 regs["rip"] -= 1
             elif "eip" in regs:
                 regs["eip"] -= 1
-            _pydbg.set_thread_context(h_thread, regs)
+            _pydbg.set_thread_context(h_thread, regs, machine)
             _pydbg.close_handle(h_thread)
         except OSError:
             # Cannot set TF — re-arm the breakpoint so the code is not left

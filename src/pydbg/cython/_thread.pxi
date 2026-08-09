@@ -4,6 +4,7 @@ from libc.stdlib cimport malloc, free
 from _win32types cimport (
     HANDLE, DWORD, BOOL, LPVOID,
     OpenThread, GetThreadContext, SetThreadContext,
+    Wow64GetThreadContext, Wow64SetThreadContext, WOW64_CONTEXT_ALL,
     SuspendThread, ResumeThread, GetLastError,
     CloseHandle,
     THREAD_ALL_ACCESS, CONTEXT_ALL,
@@ -47,113 +48,114 @@ cpdef int get_host_arch():
     return pydbg_host_arch()
 
 
-cpdef dict get_thread_context(unsigned long long h_thread):
+cpdef dict get_thread_context(unsigned long long h_thread, int machine=64):
     """Get thread register context.
 
-    Returns dict of register name -> value, with architecture-appropriate
-    register names (rax/rsp/rip on x64, eax/esp/eip on x86).
-    Also includes 'arch' key ('x64' or 'x86').
+    machine: 32 = WOW64 (x86) target, 64 = native x64 target (default).
+    Returns dict of register name -> value with architecture-appropriate
+    names (rax/rsp/rip on x64, eax/esp/eip on x86) plus 'arch'.
     Raises OSError on failure.
     """
     cdef int ctx_size = pydbg_ctx_sizeof()
     cdef void* ctx = malloc(ctx_size)
     if ctx == NULL:
         raise MemoryError("Failed to allocate CONTEXT")
-    pydbg_ctx_init(ctx, CONTEXT_ALL)
-
-    cdef BOOL result = GetThreadContext(<HANDLE><LPVOID>h_thread, ctx)
+    cdef BOOL result
+    if machine == 32:
+        pydbg_ctx_init(ctx, machine, WOW64_CONTEXT_ALL)
+        result = Wow64GetThreadContext(<HANDLE><LPVOID>h_thread, ctx)
+    else:
+        pydbg_ctx_init(ctx, machine, CONTEXT_ALL)
+        result = GetThreadContext(<HANDLE><LPVOID>h_thread, ctx)
     if result == 0:
         free(ctx)
         raise OSError(GetLastError(), "GetThreadContext failed")
 
-    cdef int arch = pydbg_host_arch()
-    cdef dict out = {}
-
-    # GP registers
-    if arch == 64:
-        for i in range(16):
-            out[_GP_NAMES_X64[i]] = pydbg_ctx_get_gp(ctx, i)
-        out['rip'] = pydbg_ctx_get_ip(ctx)
+    cdef list gp_names
+    cdef str ip_name
+    cdef str arch
+    if machine == 32:
+        gp_names = _GP_NAMES_X86
+        ip_name = 'eip'
+        arch = 'x86'
     else:
-        for i in range(8):
-            out[_GP_NAMES_X86[i]] = pydbg_ctx_get_gp(ctx, i)
-        out['eip'] = pydbg_ctx_get_ip(ctx)
+        gp_names = _GP_NAMES_X64
+        ip_name = 'rip'
+        arch = 'x64'
 
-    out['eflags'] = pydbg_ctx_get_eflags(ctx)
-
-    # Debug registers
+    cdef dict out = {}
+    cdef int i
+    for i in range(len(gp_names)):
+        out[gp_names[i]] = pydbg_ctx_get_gp(ctx, machine, i)
+    out[ip_name] = pydbg_ctx_get_ip(ctx, machine)
+    out['eflags'] = pydbg_ctx_get_eflags(ctx, machine)
     for dr in _DR_SLOTS:
-        out[f'dr{dr}'] = pydbg_ctx_get_dr(ctx, dr)
-
-    # Segment registers
+        out[f'dr{dr}'] = pydbg_ctx_get_dr(ctx, machine, dr)
     for i, name in enumerate(_SEG_NAMES):
-        out[name] = pydbg_ctx_get_seg(ctx, i)
-
-    out['arch'] = 'x64' if arch == 64 else 'x86'
+        out[name] = pydbg_ctx_get_seg(ctx, machine, i)
+    out['arch'] = arch
     free(ctx)
     return out
 
 
-cpdef int set_thread_context(unsigned long long h_thread, dict context) except? -1:
+cpdef int set_thread_context(unsigned long long h_thread, dict context, int machine=64) except? -1:
     """Set thread register context.
 
-    Accepts both x64 (rax/rip/...) and x86 (eax/eip/...) register names.
-    Only registers present in the dict are updated.
+    machine: 32 = WOW64 (x86) target, 64 = native x64 target (default).
+    Accepts both x64 (rax/rip/...) and x86 (eax/eip/...) register names;
+    only registers present in the dict are updated.
     Raises OSError on failure.
     """
     cdef int ctx_size = pydbg_ctx_sizeof()
     cdef void* ctx = malloc(ctx_size)
     if ctx == NULL:
         raise MemoryError("Failed to allocate CONTEXT")
-    pydbg_ctx_init(ctx, CONTEXT_ALL)
-
-    # First get current context
-    cdef BOOL result = GetThreadContext(<HANDLE><LPVOID>h_thread, ctx)
+    cdef BOOL result
+    if machine == 32:
+        pydbg_ctx_init(ctx, machine, WOW64_CONTEXT_ALL)
+        result = Wow64GetThreadContext(<HANDLE><LPVOID>h_thread, ctx)
+    else:
+        pydbg_ctx_init(ctx, machine, CONTEXT_ALL)
+        result = GetThreadContext(<HANDLE><LPVOID>h_thread, ctx)
     if result == 0:
         free(ctx)
         raise OSError(GetLastError(), "GetThreadContext failed (before set)")
 
-    cdef int arch = pydbg_host_arch()
-
-    # IP register
-    if arch == 64:
-        if 'rip' in context: pydbg_ctx_set_ip(ctx, context['rip'])
+    cdef list gp_names
+    if machine == 32:
+        gp_names = _GP_NAMES_X86
     else:
-        if 'eip' in context: pydbg_ctx_set_ip(ctx, context['eip'])
+        gp_names = _GP_NAMES_X64
 
-    # SP register
-    if arch == 64:
-        if 'rsp' in context: pydbg_ctx_set_sp(ctx, context['rsp'])
+    # IP / SP / BP / GP by machine
+    if machine == 32:
+        if 'eip' in context: pydbg_ctx_set_ip(ctx, machine, context['eip'])
+        if 'esp' in context: pydbg_ctx_set_sp(ctx, machine, context['esp'])
+        if 'ebp' in context: pydbg_ctx_set_bp(ctx, machine, context['ebp'])
     else:
-        if 'esp' in context: pydbg_ctx_set_sp(ctx, context['esp'])
+        if 'rip' in context: pydbg_ctx_set_ip(ctx, machine, context['rip'])
+        if 'rsp' in context: pydbg_ctx_set_sp(ctx, machine, context['rsp'])
+        if 'rbp' in context: pydbg_ctx_set_bp(ctx, machine, context['rbp'])
 
-    # BP register
-    if arch == 64:
-        if 'rbp' in context: pydbg_ctx_set_bp(ctx, context['rbp'])
-    else:
-        if 'ebp' in context: pydbg_ctx_set_bp(ctx, context['ebp'])
-
-    # GP registers
-    gp_names = _GP_NAMES_X64 if arch == 64 else _GP_NAMES_X86
     for i, name in enumerate(gp_names):
         if name in context:
-            pydbg_ctx_set_gp(ctx, i, context[name])
+            pydbg_ctx_set_gp(ctx, machine, i, context[name])
 
-    # EFLAGS
     if 'eflags' in context:
-        pydbg_ctx_set_eflags(ctx, context['eflags'])
+        pydbg_ctx_set_eflags(ctx, machine, context['eflags'])
 
-    # Debug registers
     for dr in _DR_SLOTS:
         key = f'dr{dr}'
         if key in context:
-            pydbg_ctx_set_dr(ctx, dr, context[key])
+            pydbg_ctx_set_dr(ctx, machine, dr, context[key])
 
-    result = SetThreadContext(<HANDLE><LPVOID>h_thread, ctx)
+    if machine == 32:
+        result = Wow64SetThreadContext(<HANDLE><LPVOID>h_thread, ctx)
+    else:
+        result = SetThreadContext(<HANDLE><LPVOID>h_thread, ctx)
     free(ctx)
     if result == 0:
         raise OSError(GetLastError(), "SetThreadContext failed")
-
     return 0
 
 
