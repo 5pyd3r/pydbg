@@ -74,9 +74,10 @@ class TestDebuggerThreadAPI(unittest.TestCase):
         self.assertIn(SP_REG, regs)
 
         _pydbg.close_handle(h_thread)
+        # detach() now closes + clears the main-session handles
         dbg.detach()
-        dbg.close_handle(dbg._session.process_handle)
-        dbg.close_handle(dbg._session.thread_handle)
+        self.assertIsNone(dbg._session.process_handle)
+        self.assertIsNone(dbg._session.thread_handle)
 
 
 # Arch-safe invalid tid/pid for ThreadManager error-path tests. Must fit the

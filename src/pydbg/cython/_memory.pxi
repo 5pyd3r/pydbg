@@ -8,7 +8,7 @@ from _win32types cimport (
     MEMORY_BASIC_INFORMATION, MODULEINFO,
     ReadProcessMemory, WriteProcessMemory,
     VirtualQueryEx, VirtualProtectEx, VirtualAllocEx, VirtualFreeEx,
-    EnumProcessModules, GetModuleFileNameExA,
+    EnumProcessModulesEx, LIST_MODULES_ALL, GetModuleFileNameExA,
     GetModuleInformation, GetLastError, CloseHandle,
     MEM_COMMIT, MEM_RESERVE, MEM_FREE, MEM_RELEASE, MEM_PRIVATE,
     MEM_MAPPED, MEM_IMAGE,
@@ -119,14 +119,15 @@ cpdef list enum_process_modules(uintptr_t h_process):
     """
     cdef HMODULE[1024] modules
     cdef DWORD cb_needed = 0
-    cdef BOOL result = EnumProcessModules(
+    cdef BOOL result = EnumProcessModulesEx(
         <HANDLE>h_process,
         modules,
         sizeof(modules),
-        &cb_needed)
+        &cb_needed,
+        LIST_MODULES_ALL)
 
     if result == 0:
-        raise OSError(GetLastError(), "EnumProcessModules failed")
+        raise OSError(GetLastError(), "EnumProcessModulesEx failed")
 
     cdef int count = cb_needed // sizeof(HANDLE)
     cdef list out = []

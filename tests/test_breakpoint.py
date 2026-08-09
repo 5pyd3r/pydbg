@@ -87,9 +87,10 @@ class TestDebuggerBreakpointAPI(unittest.TestCase):
         dbg.remove_breakpoint(bp_id)
 
         _pydbg.close_handle(h_thread)
+        # detach() now closes + clears the main-session handles
         dbg.detach()
-        dbg.close_handle(dbg._session.process_handle)
-        dbg.close_handle(dbg._session.thread_handle)
+        self.assertIsNone(dbg._session.process_handle)
+        self.assertIsNone(dbg._session.thread_handle)
 
     def test_breakpoint_restores_page_protection(self):
         """Verify set/remove int3 restores original page protection."""
@@ -151,9 +152,10 @@ class TestDebuggerBreakpointAPI(unittest.TestCase):
         dbg.remove_breakpoint(bp_id)
 
         _pydbg.close_handle(h_thread)
+        # detach() now closes + clears the main-session handles
         dbg.detach()
-        dbg.close_handle(dbg._session.process_handle)
-        dbg.close_handle(dbg._session.thread_handle)
+        self.assertIsNone(dbg._session.process_handle)
+        self.assertIsNone(dbg._session.thread_handle)
 
 
 class TestBreakpointLifecycle(unittest.TestCase):

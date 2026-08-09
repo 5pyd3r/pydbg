@@ -6,6 +6,8 @@ __pycache__/
 *.pyo
 *.obj
 *.exe
+*.lib
+*.exp
 *.dll
 *.so
 *.pyd

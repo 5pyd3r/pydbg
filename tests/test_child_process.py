@@ -16,6 +16,27 @@ except ImportError:
     _has_cython = False
 
 
+def _drain_child_exit(dbg, child_pid):
+    """After the parent is terminated, terminate the child (it is often paused
+    at the loader breakpoint, so it would not exit on its own within a bounded
+    wait) and drain its exit events. Without this, the child's queued events
+    leak into the NEXT test module's raw _pydbg.create_process, causing
+    order-dependent ContinueDebugEvent ERROR_INVALID_PARAMETER failures."""
+    if not child_pid:
+        return
+    try:
+        dbg.terminate_process(0, pid=child_pid)
+    except Exception:
+        pass  # already gone; drain below still consumes the exit events
+    for _ in range(50):
+        event = dbg.wait_event(2000)
+        if event is None:
+            break
+        dbg.continue_event(event.pid, event.tid)
+        if event.type == "EXIT_PROCESS" and event.pid == child_pid:
+            break
+
+
 @unittest.skipUnless(_has_cython, "requires Cython extension")
 @unittest.skipUnless(os.path.exists(TEST_CHILD_TARGET), "child_target.exe not found")
 class TestChildProcessFlag(unittest.TestCase):
@@ -59,12 +80,14 @@ class TestChildProcessTracking(unittest.TestCase):
         dbg, pid, tid = self._create_with_children()
 
         child_found = False
+        child_pid = None
         for _ in range(100):
             event = dbg.wait_event(3000)
             if event is None:
                 continue
             dbg.continue_event(event.pid, event.tid)
             if event.type == "CREATE_PROCESS" and event.is_child:
+                child_pid = event.pid
                 child_found = True
                 break
             if event.type == "EXIT_PROCESS" and event.pid == pid:
@@ -75,6 +98,7 @@ class TestChildProcessTracking(unittest.TestCase):
         self.assertGreater(len(children), 0)
 
         dbg.terminate_process(0)
+        _drain_child_exit(dbg, child_pid)
         dbg.close_handle(dbg._session.process_handle)
         dbg.close_handle(dbg._session.thread_handle)
 
@@ -104,12 +128,14 @@ class TestChildProcessTracking(unittest.TestCase):
     def test_get_child_processes(self):
         dbg, pid, tid = self._create_with_children()
 
+        child_pid = None
         for _ in range(50):
             event = dbg.wait_event(3000)
             if event is None:
                 continue
             dbg.continue_event(event.pid, event.tid)
             if event.type == "CREATE_PROCESS" and event.is_child:
+                child_pid = event.pid
                 break
 
         children = dbg.get_child_processes()
@@ -117,6 +143,7 @@ class TestChildProcessTracking(unittest.TestCase):
         self.assertGreater(len(children), 0)
 
         dbg.terminate_process(0)
+        _drain_child_exit(dbg, child_pid)
         dbg.close_handle(dbg._session.process_handle)
         dbg.close_handle(dbg._session.thread_handle)
 
@@ -125,6 +152,7 @@ class TestChildProcessTracking(unittest.TestCase):
 
         found_parent = False
         found_child = False
+        child_pid = None
         for _ in range(100):
             event = dbg.wait_event(3000)
             if event is None:
@@ -136,6 +164,7 @@ class TestChildProcessTracking(unittest.TestCase):
                     self.assertFalse(event.is_child)
                 else:
                     found_child = True
+                    child_pid = event.pid
                     self.assertTrue(event.is_child)
             if found_parent and found_child:
                 break
@@ -144,6 +173,7 @@ class TestChildProcessTracking(unittest.TestCase):
         self.assertTrue(found_child)
 
         dbg.terminate_process(0)
+        _drain_child_exit(dbg, child_pid)
         dbg.close_handle(dbg._session.process_handle)
         dbg.close_handle(dbg._session.thread_handle)
 
@@ -182,6 +212,7 @@ class TestChildProcessOperations(unittest.TestCase):
             self.assertEqual(data[:2], b"MZ")
 
         dbg.terminate_process(0)
+        _drain_child_exit(dbg, child_pid)
         dbg.close_handle(dbg._session.process_handle)
         dbg.close_handle(dbg._session.thread_handle)
 
@@ -204,6 +235,7 @@ class TestChildProcessOperations(unittest.TestCase):
             dbg.remove_breakpoint(bp_id)
 
         dbg.terminate_process(0)
+        _drain_child_exit(dbg, child_pid)
         dbg.close_handle(dbg._session.process_handle)
         dbg.close_handle(dbg._session.thread_handle)
 

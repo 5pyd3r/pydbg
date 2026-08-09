@@ -12,6 +12,8 @@ test_env.prepend('PYTHONPATH',
   meson.project_source_root()
 )
 test_env.set('TEST_TARGET_PATH', test_target.full_path())
+test_env.set('TEST_WOW64_TARGET_PATH',
+  meson.project_source_root() / 'tests' / 'target' / 'simple_target32.exe')
 
 # Test runner: use Python unittest via meson test
 test(
@@ -130,6 +132,14 @@ test(
   'symbol',
   py,
   args: ['-m', 'unittest', 'tests.test_symbol'],
+  env: test_env,
+  workdir: meson.project_build_root(),
+)
+
+test(
+  'wow64',
+  py,
+  args: ['-m', 'unittest', 'tests.test_wow64'],
   env: test_env,
   workdir: meson.project_build_root(),
 )

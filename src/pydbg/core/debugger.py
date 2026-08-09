@@ -72,6 +72,8 @@ class Debugger:
         self._session.pid = pid
         self._session.tid = tid
         self._session.target_arch = self._detect_target_arch(h_proc)
+        self._session.register_pid_arch(pid, self._session.target_arch)
+        self._session.register_tid_arch(tid, self._session.target_arch)
         return (pid, tid)
 
     def _detect_target_arch(self, h_process):
@@ -98,15 +100,25 @@ class Debugger:
             raise ProcessError(f"Failed to attach to pid {pid}: {e}")
         self._session.pid = pid
 
-        # Open process handle so memory/thread operations work immediately
+        # Open process handle so memory/thread operations work immediately.
+        # If full access fails, still detect the target architecture via a
+        # query-only handle so a WOW64 target never falls back to native-64
+        # register contexts.
         try:
             h_proc = _pydbg.open_process(pid)
             self._session.process_handle = h_proc
             self._session.target_arch = self._detect_target_arch(h_proc)
         except OSError:
-            # Non-fatal: attach succeeded but handle open failed
-            # User can still use wait_event / continue_event
-            pass
+            try:
+                q = _pydbg.open_process(pid, 0x1000)  # PROCESS_QUERY_LIMITED_INFORMATION
+                try:
+                    self._session.target_arch = self._detect_target_arch(q)
+                finally:
+                    _pydbg.close_handle(q)
+            except OSError:
+                pass  # arch stays default; wait_event/continue_event still usable
+
+        self._session.register_pid_arch(pid, self._session.target_arch)
 
     def detach(self, pid=None):
         target = pid or self._session.pid
@@ -116,6 +128,16 @@ class Debugger:
             _pydbg.debug_active_process_stop(target)
         except OSError as e:
             raise ProcessError(f"Failed to detach from pid {target}: {e}")
+        # Close main-session handles so repeated attach/detach cycles don't leak.
+        if target == self._session.pid:
+            for name in ("thread_handle", "process_handle"):
+                h = getattr(self._session, name, None)
+                if h:
+                    try:
+                        _pydbg.close_handle(h)
+                    except OSError:
+                        pass
+                    setattr(self._session, name, None)
 
     def terminate_process(self, exit_code=1, pid=None):
         h = self._get_process_handle(pid)
@@ -179,6 +201,51 @@ class Debugger:
                 and event.pid in self._session.child_processes):
             self._unregister_child(event)
 
+        # Track per-thread architecture so cross-arch children resolve the
+        # correct register context.
+        if event.type == "CREATE_THREAD":
+            self._session.register_tid_arch(
+                event.tid, self._session.pid_arch.get(event.pid) or self._session.target_arch
+            )
+
+        # Replicate process-wide hardware breakpoints to newly created threads
+        # of THIS process (DR registers are per-thread; child processes must
+        # not inherit the parent's process-wide breakpoints).
+        if event.type == "CREATE_THREAD" and event.pid == self._session.pid:
+            for bp_id, bp_info in self._session.breakpoints.items():
+                if bp_info[0] == "hw" and bp_info[3] is None:
+                    try:
+                        h = _pydbg.open_thread(event.tid)
+                        try:
+                            self.brk_hw._arm_thread(
+                                h,
+                                bp_info[1],
+                                bp_info[2],
+                                bp_info[4],
+                                bp_info[5],
+                                self._session.arch_for_tid(event.tid),
+                            )
+                        finally:
+                            _pydbg.close_handle(h)
+                    except OSError:
+                        pass  # thread may already be gone; skip replication
+
+        # The main process's CREATE_PROCESS (idempotent; covers attach mode
+        # where create_process wasn't used).
+        if event.type == "CREATE_PROCESS" and event.pid == self._session.pid:
+            self._session.register_pid_arch(event.pid, self._session.target_arch)
+            self._session.register_tid_arch(event.tid, self._session.target_arch)
+
+        # Attach mode: open the main thread handle from the CREATE_PROCESS
+        # event so hardware breakpoints work after attach().
+        if (event.type == "CREATE_PROCESS"
+                and event.pid == self._session.pid
+                and self._session.thread_handle is None):
+            try:
+                self._session.thread_handle = _pydbg.open_thread(event.tid)
+            except OSError:
+                pass  # non-fatal; thread ops fail later if open failed
+
         return event
 
     def get_child_processes(self):
@@ -201,6 +268,14 @@ class Debugger:
             thread_handle=h_thr,
             base_of_image=event.raw.get("base_of_image", 0),
         )
+        # Detect the child's architecture so its threads get the right
+        # register context even when it differs from the parent's.
+        if h_proc:
+            info.target_arch = self._detect_target_arch(h_proc) or self._session.target_arch
+        else:
+            info.target_arch = self._session.target_arch
+        self._session.register_pid_arch(event.pid, info.target_arch)
+        self._session.register_tid_arch(event.tid, info.target_arch)
         self._session.child_processes[event.pid] = info
 
     def _unregister_child(self, event):
@@ -248,19 +323,15 @@ class Debugger:
                 code = event.exception_code
                 addr = event.exception_addr
 
-                if code == 0x80000003:  # EXCEPTION_BREAKPOINT
+                if code == _pydbg.EXCEPTION_BREAKPOINT or code == _pydbg.STATUS_WX86_BREAKPOINT:
                     # Remove INT3, rewind IP, set TF for single-step.
                     if self.brk_sw.handle_breakpoint_hit(event.tid, addr):
-                        # Our breakpoint: deliver to callback with the original
-                        # byte restored and single-step pending. The next
-                        # EXCEPTION_SINGLE_STEP re-arms the INT3 internally.
                         result = callback(event)
                         if result is False:
                             break
-                        # Continue to let the single-step happen
                         self.continue_event(event.pid, event.tid)
                         continue
-                elif code == 0x80000004:  # EXCEPTION_SINGLE_STEP
+                elif code == _pydbg.EXCEPTION_SINGLE_STEP or code == _pydbg.STATUS_WX86_SINGLE_STEP:
                     # Restore INT3 if this was from our breakpoint lifecycle
                     if self.brk_sw.handle_single_step(event.tid):
                         self.continue_event(event.pid, event.tid)
@@ -287,9 +358,15 @@ class Debugger:
 
         Returns True if the breakpoint was one of ours and was handled.
 
+        Note: WOW64 (32-bit target on a 64-bit host) reports breakpoints as
+        STATUS_WX86_BREAKPOINT (0x4000001F) instead of EXCEPTION_BREAKPOINT;
+        check for either code (or for the single-step counterpart
+        STATUS_WX86_SINGLE_STEP 0x4000001E).
+
         Example:
             event = dbg.wait_event()
-            if event.type == 'EXCEPTION' and event.exception_code == 0x80000003:
+            if (event.type == 'EXCEPTION'
+                    and event.exception_code in (0x80000003, 0x4000001F)):
                 if dbg.handle_bp_manual(event.tid, event.exception_addr):
                     # Read memory at bp address (original byte is restored)
                     data = dbg.read_memory(event.exception_addr, 16)
@@ -414,8 +491,8 @@ class Debugger:
                 f"Unknown breakpoint type '{bp_info[0]}' for bp_id {bp_id}"
             )
 
-    def set_hw_breakpoint(self, addr, condition="x", length=1, slot=0):
-        return self.brk_hw.set(addr, condition, length, slot)
+    def set_hw_breakpoint(self, addr, condition="x", length=1, slot=0, tid=None):
+        return self.brk_hw.set(addr, condition, length, slot, tid)
 
     def find_breakpoint(self, addr):
         return self.brk_sw.find(addr) or self.brk_hw.find(addr)

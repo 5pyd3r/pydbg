@@ -1,7 +1,12 @@
 """ModuleResolver — enumerate modules and resolve filenames."""
 
+import struct
+
 from .. import _pydbg
 from ..exceptions import MemError
+
+# PE IMAGE_FILE_HEADER.Machine -> architecture label.
+_MACHINE_TO_ARCH = {0x14C: "x86", 0x8664: "x64"}
 
 
 class ModuleResolver:
@@ -10,11 +15,32 @@ class ModuleResolver:
     def __init__(self, session):
         self._s = session
 
-    def enumerate(self):
-        """Return list of loaded modules with handle, base_address, and name.
+    @staticmethod
+    def _module_arch(h_proc, base):
+        """Determine a module's architecture by reading its PE header machine."""
+        try:
+            dos = _pydbg.read_process_memory(h_proc, base, 0x40)
+            if len(dos) < 0x40 or dos[:2] != b"MZ":
+                return "unknown"
+            e_lfanew = struct.unpack_from("<I", dos, 0x3C)[0]
+            nt = _pydbg.read_process_memory(h_proc, base + e_lfanew, 6)
+            if len(nt) < 6 or nt[:4] != b"PE\x00\x00":
+                return "unknown"
+            # NT header layout: Signature "PE\0\0" (4 bytes) then
+            # IMAGE_FILE_HEADER.Machine (WORD) at offset 4.
+            machine = struct.unpack_from("<H", nt, 4)[0]
+            return _MACHINE_TO_ARCH.get(machine, "unknown")
+        except (OSError, TypeError):
+            return "unknown"
 
-        Each dict: {'handle': int, 'base_address': int, 'name': str}
-        'name' is the full filesystem path to the module file.
+    def enumerate(self):
+        """Return list of loaded modules with handle, base_address, name, arch.
+
+        Each dict: {'handle': int, 'base_address': int, 'name': str,
+                    'arch': 'x86' | 'x64' | 'unknown'}
+        'name' is the full filesystem path to the module file. 'arch' is
+        derived from the module's PE header machine field, so WOW64 targets
+        yield both 32-bit modules ('x86') and 64-bit modules ('x64').
         """
         try:
             modules = _pydbg.enum_process_modules(self._s.process_handle)
@@ -24,6 +50,7 @@ class ModuleResolver:
         # Resolve module names
         h_proc = self._s.process_handle
         for m in modules:
+            m['arch'] = self._module_arch(h_proc, m['base_address'])
             try:
                 m['name'] = _pydbg.get_module_file_name_ex(h_proc, m['handle'])
             except OSError:
@@ -38,6 +65,7 @@ class ModuleResolver:
             raise MemError(f"EnumProcessModules: {e}")
 
         for m in modules:
+            m['arch'] = self._module_arch(h_process, m['base_address'])
             try:
                 m['name'] = _pydbg.get_module_file_name_ex(h_process, m['handle'])
             except OSError:

@@ -13,6 +13,7 @@ class ChildProcessInfo:
     thread_handle: int          # 主线程句柄
     base_of_image: int = 0      # 加载基址
     exit_code: int | None = None  # 退出后填入
+    target_arch: int = 0        # 32/64, 检测到后填入
 
 
 @dataclass
@@ -33,3 +34,21 @@ class DebugSession:
     # Child process debugging
     debug_children: bool = False
     child_processes: dict = field(default_factory=dict)  # pid -> ChildProcessInfo
+
+    # Per-process/per-thread architecture for child-process dispatch.
+    pid_arch: dict = field(default_factory=dict)   # pid -> target_arch (32/64)
+    tid_arch: dict = field(default_factory=dict)   # tid -> target_arch
+
+    def register_pid_arch(self, pid, arch):
+        """Record the architecture (32/64) of a process by pid."""
+        self.pid_arch[pid] = arch
+
+    def register_tid_arch(self, tid, arch):
+        """Record the architecture of a thread by tid."""
+        self.tid_arch[tid] = arch
+
+    def arch_for_tid(self, tid):
+        """Return the architecture for a thread id, falling back to the main
+        target architecture when the thread is not tracked (e.g. a thread
+        created before attach, or one not yet observed via a debug event)."""
+        return self.tid_arch.get(tid) or self.target_arch

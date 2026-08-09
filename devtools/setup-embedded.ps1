@@ -1,4 +1,4 @@
-# setup-embedded.ps1 — Download and configure embedded Python for x86/x64
+# setup-embedded.ps1 — Download and configure embedded Python for x64 (WOW64 targets supported)
 # Usage: .\devtools\setup-embedded.ps1
 
 $ErrorActionPreference = "Stop"
@@ -7,8 +7,8 @@ $PYTHON_VERSION = "3.13.3"
 $DEVTOOLS_DIR = Split-Path -Parent $MyInvocation.MyCommand.Path
 $ROOT_DIR = Split-Path -Parent $DEVTOOLS_DIR
 
-$ARCHES = @("amd64", "win32")
-$NAMES = @("x64", "x86")
+$ARCHES = @("amd64")
+$NAMES = @("x64")
 
 for ($i = 0; $i -lt $ARCHES.Length; $i++) {
     $arch = $ARCHES[$i]
