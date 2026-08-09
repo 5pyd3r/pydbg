@@ -3,7 +3,7 @@
 Windows 原生二进制调试器 —— 基于 Cython 封装 Win32 Debug API，提供 Pythonic 的高层接口。
 
 [![CI](https://github.com/5pyd3r/pydbg/actions/workflows/ci.yml/badge.svg)](https://github.com/5pyd3r/pydbg/actions/workflows/ci.yml)
-![Platform](https://img.shields.io/badge/platform-Windows%20x64%20%7C%20x86-blue)
+![Platform](https://img.shields.io/badge/platform-Windows%20x64-blue)
 ![Python](https://img.shields.io/badge/python-3.8%2B-blue)
 
 ## 功能
@@ -19,8 +19,8 @@ Windows 原生二进制调试器 —— 基于 Cython 封装 Win32 Debug API，�
 
 ## 安装
 
-> **支持 Windows x64 和 x86。** 调试 API 依赖 Win32 原生函数。
-> 扩展根据 Python 解释器位数自动编译为对应架构。
+> **支持 Windows x64（可调试 WOW64 32 位目标）。** 调试 API 依赖 Win32 原生函数。
+> 扩展只编译为 x64（win_amd64）；32 位目标经 WOW64 层统一调试。
 
 ```bash
 pip install .
@@ -235,25 +235,17 @@ Debugger (core/debugger.py)           — 门面，生命周期 + 事件循环
   └── modules: ModuleResolver         — 枚举模块、解析文件名 (module/resolver.py)
 ```
 
-### 32/64 位支持
+### 目标架构支持
 
-扩展编译时根据 Python 解释器位数自动选择架构。运行时特性：
+宿主恒为 64 位（`win_amd64`）。扩展按**目标**架构分发上下文：
 
-- **寄存器名** — `get_thread_context()` 返回架构适配的寄存器名（x64: `rax`/`rip`，x86: `eax`/`eip`）
-- **目标检测** — `create_process()` 通过 `IsWow64Process` 自动检测目标进程位数，存入 `session.target_arch`
-- **Hook 适配** — `InlineHook` 和 `IATHook` 根据 `target_arch` 自动选择反汇编模式和指针大小
+- **x64 目标** — `get_registers()` 返回 x64 寄存器名（`rax`/`rip`/`rsp`/...）。
+- **WOW64（32 位）目标** — `create_process()`/`attach()` 通过 `IsWow64Process`
+  检测，`get_registers()` 返回 x86 寄存器名（`eax`/`eip`/`esp`/...）。
 
-```python
-from pydbg import Debugger, HOST_ARCH
-
-dbg = Debugger()
-print(f"Host: {HOST_ARCH}-bit")  # 64 或 32
-
-pid, tid = dbg.create_process("target.exe")
-print(f"Target: {dbg._session.target_arch}-bit")
-```
-
-Cython 扩展统一入口：`src/pydbg/cython/_pydbg.pyx`，通过 `include` 合并所有子模块（`_process.pxi`、`_memory.pxi`、`_thread.pxi`、`_exception.pxi`、`_bp.pxi`）。
+软件断点/硬件断点/单步按目标架构正确处理（WOW64 走 `Wow64GetThreadContext` +
+`STATUS_WX86_*` 事件码）；模块枚举用 `EnumProcessModulesEx(LIST_MODULES_ALL)`
+同时列出 32/64 位模块，并标注 `arch` 字段。
 
 ## 开发
 
@@ -274,26 +266,15 @@ meson test -C build --print-errorlogs
 flake8 src/ tests/ --max-line-length=120
 ```
 
-### 使用 Embedded Python 本地验证双架构
-
-无需同时安装 32/64 位 Python，使用 `devtools/` 脚本下载 embedded 版本即可本地验证：
+### 使用 Embedded Python 本地验证
 
 ```powershell
-# 首次：下载并配置 embedded Python (x64 + x86)
+# 首次：下载并配置 embedded Python (x64)
 .\devtools\setup-embedded.ps1
 
-# 构建并测试当前架构
+# 构建并测试
 .\devtools\build-test.ps1
-
-# 指定架构
-.\devtools\build-test.ps1 -Arch x86
-.\devtools\build-test.ps1 -Arch x64
-
-# 同时验证两个架构
-.\devtools\build-test.ps1 -Arch all
 ```
-
-最终验证以 CI 为准（GitHub Actions 同时跑 x64/x86）。
 
 ## License
 

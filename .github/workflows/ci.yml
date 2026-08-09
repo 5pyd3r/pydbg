@@ -7,20 +7,17 @@ on:
 jobs:
   build-and-test:
     runs-on: windows-latest
-    strategy:
-      matrix:
-        arch: [x64, x86]
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-python@v5
         with:
           python-version: "3.13"
-          architecture: ${{ matrix.arch }}
+          architecture: x64
 
       - uses: ilammy/msvc-dev-cmd@v1
         with:
-          arch: ${{ matrix.arch }}
+          arch: amd64
 
       - name: Install build deps
         run: pip install meson meson-python ninja cython flake8 'capstone>=5.0' keystone-engine
@@ -33,6 +30,9 @@ jobs:
 
       - name: Build
         run: meson compile -C build
+
+      - name: Build 32-bit WOW64 test target
+        run: powershell -ExecutionPolicy Bypass -File scripts/build-target32.ps1
 
       - name: Test
         run: |

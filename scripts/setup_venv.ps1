@@ -1,78 +1,69 @@
-# setup_venv.ps1 — Create 32-bit and 64-bit venvs with all dependencies
+# setup_venv.ps1 — Create the 64-bit venv with all dependencies (WOW64 targets supported)
 #
 # Usage:
-#   .\scripts\setup_venv.ps1              # setup both architectures
-#   .\scripts\setup_venv.ps1 -Arch x64    # setup x64 only
-#   .\scripts\setup_venv.ps1 -Arch x86    # setup x86 only
-
-param(
-    [ValidateSet("x86", "x64", "all")]
-    [string]$Arch = "all"
-)
+#   .\scripts\setup_venv.ps1              # setup x64 venv
 
 $ErrorActionPreference = "Stop"
 
 $ROOT_DIR = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
 
-# System Python paths (pre-installed)
+# System Python path (pre-installed, x64)
 $PYTHON_X64 = "C:\Users\Spyder\AppData\Local\Python\pythoncore-3.14-64\python.exe"
-$PYTHON_X86 = "C:\Users\Spyder\AppData\Local\Python\pythoncore-3.14-32\python.exe"
 
-function Setup-Venv($name, $pythonExe) {
-    $venvDir = Join-Path $ROOT_DIR "venv-$name"
+$venvDir = Join-Path $ROOT_DIR "venv-x64"
 
-    Write-Host ""
-    Write-Host "========== venv-$name ==========" -ForegroundColor Cyan
+Write-Host ""
+Write-Host "========== venv-x64 ==========" -ForegroundColor Cyan
 
-    if (-not (Test-Path $pythonExe)) {
-        Write-Host "[error] Python not found: $pythonExe" -ForegroundColor Red
-        return $false
-    }
+if (-not (Test-Path $PYTHON_X64)) {
+    Write-Host "[error] Python not found: $PYTHON_X64" -ForegroundColor Red
+    exit 1
+}
 
-    # Show Python version and arch
-    $pyVer = & $pythonExe --version 2>&1
-    $pyArch = & $pythonExe -c "import struct; print(f'{struct.calcsize('P')*8}-bit')" 2>&1
-    Write-Host "[info] $pyVer ($pyArch)" -ForegroundColor Gray
+# Show Python version and arch
+$pyVer = & $PYTHON_X64 --version 2>&1
+$pyArch = & $PYTHON_X64 -c "import struct; print(f'{struct.calcsize('P')*8}-bit')" 2>&1
+Write-Host "[info] $pyVer ($pyArch)" -ForegroundColor Gray
 
-    # Create venv
-    if (Test-Path $venvDir) {
-        Write-Host "[clean] Removing existing venv-$name" -ForegroundColor Yellow
-        Remove-Item -Recurse -Force $venvDir
-    }
+# Create venv
+if (Test-Path $venvDir) {
+    Write-Host "[clean] Removing existing venv-x64" -ForegroundColor Yellow
+    Remove-Item -Recurse -Force $venvDir
+}
 
-    Write-Host "[create] python -m venv venv-$name" -ForegroundColor Yellow
-    & $pythonExe -m venv $venvDir
-    if ($LASTEXITCODE -ne 0) {
-        Write-Host "[fail] venv creation" -ForegroundColor Red
-        return $false
-    }
+Write-Host "[create] python -m venv venv-x64" -ForegroundColor Yellow
+& $PYTHON_X64 -m venv $venvDir
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "[fail] venv creation" -ForegroundColor Red
+    exit 1
+}
 
-    $venvPython = Join-Path $venvDir "Scripts\python.exe"
-    $venvPip = Join-Path $venvDir "Scripts\pip.exe"
+$venvPython = Join-Path $venvDir "Scripts\python.exe"
+$venvPip = Join-Path $venvDir "Scripts\pip.exe"
 
-    # Upgrade pip
-    Write-Host "[pip] upgrade pip" -ForegroundColor Yellow
-    & $venvPython -m pip install --upgrade pip 2>&1 | Out-Null
+# Upgrade pip
+Write-Host "[pip] upgrade pip" -ForegroundColor Yellow
+& $venvPython -m pip install --upgrade pip 2>&1 | Out-Null
 
-    # Install common build dependencies
-    Write-Host "[pip] install build deps" -ForegroundColor Yellow
-    & $venvPip install meson meson-python ninja cython pytest pytest-cov flake8 keystone-engine
-    if ($LASTEXITCODE -ne 0) {
-        Write-Host "[fail] build deps install" -ForegroundColor Red
-        return $false
-    }
+# Install common build dependencies
+Write-Host "[pip] install build deps" -ForegroundColor Yellow
+& $venvPip install meson meson-python ninja cython pytest pytest-cov flake8 keystone-engine
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "[fail] build deps install" -ForegroundColor Red
+    exit 1
+}
 
-    # Install capstone (standard package has both win32 and win_amd64 wheels)
-    Write-Host "[pip] install capstone" -ForegroundColor Yellow
-    & $venvPip install "capstone>=5.0"
-    if ($LASTEXITCODE -ne 0) {
-        Write-Host "[fail] capstone install" -ForegroundColor Red
-        return $false
-    }
+# Install capstone (win_amd64 wheel)
+Write-Host "[pip] install capstone" -ForegroundColor Yellow
+& $venvPip install "capstone>=5.0"
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "[fail] capstone install" -ForegroundColor Red
+    exit 1
+}
 
-    # Verify imports
-    Write-Host "[verify] checking imports..." -ForegroundColor Yellow
-    & $venvPython -c @"
+# Verify imports
+Write-Host "[verify] checking imports..." -ForegroundColor Yellow
+& $venvPython -c @"
 import sys
 print(f'  Python {sys.version}')
 import struct
@@ -94,29 +85,5 @@ except ImportError as e:
     print(f'  cython: FAILED - {e}')
 "@
 
-    Write-Host "[pass] venv-$name ready" -ForegroundColor Green
-    Write-Host "  Activate: .\venv-$name\Scripts\Activate.ps1" -ForegroundColor Gray
-    return $true
-}
-
-$results = @{}
-
-if ($Arch -eq "all") {
-    $results["x64"] = Setup-Venv "x64" $PYTHON_X64
-    $results["x86"] = Setup-Venv "x86" $PYTHON_X86
-} elseif ($Arch -eq "x64") {
-    $results["x64"] = Setup-Venv "x64" $PYTHON_X64
-} else {
-    $results["x86"] = Setup-Venv "x86" $PYTHON_X86
-}
-
-Write-Host ""
-Write-Host "========== Summary ==========" -ForegroundColor Cyan
-foreach ($a in $results.Keys) {
-    $status = if ($results[$a]) { "PASS" } else { "FAIL" }
-    $color = if ($results[$a]) { "Green" } else { "Red" }
-    Write-Host "  $a : $status" -ForegroundColor $color
-}
-
-$failed = $results.Values | Where-Object { -not $_ }
-if ($failed) { exit 1 }
+Write-Host "[pass] venv-x64 ready" -ForegroundColor Green
+Write-Host "  Activate: .\venv-x64\Scripts\Activate.ps1" -ForegroundColor Gray
