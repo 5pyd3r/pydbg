@@ -208,6 +208,28 @@ class Debugger:
                 event.tid, self._session.pid_arch.get(event.pid) or self._session.target_arch
             )
 
+        # Replicate process-wide hardware breakpoints to newly created threads
+        # of THIS process (DR registers are per-thread; child processes must
+        # not inherit the parent's process-wide breakpoints).
+        if event.type == "CREATE_THREAD" and event.pid == self._session.pid:
+            for bp_id, bp_info in self._session.breakpoints.items():
+                if bp_info[0] == "hw" and bp_info[3] is None:
+                    try:
+                        h = _pydbg.open_thread(event.tid)
+                        try:
+                            self.brk_hw._arm_thread(
+                                h,
+                                bp_info[1],
+                                bp_info[2],
+                                bp_info[4],
+                                bp_info[5],
+                                self._session.arch_for_tid(event.tid),
+                            )
+                        finally:
+                            _pydbg.close_handle(h)
+                    except OSError:
+                        pass  # thread may already be gone; skip replication
+
         # The main process's CREATE_PROCESS (idempotent; covers attach mode
         # where create_process wasn't used).
         if event.type == "CREATE_PROCESS" and event.pid == self._session.pid:
@@ -469,8 +491,8 @@ class Debugger:
                 f"Unknown breakpoint type '{bp_info[0]}' for bp_id {bp_id}"
             )
 
-    def set_hw_breakpoint(self, addr, condition="x", length=1, slot=0):
-        return self.brk_hw.set(addr, condition, length, slot)
+    def set_hw_breakpoint(self, addr, condition="x", length=1, slot=0, tid=None):
+        return self.brk_hw.set(addr, condition, length, slot, tid)
 
     def find_breakpoint(self, addr):
         return self.brk_sw.find(addr) or self.brk_hw.find(addr)

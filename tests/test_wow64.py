@@ -14,6 +14,12 @@ TEST_WOW64_TARGET = os.environ.get(
 )
 _HAS_TARGET = os.path.exists(TEST_WOW64_TARGET)
 
+TEST_THREADED_TARGET = os.environ.get(
+    "TEST_THREADED_TARGET_PATH",
+    os.path.join(_TEST_DIR, "target", "threaded_target32.exe"),
+)
+_HAS_THREADED = os.path.exists(TEST_THREADED_TARGET)
+
 
 def _wow64_available():
     """True only on 64-bit Windows (a 32-bit host cannot debug WOW64)."""
@@ -507,5 +513,120 @@ class TestWow64ChildProcess(unittest.TestCase):
                 dbg.continue_event(ev.pid, ev.tid)
                 if ev.type == "EXIT_PROCESS" and ev.pid == child_pid:
                     break
+        finally:
+            teardown(dbg)
+
+
+@unittest.skipUnless(_HAS_THREADED and _wow64_available(),
+                     "requires threaded 32-bit target and 64-bit host")
+class TestWow64ProcessWideHardwareBreakpoint(unittest.TestCase):
+    """Process-wide (default) vs thread-specific hardware breakpoints."""
+
+    def _launch_paused_at_image(self, dbg):
+        """Launch threaded target, drain to the loader breakpoint where the
+        32-bit image is mapped (worker not yet spawned). Returns (pid, tid)."""
+        pid, tid = dbg.create_process(TEST_THREADED_TARGET)
+        event = dbg.wait_event(5000)
+        if event is not None:
+            dbg.continue_event(event.pid, event.tid)
+        basename = os.path.basename(TEST_THREADED_TARGET)
+        for _ in range(50):
+            event = dbg.wait_event(2000)
+            if event is None or event.type == "EXIT_PROCESS":
+                break
+            if event.type == "EXCEPTION" and _module_by_name(dbg, basename) is not None:
+                break  # loader bp with image mapped; do NOT continue
+            dbg.continue_event(event.pid, event.tid)
+        return pid, tid
+
+    def _resolve_addrs(self, dbg):
+        base = _module_by_name(dbg, os.path.basename(TEST_THREADED_TARGET))["base_address"]
+        worker = _export_address(dbg, TEST_THREADED_TARGET, base, "worker_add")
+        return base, worker
+
+    def test_process_wide_default_hits_on_worker_thread(self):
+        from pydbg import Debugger
+        from tests.helpers import teardown
+
+        dbg = Debugger()
+        try:
+            pid, tid = _launch(dbg, run=True, target=TEST_THREADED_TARGET)
+            _base, worker = self._resolve_addrs(dbg)
+            dbg.set_hw_breakpoint(worker, "x", 1, 0)  # process-wide default
+            hit = None
+            start = time.time()
+            for _ in range(100):
+                if time.time() - start > 15:
+                    break
+                ev = dbg.wait_event(2000)
+                if ev is None:
+                    continue
+                if ev.type == "EXCEPTION" and ev.exception_code in (0x80000004, 0x4000001E):
+                    hit = ev.tid
+                    dbg.brk_hw.clear(0)
+                    dbg.continue_event(ev.pid, ev.tid)
+                    break
+                dbg.continue_event(ev.pid, ev.tid)
+            self.assertIsNotNone(hit, "hw breakpoint did not fire")
+            self.assertNotEqual(hit, tid, "expected hit on a worker thread, not main")
+        finally:
+            teardown(dbg)
+
+    def test_thread_specific_does_not_fire_on_other_thread(self):
+        from pydbg import Debugger
+        from tests.helpers import teardown
+
+        dbg = Debugger()
+        try:
+            pid, tid = _launch(dbg, run=True, target=TEST_THREADED_TARGET)
+            _base, worker = self._resolve_addrs(dbg)
+            bp_id = dbg.set_hw_breakpoint(worker, "x", 1, 0, tid=tid)  # main thread only
+            # Positive control: arming worked and is scoped to the main thread.
+            h_main = dbg.open_thread(tid)
+            regs = dbg.get_registers(h_main)
+            dbg.close_handle(h_main)
+            self.assertEqual(regs["dr0"], worker, "main thread Dr0 not armed")
+            fired = False
+            start = time.time()
+            while time.time() - start < 3:
+                ev = dbg.wait_event(1000)
+                if ev is None:
+                    continue
+                if ev.type == "EXCEPTION" and ev.exception_code in (0x80000004, 0x4000001E):
+                    fired = True
+                    break
+                dbg.continue_event(ev.pid, ev.tid)
+            self.assertFalse(fired, "thread-specific bp should not fire on other threads")
+            dbg.remove_breakpoint(bp_id)
+        finally:
+            teardown(dbg)
+
+    def test_create_thread_replication(self):
+        from pydbg import Debugger
+        from tests.helpers import teardown
+
+        dbg = Debugger()
+        try:
+            pid, tid = self._launch_paused_at_image(dbg)
+            _base, worker = self._resolve_addrs(dbg)
+            dbg.set_hw_breakpoint(worker, "x", 1, 0)  # process-wide BEFORE worker spawns
+            dbg.continue_event(pid, tid)  # resume -> main spawns worker -> CREATE_THREAD replicates
+
+            hit = None
+            start = time.time()
+            for _ in range(100):
+                if time.time() - start > 15:
+                    break
+                ev = dbg.wait_event(2000)
+                if ev is None:
+                    continue
+                if ev.type == "EXCEPTION" and ev.exception_code in (0x80000004, 0x4000001E):
+                    hit = ev.tid
+                    dbg.brk_hw.clear(0)
+                    dbg.continue_event(ev.pid, ev.tid)
+                    break
+                dbg.continue_event(ev.pid, ev.tid)
+            self.assertIsNotNone(hit, "CREATE_THREAD replication did not arm the worker")
+            self.assertNotEqual(hit, tid, "expected hit on the newly created worker thread")
         finally:
             teardown(dbg)

@@ -174,7 +174,7 @@ while True:
 | 方法 | 说明 |
 |------|------|
 | `set_breakpoint(addr, pid=None)` | 设置 int3 软件断点（可指定子进程） |
-| `set_hw_breakpoint(addr, condition, length, slot)` | 设置硬件断点 |
+| `set_hw_breakpoint(addr, condition, length, slot, tid=None)` | 设置硬件断点（默认进程级：作用于全部线程并复制到新线程；指定 tid 仅该线程） |
 | `remove_breakpoint(bp_id)` | 移除断点 |
 | `find_breakpoint(addr)` | 查找地址上的断点 |
 

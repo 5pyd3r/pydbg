@@ -21,6 +21,10 @@ try {
            "if errorlevel 1 exit /b %errorlevel%`n" +
            "link /nologo /subsystem:console /machine:x86 /OUT:$outDir\spawn_child.exe $outDir\spawn_child.obj`n" +
            "if errorlevel 1 exit /b %errorlevel%`n" +
+           "cl /nologo /O2 /W3 /utf-8 /c tests\target\threaded_target32.c /Fo$outDir\threaded_target32.obj`n" +
+           "if errorlevel 1 exit /b %errorlevel%`n" +
+           "link /nologo /subsystem:console /machine:x86 /OUT:$outDir\threaded_target32.exe $outDir\threaded_target32.obj`n" +
+           "if errorlevel 1 exit /b %errorlevel%`n" +
            "echo BUILD_OK"
     Set-Content -Path $tmp -Value $bat -Encoding ascii
     & cmd /c "`"$tmp`""
@@ -28,4 +32,4 @@ try {
 } finally {
     Remove-Item $tmp -Force -ErrorAction SilentlyContinue
 }
-Write-Host "[ok] built $outDir\simple_target32.exe, $outDir\spawn_child.exe"
+Write-Host "[ok] built $outDir\simple_target32.exe, $outDir\spawn_child.exe, $outDir\threaded_target32.exe"
