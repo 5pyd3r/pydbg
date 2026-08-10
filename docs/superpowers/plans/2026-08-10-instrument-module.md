@@ -436,13 +436,15 @@ cdef extern from "hook_compiler.h":
         string resolveTriple(const string& arch)
 
 
-def compile_stub(str c_source, str target_arch, dict symbols):
+def compile_stub(str c_source, str target_arch, dict symbols, uint64_t base_addr=0):
     """Compile C source → native machine code for target arch.
 
     Args:
         c_source: C source code (must define on_call function)
         target_arch: "x64" or "x86" (for pydbg), or full LLVM arch name
         symbols: dict of symbol_name → address (int)
+        base_addr: address where the generated code will be loaded (0 = no
+                   base; extern-call rel32 assumed loaded at 0)
 
     Returns:
         bytes of resolved machine code.
@@ -464,13 +466,19 @@ def compile_stub(str c_source, str target_arch, dict symbols):
     cdef HookCompiler* compiler = new HookCompiler(triple)
     cdef vector[uint8_t] code
     try:
-        code = compiler.compile(cpp_source, sym_map)
+        code = compiler.compile(cpp_source, sym_map, <uint64_t>base_addr)
         if code.empty():
             raise RuntimeError(compiler.getLastError().decode('utf-8'))
         return bytes(<char*>code.data())[:code.size()]
     finally:
         del compiler
 ```
+
+> 设计更正（Task 2 修复，记于此供后续任务参考）：`compile_stub` 增加 `base_addr` 参数。
+> COFF 下 `sec.getAddress()` 为 0，重定位 `rel32 = symbol - (sectionAddr + offset + 4)`
+> 必须用**代码实际加载地址**作基址，否则注入到非 0 地址后 extern `call` 目标变成
+> `symbol + R`。Task 7 的 instrumenter 必须**先分配 payload 缓冲（固定大小 0x2000），
+> 以缓冲地址为 base_addr 编译，再写入**。Task 5 的 `compile_payload` 相应加 `base_addr=0` 参数透传。
 
 - [ ] **Step 2: 修改 `src/pydbg/cython/meson.build`**——末尾追加
 
@@ -761,12 +769,13 @@ def _backend():
         )
 
 
-def compile_payload(c_source: str, arch: str, symbols: dict) -> bytes:
+def compile_payload(c_source: str, arch: str, symbols: dict, base_addr: int = 0) -> bytes:
     """Compile C source → zero-relocation machine code for the target arch.
 
     Validates that every extern symbol (except original_func) is resolved in
-    `symbols`. Raises PydbgError on missing backend, unresolved externs, or
-    compilation failure.
+    `symbols`. base_addr is the address where the code will be loaded (used to
+    rebase extern-call rel32; see Task 3 design note). Raises PydbgError on
+    missing backend, unresolved externs, or compilation failure.
     """
     backend = _backend()
     llvm_arch = _ARCH_MAP.get(arch, arch)
@@ -780,7 +789,7 @@ def compile_payload(c_source: str, arch: str, symbols: dict) -> bytes:
         )
 
     try:
-        code = backend.compile_stub(c_source, llvm_arch, dict(symbols))
+        code = backend.compile_stub(c_source, llvm_arch, dict(symbols), base_addr)
     except RuntimeError as exc:
         raise PydbgError(f"LLVM compilation failed: {exc}")
     if not code:
@@ -1017,7 +1026,8 @@ class InstrumentInfo:
     trampoline_addr: int
     trampoline_size: int
     stub_addr: int
-    stub_size: int
+    stub_size: int          # len(machine) — 实际机器码长度
+    stub_alloc_size: int    # 分配缓冲大小（0x2000），restore 时按此释放
     original_bytes: bytes
     symbols: dict
     c_source: str
@@ -1085,17 +1095,21 @@ class Instrumenter:
 
         # 3. LLVM 编译 payload；original_func → trampoline
         symbols.setdefault('original_func', tramp_addr)
-        try:
-            machine = codegen.compile_payload(c_source, mode, symbols)
-        except Exception:
-            self._free_rwx(mem, tramp_addr, tramp_size)
-            raise
 
-        # 4. payload 内存
-        stub_addr = self._alloc_rwx(mem, len(machine))
+        # 4. 先分配 payload 缓冲（固定 0x2000），以缓冲地址为 base_addr 编译，
+        #    使 extern call 的 rel32 按真实加载地址修正（见 Task 3 设计更正）
+        _STUB_ALLOC = 0x2000
+        stub_addr = self._alloc_rwx(mem, _STUB_ALLOC)
         if stub_addr == 0:
             self._free_rwx(mem, tramp_addr, tramp_size)
             raise PydbgError("Failed to allocate stub memory")
+        try:
+            machine = codegen.compile_payload(c_source, mode, symbols,
+                                              base_addr=stub_addr)
+        except Exception:
+            self._free_rwx(mem, tramp_addr, tramp_size)
+            self._free_rwx(mem, stub_addr, _STUB_ALLOC)
+            raise
         mem.write(stub_addr, machine)
 
         # 5. detour stub 写入 target_addr
@@ -1107,6 +1121,7 @@ class Instrumenter:
             trampoline_size=tramp_size,
             stub_addr=stub_addr,
             stub_size=len(machine),
+            stub_alloc_size=_STUB_ALLOC,
             original_bytes=original,
             symbols=symbols,
             c_source=c_source,
@@ -1125,7 +1140,7 @@ class Instrumenter:
             mem.write(target_addr, info.original_bytes)
         finally:
             self._free_rwx(mem, info.trampoline_addr, info.trampoline_size)
-            self._free_rwx(mem, info.stub_addr, info.stub_size)
+            self._free_rwx(mem, info.stub_addr, info.stub_alloc_size)
 
     # ── internal helpers ────────────────────────────────────────
 
