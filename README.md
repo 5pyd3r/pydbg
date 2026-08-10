@@ -116,6 +116,11 @@ inst.restore(0x00401000)
 inst.active   # {addr: {...}}
 ```
 
+**C 子集限制**
+- 类型映射：指针等未支持类型一律映射为 `i32`（静默截断）——payload 参数和返回值只应使用 `int` / `void`。
+- 不支持 extern 全局变量（C→IR 转换器把 `VarDecl` 一律当局部变量）；只支持 extern 函数。
+- 比较表达式在条件（`if (a<b)`）和 `return`（`return a<b`）中均可用；`&&` / `||` 产生逻辑 0/1（不保留短路求值）。
+
 ### 子进程调试
 
 默认情况下 pydbg 只调试目标进程，不跟踪子进程。通过 `set_debug_children(True)` 开启：

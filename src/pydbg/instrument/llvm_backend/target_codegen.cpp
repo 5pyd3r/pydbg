@@ -387,9 +387,8 @@ bool TargetCodeGen::applyRelocations(std::vector<uint8_t>& code,
                               symAddr, textAddr, triple)) {
                 patched++;
             } else {
-                lastError_ = "Unsupported relocation type " +
-                             std::to_string(relocType) +
-                             " for symbol '" + symName + "'";
+                lastError_ = "Failed to patch relocation for symbol '" + symName +
+                             "' (out of range or unsupported)";
                 /* Fail fast: a partially-patched .text would silently ship
                  * E8 00 00 00 00 placeholders. Returning false lets compile()
                  * take the error path (lastError_ is non-empty). */

@@ -109,6 +109,6 @@ class InlineHook:
     def _free(self, mem, addr, size):
         try:
             from .. import _pydbg
-            _pydbg.virtual_free(self._s.process_handle, addr, size, 0x8000)
+            _pydbg.virtual_free(self._s.process_handle, addr, 0, 0x8000)  # MEM_RELEASE 要求 dwSize==0
         except Exception:
             pass

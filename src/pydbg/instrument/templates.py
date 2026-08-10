@@ -53,9 +53,13 @@ def _param_names(params: str):
 class InstrumentTemplates:
     """Preset C payload templates for common probes.
 
-    受 C 子集约束（int 参数/返回值、函数调用、赋值、算术、if/while），
+    受 C 子集约束（int 参数/返回值、函数调用、赋值、算术、if/while）。
+    类型映射：指针等未支持类型一律映射为 i32（静默截断）——payload 参数和
+    返回值只应使用 int / void。
     extern 仅支持函数（不支持 extern 全局变量——C→IR 转换器当前把 VarDecl
     一律当局部变量）。计数器等需落地的状态放在目标侧，经 extern 函数访问。
+    比较表达式在条件（if (a<b)）和 return（return a<b）中均可用；
+    && / || 产生逻辑 0/1（不保留短路求值）。
     """
 
     @staticmethod

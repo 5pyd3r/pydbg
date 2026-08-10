@@ -344,6 +344,10 @@ llvm::Value* ClangToIRConverter::handleReturnStmt(CXCursor cursor) {
         return builder_->CreateRetVoid();
     }
     llvm::Value* retVal = loadIfAlloca(children[0]);
+    if (retVal->getType()->isIntegerTy(1) &&
+        currentFunction_ && currentFunction_->getReturnType()->isIntegerTy(32)) {
+        retVal = builder_->CreateZExt(retVal, currentFunction_->getReturnType(), "retzext");
+    }
     return builder_->CreateRet(retVal);
 }
 
@@ -389,9 +393,16 @@ llvm::Value* ClangToIRConverter::handleBinaryOperator(CXCursor cursor) {
     if (op == "==") return builder_->CreateICmpEQ(lhs, rhs, "cmptmp");
     if (op == "!=") return builder_->CreateICmpNE(lhs, rhs, "cmptmp");
 
-    /* ── Logical (bitwise for integers) ──────────────────────────────── */
-    if (op == "&&") return builder_->CreateAnd(lhs, rhs, "andtmp");
-    if (op == "||") return builder_->CreateOr(lhs, rhs, "ortmp");
+    /* ── Logical (correct 0/1 result; no short-circuit) ─────────────── */
+    if (op == "&&" || op == "||") {
+        llvm::Value* zero = llvm::ConstantInt::get(lhs->getType(), 0);
+        llvm::Value* l = builder_->CreateICmpNE(lhs, zero, "logl");
+        llvm::Value* r = builder_->CreateICmpNE(rhs, zero, "logr");
+        llvm::Value* comb = (op == "&&")
+            ? builder_->CreateAnd(l, r, "andtmp")
+            : builder_->CreateOr(l, r, "ortmp");
+        return builder_->CreateZExt(comb, lhs->getType(), "logtmp");
+    }
 
     lastError_ = "Unsupported binary operator: " + op;
     return nullptr;
