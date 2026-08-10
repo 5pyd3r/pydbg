@@ -96,6 +96,9 @@ class TestInstrumentTemplates(unittest.TestCase):
         self._entry(src)
         self.assertIn('Game_Log(a)', src)
         self.assertIn('Game_Log(b)', src)
+        self.assertIn('extern void Game_Log(int value);', src)
+        self.assertIn('extern int original_func(int a, int b);', src)
+        self.assertIn('return original_func(a, b);', src)
         self.assertEqual(syms['Game_Log'], 0x601000)
         self.assertNotIn('original_func', syms)
 
@@ -105,12 +108,16 @@ class TestInstrumentTemplates(unittest.TestCase):
         self._entry(src)
         self.assertIn('MyTick()', src)
         self.assertIn('original_func(a)', src)
+        self.assertIn('extern void MyTick(void);', src)
+        self.assertIn('extern int original_func(int a);', src)
+        self.assertIn('return original_func(a);', src)
         self.assertEqual(syms['MyTick'], 0x700000)
 
     def test_modify_return_generates_c(self):
         src, syms = InstrumentTemplates.modify_return(
             'on_call', 'int a, int b', 'r + 1', {})
         self._entry(src)
+        self.assertIn('extern int original_func(int a, int b);', src)
         self.assertIn('int r = original_func(a, b);', src)
         self.assertIn('return (r + 1);', src)
         self.assertEqual(syms, {})
