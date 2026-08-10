@@ -15,7 +15,7 @@ cdef extern from "hook_compiler.h":
         HookCompiler(const string& targetTriple) except +
         vector[uint8_t] compile(const string& cSource,
                                  const ExternalSymbolTable& symbols,
-                                 uint64_t baseAddress)
+                                 uint64_t baseAddress) except +
         string getLastError()
 
         @staticmethod
@@ -53,7 +53,7 @@ def compile_stub(str c_source, str target_arch, dict symbols, uint64_t base_addr
     try:
         code = compiler.compile(cpp_source, sym_map, <uint64_t>base_addr)
         if code.empty():
-            raise RuntimeError(compiler.getLastError().decode('utf-8'))
+            raise RuntimeError(compiler.getLastError().decode('utf-8', 'replace'))
         return PyBytes_FromStringAndSize(<const char*>code.data(),
                                          <Py_ssize_t>code.size())
     finally:
