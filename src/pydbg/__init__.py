@@ -18,6 +18,7 @@ from .dump.minidump import MinidumpReader
 from .dump.stackwalk import StackWalker
 from .hook.iat import IATHook
 from .hook.inline import InlineHook, Trampoline
+from .instrument import Instrumenter, InstrumentInfo, InstrumentTemplates
 from .trace.step import StepTracer
 from .symbol.resolver import SymbolResolver
 from .trace.calltree import CallTree, CallNode
@@ -73,4 +74,7 @@ __all__ = [
     "CallNode",
     "MinidumpReader",
     "StackWalker",
+    "Instrumenter",
+    "InstrumentInfo",
+    "InstrumentTemplates",
 ]

@@ -1,8 +1,18 @@
+import os
 import struct
+import sys
+import time
 import unittest
 
-from pydbg.instrument.templates import build_abs_jmp, build_stub, build_trampoline
 from pydbg.exceptions import PydbgError
+from pydbg.instrument import Instrumenter
+from pydbg.instrument.codegen import _scan_externs
+from pydbg.instrument.templates import (
+    InstrumentTemplates,
+    build_abs_jmp,
+    build_stub,
+    build_trampoline,
+)
 
 
 class TestTemplates(unittest.TestCase):
@@ -35,10 +45,6 @@ class TestTemplates(unittest.TestCase):
         self.assertEqual(tramp[5], 0xE9)
         rel = struct.unpack('<i', tramp[6:])[0]
         self.assertEqual(rel, 0x1005 - (0x5005 + 5))
-
-
-from pydbg.instrument.codegen import _scan_externs
-from pydbg.exceptions import PydbgError
 
 
 class TestCodegen(unittest.TestCase):
@@ -79,9 +85,6 @@ class TestCodegen(unittest.TestCase):
                 'extern void Missing_Func(int x);'
                 'int on_call(int x){ Missing_Func(x); return x; }', 'x64', {})
         self.assertIn('Missing_Func', str(ctx.exception))
-
-
-from pydbg.instrument.templates import InstrumentTemplates
 
 
 class TestInstrumentTemplates(unittest.TestCase):
@@ -128,10 +131,6 @@ class TestInstrumentTemplates(unittest.TestCase):
         self.assertIn('L(b)', src)
 
 
-from pydbg.instrument import Instrumenter
-from pydbg.exceptions import PydbgError
-
-
 class TestInstrumenter(unittest.TestCase):
 
     def setUp(self):
@@ -176,10 +175,6 @@ class TestInstrumenter(unittest.TestCase):
         self.assertEqual(free_mock.call_count, 2)
 
 
-import os
-import sys
-import time
-
 _TEST_TARGET = os.environ.get(
     'TEST_INSTRUMENT_TARGET_PATH',
     r'C:\Users\Spyder\Desktop\ai_eden\Output\instrument-module\build-instrument\tests\instrument_target.exe',
@@ -202,7 +197,20 @@ def _export_address(dbg, exe_path, base, name):
     raise AssertionError(f"export {name} not found in {exe_path}")
 
 
-@unittest.skipUnless(os.path.isfile(_TEST_TARGET), "instrument_target.exe not built")
+def _backend_available():
+    """LLVM 后端可用性探测。_llvm_backend 扩展未构建时返回 False，使 live
+    测试 skip 而非失败（CI 默认构建 instrument_target.exe 但不构建后端）。"""
+    try:
+        from pydbg.instrument import codegen
+        codegen._backend()
+        return True
+    except Exception:
+        return False
+
+
+@unittest.skipUnless(
+    os.path.isfile(_TEST_TARGET) and _backend_available(),
+    "requires instrument_target.exe and LLVM backend")
 class TestInstrumentLive(unittest.TestCase):
 
     @property
@@ -301,8 +309,8 @@ def _wow64_available():
 
 
 @unittest.skipUnless(
-    os.path.isfile(_TEST_TARGET32) and _wow64_available(),
-    "requires 32-bit instrument target and WOW64 host")
+    os.path.isfile(_TEST_TARGET32) and _wow64_available() and _backend_available(),
+    "requires 32-bit instrument target, WOW64 host, and LLVM backend")
 class TestInstrumentLive32(TestInstrumentLive):
     """32 位 WOW64 live 往返；复用 TestInstrumentLive 的断言逻辑。"""
 

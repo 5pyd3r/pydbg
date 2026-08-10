@@ -32,7 +32,8 @@ def _llvm_bin_candidates():
     if env:
         yield env
     try:
-        import shutil, subprocess
+        import shutil
+        import subprocess
         exe = shutil.which("llvm-config")
         if exe:
             out = subprocess.run([exe, "--bindir"], capture_output=True, text=True)
