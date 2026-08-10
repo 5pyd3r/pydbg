@@ -5,6 +5,7 @@ from libcpp.string cimport string
 from libcpp.vector cimport vector
 from libcpp.map cimport map
 from libc.stdint cimport uint8_t, uint64_t
+from cpython.bytes cimport PyBytes_FromStringAndSize
 
 cdef extern from "external_symbol.h":
     ctypedef map[string, uint64_t] ExternalSymbolTable
@@ -53,6 +54,7 @@ def compile_stub(str c_source, str target_arch, dict symbols, uint64_t base_addr
         code = compiler.compile(cpp_source, sym_map, <uint64_t>base_addr)
         if code.empty():
             raise RuntimeError(compiler.getLastError().decode('utf-8'))
-        return bytes(<char*>code.data())[:code.size()]
+        return PyBytes_FromStringAndSize(<const char*>code.data(),
+                                         <Py_ssize_t>code.size())
     finally:
         del compiler
