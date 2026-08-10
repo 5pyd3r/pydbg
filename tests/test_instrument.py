@@ -59,11 +59,11 @@ class TestCodegen(unittest.TestCase):
         self.assertEqual(_scan_externs('int on_call(int x) { return x * 2; }'), set())
 
     def test_compile_payload_missing_backend_raises(self):
-        # 确定性验证后端缺失时的降级错误（无论真实后端是否已构建）
-        import sys
+        # 确定性验证后端缺失时的降级错误（mock 掉 _backend，不依赖导入状态）
         from unittest import mock
-        with mock.patch.dict(sys.modules, {'pydbg._llvm_backend': None}):
-            from pydbg.instrument import codegen
+        from pydbg.instrument import codegen
+        with mock.patch.object(codegen, '_backend',
+                               side_effect=PydbgError("LLVM backend not available.")):
             with self.assertRaises(PydbgError):
                 codegen.compile_payload('int on_call(int x){return x;}', 'x64', {})
 
