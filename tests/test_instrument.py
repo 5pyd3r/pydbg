@@ -153,26 +153,65 @@ class TestInstrumenter(unittest.TestCase):
         # fresh DebugSession 的 process_handle 为 None，未 mock 时 mem.read/write
         # 会先在 Cython 绑定处抛 TypeError（到不了 codegen）；故同时 mock 掉原始
         # 字节读取、内存分配与 MemoryManager 读写，让 install 稳定走到 codegen
-        # 调用处，并验证分配失败后的双段回滚（trampoline + stub 都释放）。
+        # 调用处，并验证编译失败后整块区域一次性回滚释放。
         from unittest import mock
         from pydbg.instrument import codegen
         with mock.patch.object(self.inst, '_read_min_5_bytes',
                                return_value=b'\x90' * 5), \
              mock.patch.object(self.inst, '_alloc_rwx',
-                               side_effect=[0x5000, 0x7000]), \
+                               return_value=0x5000), \
              mock.patch.object(self.inst, '_free_rwx') as free_mock, \
              mock.patch('pydbg.memory.manager.MemoryManager'), \
              mock.patch.object(codegen, 'compile_payload',
                                side_effect=PydbgError("LLVM backend not available.")) as compile_mock:
             with self.assertRaises(PydbgError):
                 self.inst.install(0x1000, c_source='int on_call(int x){return x;}')
-        # 接线：tramp 先分配（0x5000），stub 后分配（0x7000）；
-        # compile(c_source, mode, symbols, base_addr=...) — symbols 是位置参数（下标 2）
+        # 单次分配（返回区域基址 0x5000）：stub 紧随 trampoline 之后
+        tramp_size = len(b'\x90' * 5) + 5   # 10
+        stub_addr = 0x5000 + tramp_size     # 0x500A
+        region_size = tramp_size + 0x2000   # 0x200A
+        # 接线：compile(c_source, mode, symbols, base_addr=...) — symbols 是位置参数（下标 2）
         args, kwargs = compile_mock.call_args
-        self.assertEqual(kwargs['base_addr'], 0x7000)
+        self.assertEqual(kwargs['base_addr'], stub_addr)
         self.assertEqual(args[2]['original_func'], 0x5000)
-        # 回滚路径：trampoline 与 stub 两个分配都被释放
-        self.assertEqual(free_mock.call_count, 2)
+        # 回滚路径：整块连续区域（trampoline + stub 缓冲）一次释放。
+        # _free_rwx(mem, addr, size) 的首参是 mem 实例，断言后两个参数。
+        self.assertEqual(free_mock.call_count, 1)
+        self.assertEqual(free_mock.call_args[0][1:], (0x5000, region_size))
+
+    def test_install_success_contiguous_region(self):
+        # 确定性：mock 分配/编译/内存读写，验证成功安装时 trampoline 与 stub 落在
+        # 同一连续区域（stub_addr == trampoline_addr + trampoline_size），restore
+        # 对整块区域只调用一次 _free_rwx。
+        from unittest import mock
+        from pydbg.instrument import codegen
+        with mock.patch.object(self.inst, '_read_min_5_bytes',
+                               return_value=b'\x90' * 5), \
+             mock.patch.object(self.inst, '_alloc_rwx',
+                               return_value=0x5000), \
+             mock.patch.object(self.inst, '_free_rwx') as free_mock, \
+             mock.patch('pydbg.memory.manager.MemoryManager'), \
+             mock.patch.object(codegen, 'compile_payload',
+                               return_value=b'\x00' * 64) as compile_mock:
+            info = self.inst.install(
+                0x1000, c_source='int on_call(int x){return x;}')
+            # 单次分配返回区域基址；stub 紧跟 trampoline，天然满足 ±2GB 邻接
+            self.assertEqual(info.trampoline_addr, 0x5000)
+            self.assertEqual(info.stub_addr,
+                             info.trampoline_addr + info.trampoline_size)
+            # 接线：compile 以 stub 地址为 base_addr；original_func 映射到 trampoline
+            args, kwargs = compile_mock.call_args
+            self.assertEqual(kwargs['base_addr'], info.stub_addr)
+            self.assertEqual(args[2]['original_func'], info.trampoline_addr)
+            # install 期间没有任何释放；restore 一次性释放整块区域
+            self.assertEqual(free_mock.call_count, 0)
+            self.inst.restore(0x1000)
+            # _free_rwx(mem, addr, size) 的首参是 mem 实例，断言后两个参数
+            self.assertEqual(free_mock.call_count, 1)
+            self.assertEqual(
+                free_mock.call_args[0][1:],
+                (info.trampoline_addr,
+                 info.trampoline_size + info.stub_alloc_size))
 
 
 _TEST_TARGET = os.environ.get(

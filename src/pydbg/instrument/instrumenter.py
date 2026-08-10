@@ -82,39 +82,37 @@ class Instrumenter:
         # 1. 读取 ≥5 字节原始代码（指令边界）
         original = self._read_min_5_bytes(mem, engine, target_addr)
 
-        # 2. trampoline：原始指令 + E9 跳回。
-        #    必须在目标函数 ±2GB 内分配（E9 rel32 detour 约束），否则 VirtualAllocEx
-        #    无 hint 时可能落到 >2GB 外导致跳转越界。
+        # 2. 分配一块连续区域放 trampoline + stub 缓冲（近目标 ±2GB）。
+        #    两者同区 ⇒ payload 内 call original_func（rel32 到 trampoline）恒在 ±2GB 内，
+        #    消除「stub 与 trampoline 各自 ±0x7F000000 可能相距 4.25GB」的邻接不确定性。
         tramp_size = len(original) + 5
-        tramp_addr = self._alloc_rwx(mem, tramp_size, near=target_addr)
-        if tramp_addr == 0:
-            raise PydbgError("Failed to allocate trampoline memory")
+        stub_cap = _STUB_ALLOC
+        region_size = tramp_size + stub_cap
+        region_addr = self._alloc_rwx(mem, region_size, near=target_addr)
+        if region_addr == 0:
+            raise PydbgError("Failed to allocate trampoline+stub region")
+        tramp_addr = region_addr
+        stub_addr = region_addr + tramp_size
         try:
             tramp_code = build_trampoline(original, tramp_addr, target_addr)
             mem.write(tramp_addr, tramp_code)
         except Exception:
-            self._free_rwx(mem, tramp_addr, tramp_size)
+            self._free_rwx(mem, region_addr, region_size)
             raise
 
         # 3. LLVM 编译 payload；original_func 强制映射到 trampoline
         symbols['original_func'] = tramp_addr
 
-        # 4. 先分配 payload 缓冲（固定 _STUB_ALLOC），以缓冲地址为 base_addr 编译，
-        #    使 extern call 的 rel32 按真实加载地址修正（见 Task 3 设计更正）。
-        #    payload 内的 call original_func 也是 rel32，stub 必须与 trampoline 邻近。
-        #    分配中心用 target_addr（而非 tramp_addr）：tramp 落在 target 下方首个
-        #    足够大的空闲区域首部，stub 扫描同一 lo 会落在其余部紧邻 tramp；若以
-        #    tramp 为中心，扫描窗口整体下移，stub 可能落到 target >2GB 外，E9 越界。
-        stub_addr = self._alloc_rwx(mem, _STUB_ALLOC, near=target_addr)
-        if stub_addr == 0:
-            self._free_rwx(mem, tramp_addr, tramp_size)
-            raise PydbgError("Failed to allocate stub memory")
+        # 4. 以 stub 真实地址为 base_addr 编译（extern call rel32 按加载地址修正）
         try:
             machine = codegen.compile_payload(c_source, mode, symbols,
                                               base_addr=stub_addr)
+            if len(machine) > stub_cap:
+                raise PydbgError(
+                    f"Generated payload is {len(machine)} bytes, exceeding the "
+                    f"{stub_cap}-byte stub buffer")
         except Exception:
-            self._free_rwx(mem, tramp_addr, tramp_size)
-            self._free_rwx(mem, stub_addr, _STUB_ALLOC)
+            self._free_rwx(mem, region_addr, region_size)
             raise
         try:
             mem.write(stub_addr, machine)
@@ -124,8 +122,7 @@ class Instrumenter:
                 mem.write(target_addr, original)   # 尽力恢复目标
             except Exception:
                 pass
-            self._free_rwx(mem, tramp_addr, tramp_size)
-            self._free_rwx(mem, stub_addr, _STUB_ALLOC)
+            self._free_rwx(mem, region_addr, region_size)
             raise
 
         info = InstrumentInfo(
@@ -152,8 +149,9 @@ class Instrumenter:
         try:
             mem.write(target_addr, info.original_bytes)
         finally:
-            self._free_rwx(mem, info.trampoline_addr, info.trampoline_size)
-            self._free_rwx(mem, info.stub_addr, info.stub_alloc_size)
+            # 单块连续区域：trampoline + stub 缓冲一次释放
+            self._free_rwx(mem, info.trampoline_addr,
+                           info.trampoline_size + info.stub_alloc_size)
 
     # ── internal helpers ────────────────────────────────────────
 
