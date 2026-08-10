@@ -120,6 +120,7 @@ private:
 
     /* ── Helpers ─────────────────────────────────────────────────────── */
     llvm::Type* getLLVMType(clang::QualType qt);
+    llvm::Value* coerceToInt(llvm::Value* val);
     llvm::Value* loadIfAlloca(llvm::Value* val);
     llvm::AllocaInst* createEntryBlockAlloca(llvm::Type* type,
                                               const std::string& name);

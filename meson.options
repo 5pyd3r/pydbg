@@ -1,14 +1,9 @@
 option('enable-llvm-instrument',
   type : 'boolean',
   value : false,
-  description : 'Enable LLVM-based instrumentation backend (requires prebuilt LLVM 17 + libclang)')
+  description : 'Enable LLVM-based instrumentation backend (requires prebuilt LLVM 17, static clang)')
 
 option('llvm-config',
   type : 'string',
   value : '',
   description : 'Path to llvm-config binary. Default: search prebuilt LLVM 17 locations.')
-
-option('libclang-config',
-  type : 'string',
-  value : '',
-  description : 'Path to clang-config binary. Default: search prebuilt LLVM 17 locations.')

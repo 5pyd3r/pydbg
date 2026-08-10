@@ -96,6 +96,9 @@ public:
     bool BeginSourceFileAction(clang::CompilerInstance& CI) override {
         CI.getDiagnostics().setClient(new ClangToIRErrorConsumer(conv_),
                                       /*ShouldOwnClient=*/true);
+        /* Fatal diagnostics must not call the default abort() handler — the
+           host process (the Python extension) must survive a bad payload. */
+        CI.getDiagnostics().setFatalsAsError(true);
         return true;
     }
 
@@ -316,14 +319,8 @@ void ClangToIRConverter::emitReturnStmt(clang::ReturnStmt* ret) {
         builder_->CreateRetVoid();
         return;
     }
-    llvm::Value* retVal = loadIfAlloca(emitExpr(val));
+    llvm::Value* retVal = coerceToInt(loadIfAlloca(emitExpr(val)));
     if (!retVal) return;
-    if (retVal->getType()->isIntegerTy(1) &&
-        currentFunction_ &&
-        currentFunction_->getReturnType()->isIntegerTy(32)) {
-        retVal = builder_->CreateZExt(retVal, currentFunction_->getReturnType(),
-                                      "retzext");
-    }
     builder_->CreateRet(retVal);
 }
 
@@ -351,6 +348,7 @@ void ClangToIRConverter::emitIfStmt(clang::IfStmt* ifs) {
 
     llvm::Value* cond = emitExpr(ifs->getCond());
     cond = loadIfAlloca(cond);
+    if (!cond) return;   /* condition failed to emit; lastError_ is set */
     cond = builder_->CreateICmpNE(
         cond, llvm::ConstantInt::get(cond->getType(), 0), "ifcond");
     builder_->CreateCondBr(cond, thenBB, elseBB);
@@ -404,6 +402,7 @@ void ClangToIRConverter::emitWhileStmt(clang::WhileStmt* ws) {
     builder_->SetInsertPoint(condBB);
     llvm::Value* cond = emitExpr(ws->getCond());
     cond = loadIfAlloca(cond);
+    if (!cond) return;   /* condition failed to emit; lastError_ is set */
     cond = builder_->CreateICmpNE(
         cond, llvm::ConstantInt::get(cond->getType(), 0), "whilecond");
     builder_->CreateCondBr(cond, bodyBB, endBB);
@@ -431,9 +430,8 @@ void ClangToIRConverter::emitVarDecl(clang::VarDecl* vd) {
     locals_[name] = alloca;
 
     if (clang::Expr* init = vd->getInit()) {
-        llvm::Value* initVal = emitExpr(init);
+        llvm::Value* initVal = coerceToInt(loadIfAlloca(emitExpr(init)));
         if (initVal) {
-            initVal = loadIfAlloca(initVal);
             builder_->CreateStore(initVal, alloca);
         }
     }
@@ -470,12 +468,18 @@ llvm::Value* ClangToIRConverter::emitExpr(clang::Expr* e) {
         return emitExpr(cast->getSubExpr());
     }
 
-    /* Unknown expression — visit children as a fallback, return last value */
+    /* Unknown expression — visit children as a fallback, return last value.
+       If no value could be produced (e.g. StringLiteral, InitListExpr with no
+       Expr children) report an error rather than silently returning nullptr
+       to a consumer that would feed it to IRBuilder. */
     llvm::Value* last = nullptr;
     for (auto* child : e->children()) {
         if (auto* childExpr = llvm::dyn_cast_or_null<clang::Expr>(child)) {
             last = emitExpr(childExpr);
         }
+    }
+    if (!last && lastError_.empty()) {
+        lastError_ = "Unsupported expression node in C subset";
     }
     return last;
 }
@@ -549,7 +553,13 @@ llvm::Value* ClangToIRConverter::emitCallExpr(clang::CallExpr* call) {
 
     std::vector<llvm::Value*> args;
     for (unsigned i = 0; i < call->getNumArgs(); i++) {
-        args.push_back(loadIfAlloca(emitExpr(call->getArg(i))));
+        llvm::Value* arg = coerceToInt(loadIfAlloca(emitExpr(call->getArg(i))));
+        if (!arg) {
+            if (lastError_.empty())
+                lastError_ = "CallExpr: argument could not be emitted";
+            return nullptr;
+        }
+        args.push_back(arg);
     }
 
     if (func->arg_size() != args.size()) {
@@ -636,6 +646,16 @@ llvm::Type* ClangToIRConverter::getLLVMType(clang::QualType qt) {
     if (qt->isIntegerType())  return llvm::Type::getInt32Ty(*context_);
     /* Default to i32 for unsupported types */
     return llvm::Type::getInt32Ty(*context_);
+}
+
+llvm::Value* ClangToIRConverter::coerceToInt(llvm::Value* val) {
+    if (!val) return nullptr;
+    /* i1 (comparisons, logical ops, _Bool) → i32. i64/i8 never arise in the
+       supported C subset, so widening to i32 is always the right coercion. */
+    if (val->getType()->isIntegerTy() && !val->getType()->isIntegerTy(32)) {
+        return builder_->CreateZExt(val, builder_->getInt32Ty(), "coerce");
+    }
+    return val;
 }
 
 llvm::Value* ClangToIRConverter::loadIfAlloca(llvm::Value* val) {
