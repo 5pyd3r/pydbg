@@ -6,6 +6,14 @@ from ..exceptions import PydbgError
 
 _STUB_ALLOC = 0x2000   # payload 缓冲固定大小；以真实基址编译后写入实际机器码
 
+# E9 rel32 detour 约束：stub / trampoline 必须与目标函数地址处于 ±2GB 内。
+# 窗口取略小于 2GB，给跳转指令自身长度留余量（目标-窗口-5 仍在 INT32 范围）。
+_RELOC_WINDOW = 0x7F000000
+_MEM_FREE = 0x10000        # VirtualQueryEx state: MEM_FREE
+_MEM_COMMIT_RESERVE = 0x3000  # MEM_COMMIT | MEM_RESERVE
+_PAGE_EXECUTE_READWRITE = 0x40
+_GRANULARITY = 0x10000     # VirtualAllocEx 把 lpAddress 向下取整到分配粒度 (64KB)
+
 
 @dataclass
 class InstrumentInfo:
@@ -74,9 +82,11 @@ class Instrumenter:
         # 1. 读取 ≥5 字节原始代码（指令边界）
         original = self._read_min_5_bytes(mem, engine, target_addr)
 
-        # 2. trampoline：原始指令 + E9 跳回
+        # 2. trampoline：原始指令 + E9 跳回。
+        #    必须在目标函数 ±2GB 内分配（E9 rel32 detour 约束），否则 VirtualAllocEx
+        #    无 hint 时可能落到 >2GB 外导致跳转越界。
         tramp_size = len(original) + 5
-        tramp_addr = self._alloc_rwx(mem, tramp_size)
+        tramp_addr = self._alloc_rwx(mem, tramp_size, near=target_addr)
         if tramp_addr == 0:
             raise PydbgError("Failed to allocate trampoline memory")
         try:
@@ -90,8 +100,9 @@ class Instrumenter:
         symbols['original_func'] = tramp_addr
 
         # 4. 先分配 payload 缓冲（固定 _STUB_ALLOC），以缓冲地址为 base_addr 编译，
-        #    使 extern call 的 rel32 按真实加载地址修正（见 Task 3 设计更正）
-        stub_addr = self._alloc_rwx(mem, _STUB_ALLOC)
+        #    使 extern call 的 rel32 按真实加载地址修正（见 Task 3 设计更正）。
+        #    payload 内的 call original_func 也是 rel32，stub 必须与 trampoline 邻近。
+        stub_addr = self._alloc_rwx(mem, _STUB_ALLOC, near=target_addr)
         if stub_addr == 0:
             self._free_rwx(mem, tramp_addr, tramp_size)
             raise PydbgError("Failed to allocate stub memory")
@@ -155,17 +166,64 @@ class Instrumenter:
                 f"Need at least 5 bytes for JMP at 0x{addr:X}, got {len(result)}")
         return result
 
-    def _alloc_rwx(self, mem, size):
+    def _alloc_rwx(self, mem, size, near=None):
+        """分配可执行 RWX 内存。near 给出后，在 near ±2GB 内就近分配，
+        保证 E9 rel32 detour 可达。返回基址或 0。"""
         try:
             from .. import _pydbg
+            h = self._s.process_handle
+            if near:
+                return self._alloc_near(h, near, size)
             result = _pydbg.virtual_alloc(
-                self._s.process_handle, size,
-                0x3000,  # MEM_COMMIT | MEM_RESERVE
-                0x40,    # PAGE_EXECUTE_READWRITE
+                h, size,
+                _MEM_COMMIT_RESERVE,
+                _PAGE_EXECUTE_READWRITE,
             )
             return result.get('base_address', 0)
         except Exception:
             return 0
+
+    def _alloc_near(self, h, near, size):
+        """在 [near-_RELOC_WINDOW, near+_RELOC_WINDOW] 内扫描空闲区域并就近分配。
+
+        用 VirtualQueryEx 步进区域，跳过已占用区域，在首个足够大的 MEM_FREE
+        区域分配 size 字节。返回分配基址或 0。
+        """
+        from .. import _pydbg
+        lo = (near - _RELOC_WINDOW) & ~0xFFFF
+        if lo < 0x10000:
+            lo = 0x10000
+        hi = near + _RELOC_WINDOW
+        addr = lo
+        for _ in range(100000):  # 安全上限
+            if addr >= hi:
+                break
+            try:
+                info = _pydbg.virtual_query_ex(h, addr)
+            except Exception:
+                break
+            base = info['base_address']
+            rsize = info['region_size']
+            if info['state'] == _MEM_FREE and rsize >= size:
+                # VirtualAllocEx 把 lpAddress 向下取整到 64KB 分配粒度：若 hint
+                # 落在已占用页上会失败 (ERROR_INVALID_ADDRESS=487)。故向上取整
+                # 到 64KB，并保证 hint+size 不越出本空闲区域。
+                hint = (base + _GRANULARITY - 1) & ~(_GRANULARITY - 1)
+                if hint + size <= base + rsize:
+                    try:
+                        result = _pydbg.virtual_alloc_ex(
+                            h, hint, size, _MEM_COMMIT_RESERVE,
+                            _PAGE_EXECUTE_READWRITE)
+                        got = result.get('base_address', 0)
+                        if got:
+                            return got
+                    except Exception:
+                        pass
+            nxt = base + rsize
+            if nxt <= addr:  # 防死循环
+                nxt = addr + 0x1000
+            addr = nxt
+        return 0
 
     def _free_rwx(self, mem, addr, size):
         try:

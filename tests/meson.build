@@ -4,6 +4,12 @@ test_target = executable(
   'target/simple_target.c',
 )
 
+# 插桩测试目标
+instrument_target = executable(
+  'instrument_target',
+  'target/instrument_target.c',
+)
+
 # Common environment: PYTHONPATH includes project root (for tests).
 # The editable install (pip install -e .) handles pydbg package discovery,
 # including the compiled Cython extension at the correct import path.
@@ -14,6 +20,7 @@ test_env.prepend('PYTHONPATH',
 test_env.set('TEST_TARGET_PATH', test_target.full_path())
 test_env.set('TEST_WOW64_TARGET_PATH',
   meson.project_source_root() / 'tests' / 'target' / 'simple_target32.exe')
+test_env.set('TEST_INSTRUMENT_TARGET_PATH', instrument_target.full_path())
 
 # Test runner: use Python unittest via meson test
 test(
@@ -140,6 +147,14 @@ test(
   'wow64',
   py,
   args: ['-m', 'unittest', 'tests.test_wow64'],
+  env: test_env,
+  workdir: meson.project_build_root(),
+)
+
+test(
+  'instrument',
+  py,
+  args: ['-m', 'unittest', 'tests.test_instrument'],
   env: test_env,
   workdir: meson.project_build_root(),
 )

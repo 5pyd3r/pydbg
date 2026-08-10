@@ -98,6 +98,14 @@ def compile_payload(c_source: str, arch: str, symbols: dict, base_addr: int = 0)
             f"Add them to the symbols dict."
         )
 
+    if llvm_arch == "x86":
+        # x86 cdecl 名修饰：extern 符号在对象文件的重定位表里带下划线前缀
+        # （i686-pc-windows-msvc 的 _original_func 等），而 symbols 键是 C 层
+        # 未修饰名。为后端补齐下划线别名，否则 applyRelocations 解析不到。
+        symbols = dict(symbols)
+        symbols.update({f"_{k}": v for k, v in symbols.items()
+                        if not k.startswith("_")})
+
     try:
         code = backend.compile_stub(c_source, llvm_arch, dict(symbols), base_addr)
     except RuntimeError as exc:

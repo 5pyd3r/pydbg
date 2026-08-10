@@ -174,3 +174,143 @@ class TestInstrumenter(unittest.TestCase):
         self.assertEqual(args[2]['original_func'], 0x5000)
         # 回滚路径：trampoline 与 stub 两个分配都被释放
         self.assertEqual(free_mock.call_count, 2)
+
+
+import os
+import sys
+import time
+
+_TEST_TARGET = os.environ.get(
+    'TEST_INSTRUMENT_TARGET_PATH',
+    r'C:\Users\Spyder\Desktop\ai_eden\Output\instrument-module\build-instrument\tests\instrument_target.exe',
+)
+
+
+def _module_by_name(dbg, basename):
+    for m in dbg.enum_modules():
+        if m.get("name", "").split("\\")[-1].lower() == basename.lower():
+            return m
+    return None
+
+
+def _export_address(dbg, exe_path, base, name):
+    from pydbg.pe import PE
+    pe = PE.from_file(exe_path)
+    for exp in pe.exports:
+        if exp.name == name:
+            return base + exp.rva
+    raise AssertionError(f"export {name} not found in {exe_path}")
+
+
+@unittest.skipUnless(os.path.isfile(_TEST_TARGET), "instrument_target.exe not built")
+class TestInstrumentLive(unittest.TestCase):
+
+    @property
+    def target_path(self):
+        return _TEST_TARGET
+
+    def _launch(self):
+        from pydbg import Debugger
+        dbg = Debugger()
+        dbg.create_process(self.target_path)
+        return dbg
+
+    def _run_until_started(self, dbg, seconds=3):
+        """继续调试事件，让目标跑起来并度过启动期。"""
+        deadline = time.time() + seconds
+        while time.time() < deadline:
+            ev = dbg.wait_event(100)
+            if ev is None:
+                continue
+            dbg.continue_event(ev.pid, ev.tid)
+
+    def _sum_rate(self, dbg, g_sum_addr, seconds=0.4):
+        """测量 g_sum 增长速率（每秒增量）。目标每轮 +3，插桩后每轮 +103。"""
+        a = int.from_bytes(dbg.read_memory(g_sum_addr, 4), 'little')
+        t0 = time.time()
+        time.sleep(seconds)
+        b = int.from_bytes(dbg.read_memory(g_sum_addr, 4), 'little')
+        return (b - a) / max(time.time() - t0, 1e-6)
+
+    def test_install_restore_roundtrip(self):
+        from pydbg.instrument import Instrumenter
+        from tests.helpers import teardown
+
+        dbg = self._launch()
+        inst = Instrumenter(dbg._session)
+        try:
+            self._run_until_started(dbg)
+
+            base = _module_by_name(dbg, os.path.basename(self.target_path))["base_address"]
+            addr = _export_address(dbg, self.target_path, base, "add_numbers")
+            orig = dbg.read_memory(addr, 5)
+
+            g_sum_addr = _export_address(dbg, self.target_path, base, "g_sum")
+            base_rate = self._sum_rate(dbg, g_sum_addr, 0.4)
+            self.assertGreater(base_rate, 0, "目标未运行：g_sum 无增长")
+
+            info = inst.install(
+                addr,
+                c_source=('extern int original_func(int a, int b);'
+                          'int on_call(int a, int b) {'
+                          '    return original_func(a, b) + 100;'
+                          '}'),
+            )
+            self.assertGreater(info.trampoline_addr, 0)
+            self.assertGreater(info.stub_addr, 0)
+            # detour stub 已写入：target 首字节为 E9
+            self.assertEqual(dbg.read_memory(addr, 1), b"\xe9")
+
+            # 插桩后每轮 +103（原 +3 再加 +100）：速率应远超基线
+            hooked_rate = self._sum_rate(dbg, g_sum_addr, 0.4)
+            self.assertGreater(
+                hooked_rate, 10 * base_rate,
+                "hook 未生效：g_sum 速率未变为 +103/轮")
+
+            inst.restore(addr)
+            self.assertNotIn(addr, inst.active)
+            self.assertEqual(dbg.read_memory(addr, 5), orig)
+
+            # 恢复后每轮回到 +3：速率应回落到基线水平
+            restored_rate = self._sum_rate(dbg, g_sum_addr, 0.4)
+            self.assertGreater(restored_rate, 0, "目标未运行：g_sum 无增长")
+            self.assertLess(
+                restored_rate, 3 * base_rate,
+                "restore 未生效：g_sum 速率未回到 +3/轮")
+        finally:
+            teardown(dbg)
+
+
+_TEST_TARGET32 = os.environ.get(
+    'TEST_INSTRUMENT_TARGET32_PATH',
+    r'C:\Users\Spyder\Desktop\ai_eden\Output\instrument-module\tests\target\instrument_target32.exe',
+)
+
+
+def _wow64_available():
+    # 64 位宿主才能调试 WOW64（32 位进程）——同 test_wow64 的检测。
+    # _pydbg.wow64_available 绑定不存在时按宿主架构判断。
+    if struct.calcsize("P") == 8 and sys.platform == "win32":
+        return True
+    from pydbg import _pydbg
+    try:
+        return bool(getattr(_pydbg, 'wow64_available', lambda: False)())
+    except Exception:
+        return False
+
+
+@unittest.skipUnless(
+    os.path.isfile(_TEST_TARGET32) and _wow64_available(),
+    "requires 32-bit instrument target and WOW64 host")
+class TestInstrumentLive32(TestInstrumentLive):
+    """32 位 WOW64 live 往返；复用 TestInstrumentLive 的断言逻辑。"""
+
+    @property
+    def target_path(self):
+        return _TEST_TARGET32
+
+    def _launch(self):
+        from pydbg import Debugger
+        dbg = Debugger()
+        dbg.create_process(_TEST_TARGET32)
+        return dbg
