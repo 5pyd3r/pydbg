@@ -79,3 +79,43 @@ class TestCodegen(unittest.TestCase):
                 'extern void Missing_Func(int x);'
                 'int on_call(int x){ Missing_Func(x); return x; }', 'x64', {})
         self.assertIn('Missing_Func', str(ctx.exception))
+
+
+from pydbg.instrument.templates import InstrumentTemplates
+
+
+class TestInstrumentTemplates(unittest.TestCase):
+
+    def _entry(self, src):
+        self.assertIn('int on_call', src)
+        self.assertIn('original_func(', src)
+
+    def test_log_args_generates_c(self):
+        src, syms = InstrumentTemplates.log_args(
+            'on_call', 'int a, int b', 'Game_Log', {'Game_Log': 0x601000})
+        self._entry(src)
+        self.assertIn('Game_Log(a)', src)
+        self.assertIn('Game_Log(b)', src)
+        self.assertEqual(syms['Game_Log'], 0x601000)
+        self.assertNotIn('original_func', syms)
+
+    def test_call_counter_generates_c(self):
+        src, syms = InstrumentTemplates.call_counter(
+            'on_call', 'int a', 'MyTick', {'MyTick': 0x700000})
+        self._entry(src)
+        self.assertIn('MyTick()', src)
+        self.assertIn('original_func(a)', src)
+        self.assertEqual(syms['MyTick'], 0x700000)
+
+    def test_modify_return_generates_c(self):
+        src, syms = InstrumentTemplates.modify_return(
+            'on_call', 'int a, int b', 'r + 1', {})
+        self._entry(src)
+        self.assertIn('int r = original_func(a, b);', src)
+        self.assertIn('return (r + 1);', src)
+        self.assertEqual(syms, {})
+
+    def test_params_names_parsed(self):
+        src, _ = InstrumentTemplates.log_args('on_call', 'int a, int b', 'L', {})
+        self.assertIn('L(a)', src)
+        self.assertIn('L(b)', src)
