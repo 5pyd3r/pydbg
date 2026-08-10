@@ -126,3 +126,45 @@ class TestInstrumentTemplates(unittest.TestCase):
         src, _ = InstrumentTemplates.log_args('on_call', 'int a, int b', 'L', {})
         self.assertIn('L(a)', src)
         self.assertIn('L(b)', src)
+
+
+from pydbg.instrument import Instrumenter
+from pydbg.exceptions import PydbgError
+
+
+class TestInstrumenter(unittest.TestCase):
+
+    def setUp(self):
+        from pydbg.core.session import DebugSession
+        self.session = DebugSession()
+        self.inst = Instrumenter(self.session)
+
+    def test_init_empty_active(self):
+        self.assertEqual(self.inst.active, {})
+
+    def test_install_requires_exactly_one_source(self):
+        with self.assertRaises(PydbgError):
+            self.inst.install(0x1000)  # 两者都没有
+        with self.assertRaises(PydbgError):
+            self.inst.install(0x1000, c_source='int on_call(int x){return x;}',
+                              template=('x', {}))  # 两者都给
+
+    def test_install_backend_missing_raises(self):
+        # 确定性：mock 掉 codegen.compile_payload 的 PydbgError 路径。
+        # fresh DebugSession 的 process_handle 为 None，未 mock 时 mem.read/write
+        # 会先在 Cython 绑定处抛 TypeError（到不了 codegen）；故同时 mock 掉原始
+        # 字节读取、内存分配与 MemoryManager 读写，让 install 稳定走到 codegen
+        # 调用处，并验证分配失败后的双段回滚（trampoline + stub 都释放）。
+        from unittest import mock
+        from pydbg.instrument import codegen
+        with mock.patch.object(self.inst, '_read_min_5_bytes',
+                               return_value=b'\x90' * 5), \
+             mock.patch.object(self.inst, '_alloc_rwx', return_value=0x5000), \
+             mock.patch.object(self.inst, '_free_rwx') as free_mock, \
+             mock.patch('pydbg.memory.manager.MemoryManager'), \
+             mock.patch.object(codegen, 'compile_payload',
+                               side_effect=PydbgError("LLVM backend not available.")):
+            with self.assertRaises(PydbgError):
+                self.inst.install(0x1000, c_source='int on_call(int x){return x;}')
+        # 回滚路径：trampoline 与 stub 两个分配都被释放
+        self.assertEqual(free_mock.call_count, 2)
