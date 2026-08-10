@@ -75,17 +75,14 @@ class InlineHook:
     def _build_abs_jmp(from_addr, to_addr):
         """Build a 5-byte near JMP (E9 rel32) to an absolute address.
 
+        Delegates to instrument.templates.build_abs_jmp (shared hardcoded template).
+
         Keystone emits a short rel8 JMP when the target is within 128 bytes,
         which the hook layout does not support; building E9 explicitly keeps
         the JMP exactly 5 bytes in all cases.
         """
-        rel = to_addr - (from_addr + 5)
-        if not (-(1 << 31) <= rel < (1 << 31)):
-            raise PydbgError(
-                f"Hook target 0x{to_addr:X} is out of range of 0x{from_addr:X} "
-                f"for a 5-byte JMP"
-            )
-        return b"\xE9" + (rel & 0xFFFFFFFF).to_bytes(4, "little")
+        from ..instrument.templates import build_abs_jmp
+        return build_abs_jmp(from_addr, to_addr)
 
     def _read_min_5_bytes(self, mem, engine, addr):
         data = mem.read(addr, 16)
