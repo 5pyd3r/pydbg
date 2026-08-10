@@ -1,5 +1,5 @@
 // pydbg LLVM instrumentation backend — HookCompiler public API
-// 骨架：仅验证工具链链接。Task 2 移植全量实现。
+// Combines ClangToIRConverter (C → LLVM IR) + TargetCodeGen (IR → machine code).
 #pragma once
 
 #include <string>
@@ -10,13 +10,23 @@
 
 class HookCompiler {
 public:
+    // @param targetTriple  LLVM target triple, e.g. "x86_64-pc-windows-msvc"
     explicit HookCompiler(const std::string& targetTriple);
+
     HookCompiler(const HookCompiler&) = delete;
     HookCompiler& operator=(const HookCompiler&) = delete;
 
+    // Compile C source → fully resolved native machine code.
+    // @param cSource  C source code string. Must contain `on_call` function.
+    // @param symbols  External symbol → address mappings.
+    //                  "original_func" is typically mapped to trampoline address.
+    // @return         Machine code bytes ready for injection, empty on error.
     std::vector<uint8_t> compile(const std::string& cSource,
                                   const ExternalSymbolTable& symbols);
+
     const std::string& getLastError() const { return lastError_; }
+
+    // Static convenience: resolve arch name → target triple
     static std::string resolveTriple(const std::string& arch);
 
 private:

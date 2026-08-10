@@ -93,6 +93,8 @@ _cpp_args = llvm_cxxflags + [
 
 hook_compiler_lib = static_library('hook_compiler',
   'hook_compiler.cpp',
+  'clang_to_ir.cpp',
+  'target_codegen.cpp',
   dependencies : [llvm_dep, clang_dep],
   cpp_args : _cpp_args,
   install : false,
