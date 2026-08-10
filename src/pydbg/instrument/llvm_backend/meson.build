@@ -1,4 +1,5 @@
-# LLVM Instrument 后端 — 检测预编译 LLVM 17 + libclang，构建 hook_compiler 静态库
+# LLVM Instrument 后端 — 静态链接预编译 LLVM 17 + clang 组件库，构建 hook_compiler 静态库
+# 不再依赖 libclang.dll（clang_to_ir 使用 clang C++ API，链接 clang 静态组件库）。
 fs = import('fs')
 
 llvm_config = ''
@@ -32,6 +33,7 @@ if not llvm_config.found()
 endif
 
 llvm_includedir = run_command(llvm_config, '--includedir', check : true).stdout().strip()
+llvm_libdir     = run_command(llvm_config, '--libdir',     check : true).stdout().strip()
 llvm_cxxflags   = run_command(llvm_config, '--cxxflags',   check : true).stdout().strip().split()
 
 llvm_components = ['core', 'executionengine', 'mcjit',
@@ -50,37 +52,38 @@ _x86_force = ['/INCLUDE:LLVMInitializeX86TargetInfo',
               '/INCLUDE:LLVMInitializeX86AsmPrinter',
               '/INCLUDE:LLVMInitializeX86AsmParser']
 
-# ── libclang ───────────────────────────────────────────────────
-clang_cfg = get_option('libclang-config')
-clang_dep = []
-clang_found = false
-if clang_cfg != '' and fs.exists(clang_cfg / '../lib/libclang.lib')
-  clang_libdir = run_command(clang_cfg, '--libdir', check : true).stdout().strip()
-  clang_includedir = run_command(clang_cfg, '--includedir', check : true).stdout().strip()
-  clang_dep = declare_dependency(
-    include_directories : include_directories(clang_includedir),
-    link_args : ['-L' + clang_libdir, '-lclang'],
-  )
-  clang_found = true
-else
-  foreach dir : ['C:/Users/Spyder/AppData/Local/llvm-17', 'C:/Program Files/LLVM']
-    if fs.exists(dir / 'lib/libclang.lib')
-      clang_dep = declare_dependency(
-        include_directories : include_directories(dir / 'include'),
-        link_args : [dir / 'lib/libclang.lib'],
-      )
-      clang_found = true
-      break
-    endif
-  endforeach
-endif
-if not clang_found
-  error('LLVM Instrument requires libclang.lib under the prebuilt LLVM dir')
-endif
+# ── clang 静态组件库（替代 libclang.lib import lib）─────────────
+# runToolOnCode 依赖链：Tooling→Frontend→Serialization/Driver→Parse→Sema→
+# Analysis→AST→Lex→Basic，外加 Edit/Rewrite/RewriteFrontend/Support/
+# Transformer，以及 clangASTMatchers（clangAnalysis 的 UnsafeBufferUsage
+# 引用 MatchFinder）。
+_clang_libs = []
+foreach l : ['clangTooling', 'clangFrontend', 'clangSerialization', 'clangDriver',
+             'clangParse', 'clangSema', 'clangAnalysis', 'clangAST', 'clangLex',
+             'clangBasic', 'clangEdit', 'clangRewrite', 'clangRewriteFrontend',
+             'clangSupport', 'clangTransformer', 'clangASTMatchers']
+  _clang_libs += llvm_libdir / (l + '.lib')
+endforeach
+
+# clang 静态库额外依赖的 LLVM 组件（llvm-config --libs 的组件列表不含这些）：
+#   LLVMOption           clangDriver 的 llvm::opt
+#   LLVMWindowsDriver     clangDriver 的 MSVC 工具链探测
+#   LLVMFrontendOpenMP    clangSema 的 llvm::omp 命名
+# 以及 Windows version.lib（GetFileVersionInfo*）。
+_llvm_clang_extras = []
+foreach l : ['LLVMOption', 'LLVMWindowsDriver', 'LLVMFrontendOpenMP']
+  _llvm_clang_extras += llvm_libdir / (l + '.lib')
+endforeach
+_llvm_clang_extras += 'version.lib'
 
 llvm_dep = declare_dependency(
   include_directories : include_directories(llvm_includedir),
-  link_args : llvm_libs + llvm_system + _x86_force,
+  link_args : llvm_libs + llvm_system + _llvm_clang_extras + _x86_force,
+)
+
+clang_dep = declare_dependency(
+  include_directories : include_directories(llvm_includedir),
+  link_args : _clang_libs,
 )
 
 # MSVC + LLVM 17 头文件兼容参数（spike 已验证）

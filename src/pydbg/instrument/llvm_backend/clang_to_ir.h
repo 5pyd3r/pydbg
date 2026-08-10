@@ -2,11 +2,13 @@
 #pragma once
 /*
  * =========================================================================
- *  ClangToIRConverter — libclang AST → LLVM IR
+ *  ClangToIRConverter — clang C++ AST → LLVM IR
  * =========================================================================
+ *  Parses C source through the clang C++ frontend (clang::tooling) and
+ *  generates equivalent LLVM IR using the LLVM C++ IRBuilder API.
  *
- *  Uses libclang to parse C source code into an AST, then walks the AST
- *  and generates equivalent LLVM IR using the LLVM C++ IRBuilder API.
+ *  Fully static: links the clang static component libraries; the resulting
+ *  extension has NO libclang.dll dependency.
  *
  *  Supported C subset:
  *    - Function declarations (including `extern`)
@@ -37,7 +39,27 @@
 #include <llvm/IR/Type.h>
 #include <llvm/IR/Instructions.h>
 
-#include <clang-c/Index.h>
+namespace clang {
+class ASTContext;
+class Expr;
+class Stmt;
+class FunctionDecl;
+class VarDecl;
+class ReturnStmt;
+class IfStmt;
+class WhileStmt;
+class BinaryOperator;
+class CallExpr;
+class IntegerLiteral;
+class DeclRefExpr;
+class UnaryOperator;
+class QualType;
+}
+
+/* The AST frontend action and its diagnostic capturer (both defined in the
+ * .cpp) are friends so they can feed parse errors back into the converter. */
+class ClangToIRFrontendAction;
+class ClangToIRErrorConsumer;
 
 class ClangToIRConverter {
 public:
@@ -69,31 +91,35 @@ public:
     /* Get the generated IR as a human-readable string */
     std::string getIRString() const;
 
-    /* ── AST visitor (dispatches by cursor kind) ─────────────────────── */
-    llvm::Value* visitCursor(CXCursor cursor);
-
 private:
-    std::vector<llvm::Value*> visitChildrenOf(CXCursor cursor);
+    friend class ClangToIRFrontendAction;
+    friend class ClangToIRErrorConsumer;
+    friend class ClangToIRConsumer;
 
-    /* ── Cursor handlers ─────────────────────────────────────────────── */
-    llvm::Value* handleFunctionDecl(CXCursor cursor);
-    llvm::Value* handleCompoundStmt(CXCursor cursor);
-    llvm::Value* handleReturnStmt(CXCursor cursor);
-    llvm::Value* handleBinaryOperator(CXCursor cursor);
-    llvm::Value* handleCallExpr(CXCursor cursor);
-    llvm::Value* handleIntegerLiteral(CXCursor cursor);
-    llvm::Value* handleDeclRefExpr(CXCursor cursor);
-    llvm::Value* handleDeclStmt(CXCursor cursor);
-    llvm::Value* handleVarDecl(CXCursor cursor);
-    llvm::Value* handleIfStmt(CXCursor cursor);
-    llvm::Value* handleWhileStmt(CXCursor cursor);
-    llvm::Value* handleUnaryOperator(CXCursor cursor);
-    llvm::Value* handleParenExpr(CXCursor cursor);
+    /* Called by the frontend action's AST consumer once the TU is parsed. */
+    void convertTranslationUnit(clang::ASTContext& ctx);
+
+    /* Record a parse error (first error wins). */
+    void setParseError(const std::string& msg) {
+        if (lastError_.empty()) lastError_ = "Parse error: " + msg;
+    }
+
+    /* ── IR emission ─────────────────────────────────────────────────── */
+    void emitFunction(clang::FunctionDecl* fd);
+    void emitStmt(clang::Stmt* s);
+    void emitReturnStmt(clang::ReturnStmt* ret);
+    void emitIfStmt(clang::IfStmt* ifs);
+    void emitWhileStmt(clang::WhileStmt* ws);
+    void emitVarDecl(clang::VarDecl* vd);
+    llvm::Value* emitExpr(clang::Expr* e);
+    llvm::Value* emitBinaryOperator(clang::BinaryOperator* bin);
+    llvm::Value* emitCallExpr(clang::CallExpr* call);
+    llvm::Value* emitIntegerLiteral(clang::IntegerLiteral* lit);
+    llvm::Value* emitDeclRefExpr(clang::DeclRefExpr* ref);
+    llvm::Value* emitUnaryOperator(clang::UnaryOperator* un);
 
     /* ── Helpers ─────────────────────────────────────────────────────── */
-    llvm::Type* getLLVMType(CXType cxType);
-    std::string getCursorSpelling(CXCursor cursor);
-    std::string getTokenAtCursor(CXCursor cursor);
+    llvm::Type* getLLVMType(clang::QualType qt);
     llvm::Value* loadIfAlloca(llvm::Value* val);
     llvm::AllocaInst* createEntryBlockAlloca(llvm::Type* type,
                                               const std::string& name);
@@ -106,9 +132,6 @@ private:
     /* ── Current function context ────────────────────────────────────── */
     llvm::Function* currentFunction_ = nullptr;
     std::map<std::string, llvm::AllocaInst*> locals_;
-
-    /* ── libclang state ──────────────────────────────────────────────── */
-    CXTranslationUnit translationUnit_ = nullptr;
 
     /* ── Target triple (empty = host) ─────────────────────────────────── */
     std::string targetTriple_;

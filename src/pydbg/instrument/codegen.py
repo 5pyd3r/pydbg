@@ -1,12 +1,15 @@
 """Dynamic code generation for instrumentation payloads — LLVM backend facade.
 
+The `_llvm_backend` extension is fully static: clang is linked as static
+component libraries, so there is NO libclang.dll dependency and no DLL
+search-path setup is required at import time.
+
 Note: `_scan_externs` is a heuristic regex scanner, not a full C parser.
 Extern declarations appearing in comments, forward declarations of functions
 defined in the same TU, and externs declared with function-pointer types are
 not classified reliably.
 """
 
-import os as _os
 import re
 
 from ..exceptions import PydbgError
@@ -27,49 +30,8 @@ def _scan_externs(c_source: str) -> set:
     return names
 
 
-def _llvm_bin_candidates():
-    env = _os.environ.get("PYDBG_LLVM_BIN_DIR", "")
-    if env:
-        yield env
-    try:
-        import shutil
-        import subprocess
-        exe = shutil.which("llvm-config")
-        if exe:
-            out = subprocess.run([exe, "--bindir"], capture_output=True, text=True)
-            if out.returncode == 0 and out.stdout.strip():
-                yield out.stdout.strip()
-    except Exception:
-        pass
-    # 后端按本机构建的 LLVM 版本链接。若 C:\Program Files\LLVM 是其他版本，
-    # 其 libclang.dll 与 pyd 不兼容会在 DLL 初始化时崩溃，故构建设备路径优先。
-    yield r"C:\Users\Spyder\AppData\Local\llvm-17\bin"
-    yield r"C:\Program Files\LLVM\bin"
-
-
-_llvm_dll_added = False
-
-
-def _ensure_llvm_dlls():
-    """将 LLVM bin 目录加入 DLL 搜索路径（_llvm_backend 依赖 libclang.dll）。"""
-    global _llvm_dll_added
-    if _llvm_dll_added:
-        return
-    if _os.name != "nt":
-        return
-    for d in _llvm_bin_candidates():
-        if _os.path.isfile(_os.path.join(d, "libclang.dll")):
-            try:
-                _os.add_dll_directory(d)
-                _llvm_dll_added = True
-            except (OSError, AttributeError):
-                continue
-            return
-
-
 def _backend():
     """Lazily import the LLVM backend extension; raises PydbgError if absent."""
-    _ensure_llvm_dlls()
     try:
         from .. import _llvm_backend
         return _llvm_backend
