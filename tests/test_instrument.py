@@ -71,8 +71,8 @@ class TestCodegen(unittest.TestCase):
         # 后端存在时：extern 未解析应抛 PydbgError（缺失符号名单）
         from pydbg.instrument import codegen
         try:
-            import pydbg._llvm_backend  # noqa: F401
-        except ImportError:
+            codegen._backend()
+        except PydbgError:
             self.skipTest("LLVM backend not built")
         with self.assertRaises(PydbgError) as ctx:
             codegen.compile_payload(

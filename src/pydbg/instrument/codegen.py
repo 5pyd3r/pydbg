@@ -1,5 +1,6 @@
 """Dynamic code generation for instrumentation payloads — LLVM backend facade."""
 
+import os as _os
 import re
 
 from ..exceptions import PydbgError
@@ -20,8 +21,30 @@ def _scan_externs(c_source: str) -> set:
     return names
 
 
+def _ensure_llvm_dlls():
+    """将 LLVM bin 目录加入 DLL 搜索路径（_llvm_backend 依赖 libclang.dll）。"""
+    if _os.name != "nt":
+        return
+    candidates = []
+    env = _os.environ.get("PYDBG_LLVM_BIN_DIR", "")
+    if env:
+        candidates.append(env)
+    candidates += [
+        r"C:\Users\Spyder\AppData\Local\llvm-17\bin",
+        r"C:\Program Files\LLVM\bin",
+    ]
+    for d in candidates:
+        if _os.path.isfile(_os.path.join(d, "libclang.dll")):
+            try:
+                _os.add_dll_directory(d)
+            except (OSError, AttributeError):
+                pass
+            return
+
+
 def _backend():
     """Lazily import the LLVM backend extension; raises PydbgError if absent."""
+    _ensure_llvm_dlls()
     try:
         from .. import _llvm_backend
         return _llvm_backend
