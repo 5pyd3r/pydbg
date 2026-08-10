@@ -265,9 +265,9 @@ std::string TargetCodeGen::resolveTargetTriple(const std::string& arch) {
     if (!env.empty()) suffix += "-" + env;
     if (hostTriple.isOSDarwin()) suffix = "apple-darwin";
 
-    if (arch == "x86" || arch == "i686" || arch == "i386" || arch == "x86")
+    if (arch == "x86" || arch == "i686" || arch == "i386")
         return "i686-" + suffix;
-    if (arch == "x86_64" || arch == "amd64" || arch == "x64" || arch == "x64")
+    if (arch == "x86_64" || arch == "amd64" || arch == "x64")
         return "x86_64-" + suffix;
     if (arch == "arm64" || arch == "aarch64") {
         if (hostTriple.isOSDarwin())  return "aarch64-apple-darwin";
@@ -407,6 +407,10 @@ bool TargetCodeGen::applyRelocations(std::vector<uint8_t>& code,
                 lastError_ = "Unsupported relocation type " +
                              std::to_string(relocType) +
                              " for symbol '" + symName + "'";
+                /* Fail fast: a partially-patched .text would silently ship
+                 * E8 00 00 00 00 placeholders. Returning false lets compile()
+                 * take the error path (lastError_ is non-empty). */
+                return false;
             }
         }
     }
