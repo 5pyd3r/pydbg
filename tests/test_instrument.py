@@ -35,3 +35,47 @@ class TestTemplates(unittest.TestCase):
         self.assertEqual(tramp[5], 0xE9)
         rel = struct.unpack('<i', tramp[6:])[0]
         self.assertEqual(rel, 0x1005 - (0x5005 + 5))
+
+
+from pydbg.instrument.codegen import _scan_externs
+from pydbg.exceptions import PydbgError
+
+
+class TestCodegen(unittest.TestCase):
+
+    def test_scan_externs_collects_names(self):
+        src = ('extern void Foo(int x);'
+               'extern int  Bar(void);'
+               'int on_call(int x) { Foo(x); return Bar(); }')
+        self.assertEqual(_scan_externs(src), {'Foo', 'Bar'})
+
+    def test_scan_externs_reserves_original_func(self):
+        src = ('extern int original_func(int a, int b);'
+               'extern void Game_Log(int x);'
+               'int on_call(int a, int b) { Game_Log(a); return original_func(a, b); }')
+        self.assertEqual(_scan_externs(src), {'Game_Log'})
+
+    def test_scan_externs_no_externs(self):
+        self.assertEqual(_scan_externs('int on_call(int x) { return x * 2; }'), set())
+
+    def test_compile_payload_missing_backend_raises(self):
+        # 确定性验证后端缺失时的降级错误（无论真实后端是否已构建）
+        import sys
+        from unittest import mock
+        with mock.patch.dict(sys.modules, {'pydbg._llvm_backend': None}):
+            from pydbg.instrument import codegen
+            with self.assertRaises(PydbgError):
+                codegen.compile_payload('int on_call(int x){return x;}', 'x64', {})
+
+    def test_compile_payload_unresolved_extern_raises(self):
+        # 后端存在时：extern 未解析应抛 PydbgError（缺失符号名单）
+        from pydbg.instrument import codegen
+        try:
+            import pydbg._llvm_backend  # noqa: F401
+        except ImportError:
+            self.skipTest("LLVM backend not built")
+        with self.assertRaises(PydbgError) as ctx:
+            codegen.compile_payload(
+                'extern void Missing_Func(int x);'
+                'int on_call(int x){ Missing_Func(x); return x; }', 'x64', {})
+        self.assertIn('Missing_Func', str(ctx.exception))
