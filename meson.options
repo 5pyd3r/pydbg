@@ -1,1 +1,14 @@
-# No custom options needed — buildtype is a built-in meson option
+option('enable-llvm-instrument',
+  type : 'boolean',
+  value : false,
+  description : 'Enable LLVM-based instrumentation backend (requires prebuilt LLVM 17 + libclang)')
+
+option('llvm-config',
+  type : 'string',
+  value : '',
+  description : 'Path to llvm-config binary. Default: search prebuilt LLVM 17 locations.')
+
+option('libclang-config',
+  type : 'string',
+  value : '',
+  description : 'Path to clang-config binary. Default: search prebuilt LLVM 17 locations.')
