@@ -767,21 +767,58 @@ std::string ClangToIRConverter::getTokenAtCursor(CXCursor cursor) {
     /*
      * For a BinaryOperator or UnaryOperator cursor, we need to identify
      * which operator it represents.  libclang's C API doesn't expose the
-     * operator kind directly, so we tokenize the cursor's source range
-     * and find the first punctuation token that is a known operator.
+     * operator kind directly, so we tokenize the cursor's source range.
      *
      * libclang tokenizes compound operators (<=, >=, ==, !=, &&, ||)
      * as single tokens, so no special reassembly is needed.
+     *
+     * BinaryOperator: the operator sits between the LHS and RHS operands.
+     *   When the LHS is itself a binary expression (e.g. the outer `+` of
+     *   `a*b+3`), the whole extent tokenizes and the *first* punctuation
+     *   token is the inner `*` — which would mislabel `+` as `*`. So we
+     *   skip every token up to the end of the first child (the LHS) and
+     *   take the first known operator after it.
+     * UnaryOperator: the operator precedes its operand, so the first known
+     *   punctuation token in the extent is the one we want.
      */
     CXSourceRange range = clang_getCursorExtent(cursor);
     CXToken*      tokens = nullptr;
     unsigned      numTokens = 0;
     clang_tokenize(translationUnit_, range, &tokens, &numTokens);
 
+    /* Offset of the end of the first child (= LHS coverage) for binary ops. */
+    const bool skipLhs = (clang_getCursorKind(cursor) == CXCursor_BinaryOperator);
+    unsigned firstChildEnd = 0;
+    if (skipLhs) {
+        CXCursor firstChild = clang_getNullCursor();
+        clang_visitChildren(cursor, [](CXCursor c, CXCursor, CXClientData d) {
+            *static_cast<CXCursor*>(d) = c;
+            return CXChildVisit_Break;
+        }, &firstChild);
+        if (!clang_Cursor_isNull(firstChild)) {
+            CXSourceLocation loc =
+                clang_getRangeEnd(clang_getCursorExtent(firstChild));
+            unsigned off = 0;
+            clang_getFileLocation(loc, nullptr, nullptr, nullptr, &off);
+            firstChildEnd = off;
+        }
+    }
+
     std::string op;
     for (unsigned i = 0; i < numTokens; i++) {
         if (clang_getTokenKind(tokens[i]) != CXToken_Punctuation)
             continue;
+
+        if (skipLhs) {
+            CXSourceLocation loc =
+                clang_getTokenLocation(translationUnit_, tokens[i]);
+            unsigned off = 0;
+            clang_getFileLocation(loc, nullptr, nullptr, nullptr, &off);
+            /* Skip tokens that start strictly inside the LHS span. The
+             * operator token begins at offset >= firstChildEnd (e.g. the `+`
+             * of `a+b` starts exactly at firstChildEnd), so `<=` would drop it. */
+            if (off < firstChildEnd) continue;  /* part of the LHS operand */
+        }
 
         CXString spelling = clang_getTokenSpelling(translationUnit_, tokens[i]);
         std::string token = clang_getCString(spelling);
@@ -793,7 +830,7 @@ std::string ClangToIRConverter::getTokenAtCursor(CXCursor cursor) {
             token == ">=" || token == "==" || token == "!=" || token == "&&" ||
             token == "||" || token == "="  || token == "!") {
             op = token;
-            break;  /* First operator found is the one we want */
+            break;
         }
     }
     clang_disposeTokens(translationUnit_, tokens, numTokens);

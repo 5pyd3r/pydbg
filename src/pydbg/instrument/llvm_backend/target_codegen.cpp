@@ -243,32 +243,15 @@ std::string TargetCodeGen::resolveTargetTriple(const std::string& arch) {
         return llvm::sys::getProcessTriple();
     }
 
+    /* pydbg instruments Windows targets only. The host LLVM build may report
+     * a Linux triple (→ SysV calling convention), so pin x86/x86_64 to the
+     * Windows MSVC ABI: Win64 passes int args in RCX/RDX, Win32 on the stack. */
     llvm::Triple hostTriple(llvm::sys::getProcessTriple());
-    std::string os, env;
-
-    switch (hostTriple.getOS()) {
-        case llvm::Triple::Linux:   os = "linux";    break;
-        case llvm::Triple::Win32:   os = "windows";  break;
-        case llvm::Triple::Darwin:  os = "apple";    break;
-        case llvm::Triple::FreeBSD: os = "freebsd";  break;
-        default:                    os = "unknown";   break;
-    }
-
-    switch (hostTriple.getEnvironment()) {
-        case llvm::Triple::GNU:     env = "gnu";       break;
-        case llvm::Triple::MSVC:    env = "msvc";      break;
-        case llvm::Triple::EABIHF:  env = "gnueabihf"; break;
-        default:                    env = "";           break;
-    }
-
-    std::string suffix = os;
-    if (!env.empty()) suffix += "-" + env;
-    if (hostTriple.isOSDarwin()) suffix = "apple-darwin";
 
     if (arch == "x86" || arch == "i686" || arch == "i386")
-        return "i686-" + suffix;
+        return "i686-pc-windows-msvc";
     if (arch == "x86_64" || arch == "amd64" || arch == "x64")
-        return "x86_64-" + suffix;
+        return "x86_64-pc-windows-msvc";
     if (arch == "arm64" || arch == "aarch64") {
         if (hostTriple.isOSDarwin())  return "aarch64-apple-darwin";
         if (hostTriple.isOSWindows()) return "aarch64-pc-windows-msvc";
