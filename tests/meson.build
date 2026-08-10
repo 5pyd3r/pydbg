@@ -21,6 +21,8 @@ test_env.set('TEST_TARGET_PATH', test_target.full_path())
 test_env.set('TEST_WOW64_TARGET_PATH',
   meson.project_source_root() / 'tests' / 'target' / 'simple_target32.exe')
 test_env.set('TEST_INSTRUMENT_TARGET_PATH', instrument_target.full_path())
+test_env.set('TEST_INSTRUMENT_TARGET32_PATH',
+  meson.project_source_root() / 'tests' / 'target' / 'instrument_target32.exe')
 
 # Test runner: use Python unittest via meson test
 test(

@@ -12,7 +12,7 @@ __declspec(noinline) __declspec(dllexport) int __cdecl add_numbers(int a, int b)
 }
 
 /* volatile 函数指针：每次循环经它调用，结果不可缓存，调用留在循环内 */
-volatile int (__cdecl *g_fn)(int, int) = add_numbers;
+int (__cdecl * volatile g_fn)(int, int) = add_numbers;
 
 int main(void) {
     printf("instrument_target: pid=%lu\n", (unsigned long)GetCurrentProcessId());

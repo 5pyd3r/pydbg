@@ -103,8 +103,10 @@ def compile_payload(c_source: str, arch: str, symbols: dict, base_addr: int = 0)
         # （i686-pc-windows-msvc 的 _original_func 等），而 symbols 键是 C 层
         # 未修饰名。为后端补齐下划线别名，否则 applyRelocations 解析不到。
         symbols = dict(symbols)
-        symbols.update({f"_{k}": v for k, v in symbols.items()
-                        if not k.startswith("_")})
+        for k, v in list(symbols.items()):
+            # 不覆盖用户手写的 `_Foo` 键；只补未修饰名的下划线别名
+            if not k.startswith("_") and f"_{k}" not in symbols:
+                symbols[f"_{k}"] = v
 
     try:
         code = backend.compile_stub(c_source, llvm_arch, dict(symbols), base_addr)

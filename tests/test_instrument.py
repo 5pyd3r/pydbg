@@ -289,11 +289,12 @@ _TEST_TARGET32 = os.environ.get(
 
 def _wow64_available():
     # 64 位宿主才能调试 WOW64（32 位进程）——同 test_wow64 的检测。
-    # _pydbg.wow64_available 绑定不存在时按宿主架构判断。
+    # _pydbg.wow64_available 绑定不存在时按宿主架构判断；import 放进 try 内，
+    # 32 位宿主收集时若无绑定应返回 False 而非抛 ImportError。
     if struct.calcsize("P") == 8 and sys.platform == "win32":
         return True
-    from pydbg import _pydbg
     try:
+        from pydbg import _pydbg
         return bool(getattr(_pydbg, 'wow64_available', lambda: False)())
     except Exception:
         return False

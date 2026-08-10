@@ -102,6 +102,9 @@ class Instrumenter:
         # 4. 先分配 payload 缓冲（固定 _STUB_ALLOC），以缓冲地址为 base_addr 编译，
         #    使 extern call 的 rel32 按真实加载地址修正（见 Task 3 设计更正）。
         #    payload 内的 call original_func 也是 rel32，stub 必须与 trampoline 邻近。
+        #    分配中心用 target_addr（而非 tramp_addr）：tramp 落在 target 下方首个
+        #    足够大的空闲区域首部，stub 扫描同一 lo 会落在其余部紧邻 tramp；若以
+        #    tramp 为中心，扫描窗口整体下移，stub 可能落到 target >2GB 外，E9 越界。
         stub_addr = self._alloc_rwx(mem, _STUB_ALLOC, near=target_addr)
         if stub_addr == 0:
             self._free_rwx(mem, tramp_addr, tramp_size)
@@ -209,6 +212,8 @@ class Instrumenter:
                 # 落在已占用页上会失败 (ERROR_INVALID_ADDRESS=487)。故向上取整
                 # 到 64KB，并保证 hint+size 不越出本空闲区域。
                 hint = (base + _GRANULARITY - 1) & ~(_GRANULARITY - 1)
+                if hint + size > hi:          # 窗口上界对称守卫（防御性）
+                    hint = hi - size
                 if hint + size <= base + rsize:
                     try:
                         result = _pydbg.virtual_alloc_ex(
