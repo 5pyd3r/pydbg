@@ -17,12 +17,16 @@ public:
     HookCompiler& operator=(const HookCompiler&) = delete;
 
     // Compile C source → fully resolved native machine code.
-    // @param cSource  C source code string. Must contain `on_call` function.
-    // @param symbols  External symbol → address mappings.
-    //                  "original_func" is typically mapped to trampoline address.
-    // @return         Machine code bytes ready for injection, empty on error.
+    // @param cSource      C source code string. Must contain `on_call` function.
+    // @param symbols      External symbol → address mappings.
+    //                     "original_func" is typically mapped to trampoline address.
+    // @param baseAddress  Address where the emitted code will be loaded in the
+    //                     target process (PC-relative relocations are patched
+    //                     against this base). Defaults to 0 (legacy behavior).
+    // @return             Machine code bytes ready for injection, empty on error.
     std::vector<uint8_t> compile(const std::string& cSource,
-                                  const ExternalSymbolTable& symbols);
+                                  const ExternalSymbolTable& symbols,
+                                  uint64_t baseAddress = 0);
 
     const std::string& getLastError() const { return lastError_; }
 

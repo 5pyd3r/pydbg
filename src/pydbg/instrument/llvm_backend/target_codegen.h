@@ -61,12 +61,18 @@ public:
      * The output is a flat byte array of native machine code with all
      * external calls baked in — zero relocations, zero runtime resolution.
      *
-     * @param module   The LLVM module
-     * @param symbols  Map of symbol name → absolute address
-     * @return         Patched machine code bytes, empty on error
+     * @param module       The LLVM module
+     * @param symbols      Map of symbol name → absolute address
+     * @param baseAddress  Address where the emitted machine code will be
+     *                     loaded in the target process. Used to compute
+     *                     PC-relative relocation targets so absolute calls
+     *                     land correctly once injected. Defaults to 0, which
+     *                     keeps previous behavior (caller must re-base).
+     * @return             Patched machine code bytes, empty on error
      */
     std::vector<uint8_t> compile(llvm::Module* module,
-                                  const ExternalSymbolTable& symbols);
+                                  const ExternalSymbolTable& symbols,
+                                  uint64_t baseAddress = 0);
 
     std::string getTargetTriple() const;
     std::string getTargetArchName() const;
@@ -88,7 +94,8 @@ private:
     /* Apply relocations using the symbol table */
     bool applyRelocations(std::vector<uint8_t>& code,
                           llvm::object::ObjectFile* obj,
-                          const ExternalSymbolTable& symbols);
+                          const ExternalSymbolTable& symbols,
+                          uint64_t baseAddress);
 
     std::string targetTriple_;
     std::unique_ptr<llvm::TargetMachine> targetMachine_;

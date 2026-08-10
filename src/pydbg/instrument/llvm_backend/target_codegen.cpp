@@ -350,17 +350,22 @@ std::vector<uint8_t> TargetCodeGen::emitObjectFile(llvm::Module* module) {
 
 bool TargetCodeGen::applyRelocations(std::vector<uint8_t>& code,
                                       llvm::object::ObjectFile* obj,
-                                      const ExternalSymbolTable& symbols) {
+                                      const ExternalSymbolTable& symbols,
+                                      uint64_t baseAddress) {
     llvm::Triple triple(targetTriple_);
     int patched = 0;
     std::vector<std::string> unresolved;
 
-    /* Find the .text section base address */
+    /* Find the .text section base address.
+     * COFF object sections report sec.getAddress() == 0, which is only
+     * correct when the code is injected at address 0. Use the caller's
+     * baseAddress (the real address where the code will be loaded) so that
+     * PC-relative relocation targets resolve to the correct absolute address. */
     uint64_t textAddr = 0;
     for (const auto& sec : obj->sections()) {
         auto name = sec.getName();
         if (name && (*name == ".text" || name->ends_with("text"))) {
-            textAddr = sec.getAddress();
+            textAddr = baseAddress;
             break;
         }
     }
@@ -464,7 +469,8 @@ std::vector<uint8_t> TargetCodeGen::compile(llvm::Module* module) {
  * ====================================================================== */
 
 std::vector<uint8_t> TargetCodeGen::compile(llvm::Module* module,
-                                              const ExternalSymbolTable& symbols) {
+                                              const ExternalSymbolTable& symbols,
+                                              uint64_t baseAddress) {
     lastError_.clear();
 
     if (symbols.empty()) {
@@ -513,7 +519,7 @@ std::vector<uint8_t> TargetCodeGen::compile(llvm::Module* module,
     }
 
     /* ── 4. Patch relocations with the provided symbol addresses ────── */
-    if (!applyRelocations(code, obj, symbols)) {
+    if (!applyRelocations(code, obj, symbols, baseAddress)) {
         if (!lastError_.empty()) return {};
         /* No relocations matched — that's OK, code may have no externals */
     }

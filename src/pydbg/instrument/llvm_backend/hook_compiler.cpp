@@ -35,7 +35,8 @@ HookCompiler::HookCompiler(const std::string& triple)
 }
 
 std::vector<uint8_t> HookCompiler::compile(const std::string& cSource,
-                                            const ExternalSymbolTable& symbols) {
+                                            const ExternalSymbolTable& symbols,
+                                            uint64_t baseAddress) {
     lastError_.clear();
 
     // 1. C source → LLVM IR
@@ -81,7 +82,7 @@ std::vector<uint8_t> HookCompiler::compile(const std::string& cSource,
 
     // 4. IR → machine code with symbol injection
     TargetCodeGen codegen(targetTriple_);
-    auto code = codegen.compile(module.get(), symbols);
+    auto code = codegen.compile(module.get(), symbols, baseAddress);
     if (code.empty()) {
         lastError_ = "TargetCodeGen: " + codegen.getLastError();
         return {};
