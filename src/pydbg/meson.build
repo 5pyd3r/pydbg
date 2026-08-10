@@ -5,7 +5,7 @@ pkg_pydir = py.get_install_dir() / 'pydbg'
 install_subdir('.',
   install_dir: pkg_pydir,
   exclude_files: ['meson.build'],
-  exclude_directories: ['cython/'],
+  exclude_directories: ['cython/', 'instrument/llvm_backend/'],
 )
 
 # Cython include 路径：必须在声明任何 build target 之前调用

@@ -32,7 +32,6 @@ if not llvm_config.found()
 endif
 
 llvm_includedir = run_command(llvm_config, '--includedir', check : true).stdout().strip()
-llvm_libdir     = run_command(llvm_config, '--libdir',     check : true).stdout().strip()
 llvm_cxxflags   = run_command(llvm_config, '--cxxflags',   check : true).stdout().strip().split()
 
 llvm_components = ['core', 'executionengine', 'mcjit',
