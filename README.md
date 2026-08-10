@@ -92,6 +92,35 @@ for mod in dbg.enum_modules():
     print(f"  {mod['base_address']:016X}  {dbg.get_module_filename(mod['handle'])}")
 ```
 
+### 插桩（Instrumentation）
+
+stub/trampoline 用硬编码指令生成，payload 由 LLVM 17 动态编译 C 源码为机器码并注入目标进程。
+需以 `-Denable-llvm-instrument=true` 构建，并预装 LLVM 17（检测 `C:/Users/Spyder/AppData/Local/llvm-17` 或 `-Dllvm-config=`）。
+
+```python
+from pydbg.instrument import Instrumenter, InstrumentTemplates
+
+inst = Instrumenter(dbg._session)
+inst.install(
+    0x00401000,
+    c_source='''
+        extern int original_func(int a, int b);
+        int on_call(int a, int b) {
+            return original_func(a, b) + 1;
+        }
+    ''',
+)
+# 或常用原语：
+# inst.install(addr, template=InstrumentTemplates.log_args('on_call', 'int a, int b', 'Game_Log', {'Game_Log': 0x601000}))
+inst.restore(0x00401000)
+inst.active   # {addr: {...}}
+```
+
+**C 子集限制**
+- 类型映射：指针等未支持类型一律映射为 `i32`（静默截断）——payload 参数和返回值只应使用 `int` / `void`。
+- 不支持 extern 全局变量（C→IR 转换器把 `VarDecl` 一律当局部变量）；只支持 extern 函数。
+- 比较表达式在条件（`if (a<b)`）和 `return`（`return a<b`）中均可用；`&&` / `||` 产生逻辑 0/1（不保留短路求值）。
+
 ### 子进程调试
 
 默认情况下 pydbg 只调试目标进程，不跟踪子进程。通过 `set_debug_children(True)` 开启：
