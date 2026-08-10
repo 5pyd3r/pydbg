@@ -4,6 +4,8 @@ from dataclasses import dataclass
 
 from ..exceptions import PydbgError
 
+_STUB_ALLOC = 0x2000   # payload 缓冲固定大小；以真实基址编译后写入实际机器码
+
 
 @dataclass
 class InstrumentInfo:
@@ -18,6 +20,7 @@ class InstrumentInfo:
     c_source: str
 
     def to_dict(self) -> dict:
+        # stub_alloc_size 刻意省略：那是内部分配缓冲大小，stub_size 才是实际机器码长度
         return {
             'target_addr': self.target_addr,
             'trampoline_addr': self.trampoline_addr,
@@ -42,9 +45,10 @@ class Instrumenter:
     def install(self, target_addr, c_source=None, template=None, symbols=None):
         """Install an instrumentation probe at target_addr.
 
-        Provide exactly one of c_source (raw C) or template (InstrumentTemplates).
-        symbols maps extern names → absolute addresses; 'original_func' is
-        auto-mapped to the trampoline address.
+        Provide exactly one of c_source (raw C) or template (a (c_source, symbols)
+        tuple as returned by InstrumentTemplates methods — not the class/method
+        itself). symbols maps extern names → absolute addresses; 'original_func'
+        is always forced to the trampoline address.
         """
         if (c_source is None) == (template is None):
             raise PydbgError("install() requires exactly one of c_source or template")
@@ -53,6 +57,10 @@ class Instrumenter:
             symbols = dict(template_symbols)
         else:
             symbols = dict(symbols) if symbols else {}
+
+        if target_addr in self._hooks:
+            raise PydbgError(
+                f"target 0x{target_addr:X} is already instrumented; restore() it first")
 
         from ..disasm.engine import DisasmEngine
         from ..memory.manager import MemoryManager
@@ -71,19 +79,18 @@ class Instrumenter:
         tramp_addr = self._alloc_rwx(mem, tramp_size)
         if tramp_addr == 0:
             raise PydbgError("Failed to allocate trampoline memory")
-        tramp_code = build_trampoline(original, tramp_addr, target_addr)
         try:
+            tramp_code = build_trampoline(original, tramp_addr, target_addr)
             mem.write(tramp_addr, tramp_code)
         except Exception:
             self._free_rwx(mem, tramp_addr, tramp_size)
             raise
 
-        # 3. LLVM 编译 payload；original_func → trampoline
-        symbols.setdefault('original_func', tramp_addr)
+        # 3. LLVM 编译 payload；original_func 强制映射到 trampoline
+        symbols['original_func'] = tramp_addr
 
-        # 4. 先分配 payload 缓冲（固定 0x2000），以缓冲地址为 base_addr 编译，
+        # 4. 先分配 payload 缓冲（固定 _STUB_ALLOC），以缓冲地址为 base_addr 编译，
         #    使 extern call 的 rel32 按真实加载地址修正（见 Task 3 设计更正）
-        _STUB_ALLOC = 0x2000
         stub_addr = self._alloc_rwx(mem, _STUB_ALLOC)
         if stub_addr == 0:
             self._free_rwx(mem, tramp_addr, tramp_size)
@@ -95,10 +102,17 @@ class Instrumenter:
             self._free_rwx(mem, tramp_addr, tramp_size)
             self._free_rwx(mem, stub_addr, _STUB_ALLOC)
             raise
-        mem.write(stub_addr, machine)
-
-        # 5. detour stub 写入 target_addr
-        mem.write(target_addr, build_stub(target_addr, stub_addr))
+        try:
+            mem.write(stub_addr, machine)
+            mem.write(target_addr, build_stub(target_addr, stub_addr))
+        except Exception:
+            try:
+                mem.write(target_addr, original)   # 尽力恢复目标
+            except Exception:
+                pass
+            self._free_rwx(mem, tramp_addr, tramp_size)
+            self._free_rwx(mem, stub_addr, _STUB_ALLOC)
+            raise
 
         info = InstrumentInfo(
             target_addr=target_addr,

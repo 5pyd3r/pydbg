@@ -159,12 +159,18 @@ class TestInstrumenter(unittest.TestCase):
         from pydbg.instrument import codegen
         with mock.patch.object(self.inst, '_read_min_5_bytes',
                                return_value=b'\x90' * 5), \
-             mock.patch.object(self.inst, '_alloc_rwx', return_value=0x5000), \
+             mock.patch.object(self.inst, '_alloc_rwx',
+                               side_effect=[0x5000, 0x7000]), \
              mock.patch.object(self.inst, '_free_rwx') as free_mock, \
              mock.patch('pydbg.memory.manager.MemoryManager'), \
              mock.patch.object(codegen, 'compile_payload',
-                               side_effect=PydbgError("LLVM backend not available.")):
+                               side_effect=PydbgError("LLVM backend not available.")) as compile_mock:
             with self.assertRaises(PydbgError):
                 self.inst.install(0x1000, c_source='int on_call(int x){return x;}')
+        # 接线：tramp 先分配（0x5000），stub 后分配（0x7000）；
+        # compile(c_source, mode, symbols, base_addr=...) — symbols 是位置参数（下标 2）
+        args, kwargs = compile_mock.call_args
+        self.assertEqual(kwargs['base_addr'], 0x7000)
+        self.assertEqual(args[2]['original_func'], 0x5000)
         # 回滚路径：trampoline 与 stub 两个分配都被释放
         self.assertEqual(free_mock.call_count, 2)
