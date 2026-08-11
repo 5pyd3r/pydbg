@@ -151,7 +151,7 @@ std::unique_ptr<llvm::Module> ClangToIRConverter::convert(
 
     /* ── Set target triple if specified ──────────────────────────────── */
     if (!targetTriple_.empty()) {
-        module_->setTargetTriple(targetTriple_);
+        module_->setTargetTriple(llvm::Triple(targetTriple_));
     }
 
     /* ── Verify the generated module ─────────────────────────────────── */
