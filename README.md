@@ -94,8 +94,8 @@ for mod in dbg.enum_modules():
 
 ### 插桩（Instrumentation）
 
-stub/trampoline 用硬编码指令生成，payload 由 LLVM 17 动态编译 C 源码为机器码并注入目标进程。
-需以 `-Denable-llvm-instrument=true` 构建，并预装 LLVM 17（检测 `C:/Users/Spyder/AppData/Local/llvm-17` 或 `-Dllvm-config=`）。
+stub/trampoline 用硬编码指令生成，payload 由 LLVM 22 动态编译 C 源码为机器码并注入目标进程。
+需以 `-Denable-llvm-instrument=true` 构建，并预装 LLVM 22（检测 `C:/Users/Spyder/AppData/Local/llvm-22` 或 `-Dllvm-config=`）。
 
 ```python
 from pydbg.instrument import Instrumenter, InstrumentTemplates

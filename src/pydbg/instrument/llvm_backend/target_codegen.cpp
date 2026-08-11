@@ -7,7 +7,7 @@
  *  Pipeline:
  *
  *    LLVM Module
- *      → TargetMachine::addPassesToEmitFile  (CGFT_ObjectFile)
+ *      → TargetMachine::addPassesToEmitFile  (CodeGenFileType::ObjectFile)
  *      → object file bytes (ELF / MachO / COFF)
  *      → extract .text section
  *      → scan .rela.text relocations
@@ -19,13 +19,14 @@
 #include "target_codegen.h"
 
 #include <llvm/Support/TargetSelect.h>
-#include <llvm/Support/Host.h>
+#include <llvm/TargetParser/Host.h>   /* llvm::sys::getProcessTriple (moved from Support/Host.h) */
 #include <llvm/Support/raw_ostream.h>
 #include <llvm/Support/FileSystem.h>
 #include <llvm/Support/MemoryBuffer.h>
 #include <llvm/MC/TargetRegistry.h>
 #include <llvm/Target/TargetMachine.h>
 #include <llvm/Target/TargetOptions.h>
+#include <llvm/Support/CodeGen.h>   /* CodeGenFileType::ObjectFile (LLVM >= 18) */
 #include <llvm/IR/LegacyPassManager.h>
 #include <llvm/IR/Module.h>
 #include <llvm/IR/DataLayout.h>
@@ -285,7 +286,7 @@ TargetCodeGen::TargetCodeGen(const std::string& targetTriple)
 
     llvm::TargetOptions options;
     targetMachine_.reset(target->createTargetMachine(
-        targetTriple_, "generic", "", options, llvm::Reloc::Static));
+        llvm::Triple(targetTriple_), "generic", "", options, llvm::Reloc::Static));
 
     if (!targetMachine_) {
         lastError_ = "Failed to create TargetMachine for " + targetTriple_;
@@ -304,7 +305,7 @@ std::vector<uint8_t> TargetCodeGen::emitObjectFile(llvm::Module* module) {
         return {};
     }
 
-    module->setTargetTriple(targetTriple_);
+    module->setTargetTriple(llvm::Triple(targetTriple_));
     module->setDataLayout(targetMachine_->createDataLayout());
 
     llvm::legacy::PassManager pm;
@@ -312,7 +313,7 @@ std::vector<uint8_t> TargetCodeGen::emitObjectFile(llvm::Module* module) {
     llvm::raw_svector_ostream os(buf);
 
     if (targetMachine_->addPassesToEmitFile(pm, os, nullptr,
-                                             llvm::CGFT_ObjectFile)) {
+                                             llvm::CodeGenFileType::ObjectFile)) {
         lastError_ = "Cannot emit object file for " + targetTriple_;
         return {};
     }

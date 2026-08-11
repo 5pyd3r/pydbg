@@ -3,6 +3,7 @@ name: CI
 on:
   pull_request:
     branches: [master, main]
+  workflow_dispatch:  # manual re-run from the Actions tab
 
 jobs:
   build-and-test:
@@ -27,6 +28,52 @@ jobs:
 
       - name: Configure
         run: meson setup build --buildtype=release
+
+      - name: Build
+        run: meson compile -C build
+
+      - name: Build 32-bit WOW64 test target
+        run: powershell -ExecutionPolicy Bypass -File scripts/build-target32.ps1
+
+      - name: Test
+        run: |
+          pip install -e . --no-build-isolation
+          meson test -C build --print-errorlogs
+
+  # LLVM instrument backend — downloads the prebuilt LLVM 22 release asset
+  # (see devtools/build-llvm-22.ps1), so the live instrument tests actually run
+  # here instead of being skipped. The prebuilt is built with cl 14.44 (/MD);
+  # /D_ALLOW_COMPILER_AND_STL_VERSION_MISMATCH tolerates a different runner MSVC.
+  llvm-instrument:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          architecture: x64
+
+      - uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: amd64
+
+      - name: Install build deps
+        run: pip install meson meson-python ninja cython 'capstone>=5.0' keystone-engine
+
+      - name: Download prebuilt LLVM 22
+        shell: pwsh
+        run: |
+          # 7-Zip is not reliably preinstalled on windows-latest; install it.
+          choco install 7zip -y --no-progress | Out-Null
+          gh release download llvm-prebuilt-22.1.8 -R 5pyd3r/pydbg -p llvm-22.1.8-x86_64-windows.7z -D "$env:TEMP\llvm22"
+          7z x "$env:TEMP\llvm22\llvm-22.1.8-x86_64-windows.7z" -o"$env:TEMP\llvm22" -y | Out-Null
+          New-Item -ItemType Directory -Force "C:\llvm-22" | Out-Null
+          Move-Item -Force "$env:TEMP\llvm22\llvm-22\*" "C:\llvm-22"
+          & "C:\llvm-22\bin\llvm-config.exe" --version
+
+      - name: Configure (LLVM instrument)
+        run: meson setup build --buildtype=release -Denable-llvm-instrument=true -Dllvm-config="C:\llvm-22\bin\llvm-config.exe"
 
       - name: Build
         run: meson compile -C build
