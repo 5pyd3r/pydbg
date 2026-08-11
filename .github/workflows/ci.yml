@@ -3,6 +3,7 @@ name: CI
 on:
   pull_request:
     branches: [master, main]
+  workflow_dispatch:  # manual re-run from the Actions tab
 
 jobs:
   build-and-test:
