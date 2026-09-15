@@ -2,6 +2,10 @@ from dataclasses import dataclass
 
 from ..exceptions import PydbgError
 
+_MEM_COMMIT_RESERVE = 0x3000   # MEM_COMMIT | MEM_RESERVE
+_PAGE_EXECUTE_READWRITE = 0x40
+_MEM_RELEASE = 0x8000          # MEM_RELEASE 要求 dwSize==0
+
 
 @dataclass
 class Trampoline:
@@ -75,13 +79,13 @@ class InlineHook:
     def _build_abs_jmp(from_addr, to_addr):
         """Build a 5-byte near JMP (E9 rel32) to an absolute address.
 
-        Delegates to instrument.templates.build_abs_jmp (shared hardcoded template).
+        Delegates to patch.encoding.build_abs_jmp (shared hardcoded template).
 
         Keystone emits a short rel8 JMP when the target is within 128 bytes,
         which the hook layout does not support; building E9 explicitly keeps
         the JMP exactly 5 bytes in all cases.
         """
-        from ..instrument.templates import build_abs_jmp
+        from ..patch.encoding import build_abs_jmp
         return build_abs_jmp(from_addr, to_addr)
 
     def _read_min_5_bytes(self, mem, engine, addr):
@@ -99,8 +103,8 @@ class InlineHook:
             from .. import _pydbg
             result = _pydbg.virtual_alloc(
                 self._s.process_handle, size,
-                0x3000,  # MEM_COMMIT | MEM_RESERVE
-                0x40,    # PAGE_EXECUTE_READWRITE
+                _MEM_COMMIT_RESERVE,
+                _PAGE_EXECUTE_READWRITE,
             )
             return result.get('base_address', 0)
         except Exception:
@@ -109,6 +113,6 @@ class InlineHook:
     def _free(self, mem, addr, size):
         try:
             from .. import _pydbg
-            _pydbg.virtual_free(self._s.process_handle, addr, 0, 0x8000)  # MEM_RELEASE 要求 dwSize==0
+            _pydbg.virtual_free(self._s.process_handle, addr, 0, _MEM_RELEASE)
         except Exception:
             pass

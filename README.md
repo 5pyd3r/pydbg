@@ -4,7 +4,7 @@ Windows 原生二进制调试器 —— 基于 Cython 封装 Win32 Debug API，�
 
 [![CI](https://github.com/5pyd3r/pydbg/actions/workflows/ci.yml/badge.svg)](https://github.com/5pyd3r/pydbg/actions/workflows/ci.yml)
 ![Platform](https://img.shields.io/badge/platform-Windows%20x64-blue)
-![Python](https://img.shields.io/badge/python-3.8%2B-blue)
+![Python](https://img.shields.io/badge/python-3.10%2B-blue)
 
 ## 功能
 

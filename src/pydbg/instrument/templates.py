@@ -5,21 +5,7 @@ Stub/trampoline 全部用硬编码字节，不依赖 keystone/capstone：
 - trampoline  = 被覆盖的原始指令副本 + 5 字节 E9 rel32 跳回
 """
 
-from ..exceptions import PydbgError
-
-
-def build_abs_jmp(from_addr: int, to_addr: int) -> bytes:
-    """5-byte near JMP (E9 rel32) from from_addr to to_addr.
-
-    Raises PydbgError if the target is out of ±2GB range.
-    """
-    rel = to_addr - (from_addr + 5)
-    if not (-(1 << 31) <= rel < (1 << 31)):
-        raise PydbgError(
-            f"JMP target 0x{to_addr:X} out of range of 0x{from_addr:X} "
-            f"for a 5-byte near JMP"
-        )
-    return b"\xE9" + (rel & 0xFFFFFFFF).to_bytes(4, "little")
+from ..patch.encoding import build_abs_jmp
 
 
 def build_stub(target_addr: int, payload_addr: int) -> bytes:

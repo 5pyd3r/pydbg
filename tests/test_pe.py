@@ -512,8 +512,6 @@ class TestSyntheticPE32(unittest.TestCase):
         offset = pe.rva_to_offset(0x1050)
         self.assertEqual(offset, 0x450)
 
-    """Tests for PE parser with synthetic data."""
-
     def test_parse_dos_header(self):
         from pydbg.pe import PE
 
