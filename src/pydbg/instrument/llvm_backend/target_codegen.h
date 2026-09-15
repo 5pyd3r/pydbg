@@ -2,21 +2,20 @@
 #pragma once
 /*
  * =========================================================================
- *  TargetCodeGen — Cross-architecture machine code generator
+ *  TargetCodeGen — x86/x64 machine code generator
  * =========================================================================
  *
- *  Uses LLVM's TargetMachine to compile LLVM IR into native machine code
- *  for any supported target architecture (not just the host).
+ *  Uses LLVM's TargetMachine to compile LLVM IR into native machine code for
+ *  the x86/x86_64 Windows targets pydbg instruments.
  *
- *  Unlike JITEngine (which uses MCJIT to execute on the host), this class:
- *    1. Accepts an arbitrary target triple (x86_64, aarch64, arm, …)
+ *  This class:
+ *    1. Accepts an x86/x86_64 target triple (or "host")
  *    2. Compiles IR → object file → extracts .text section
  *    3. Returns raw machine code bytes for the target arch
  *
  *  The output can be:
  *    - Dumped as hex to stdout
  *    - Written to a binary file
- *    - Embedded in firmware / transmitted over network
  * =========================================================================
  */
 

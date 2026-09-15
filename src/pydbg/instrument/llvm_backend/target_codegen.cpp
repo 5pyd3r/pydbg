@@ -67,46 +67,16 @@ namespace {
  *    x86_64:   E8 00 00 00 00       (CALL rel32, offset=0 placeholder)
  *              + R_X86_64_PLT32 relocation @ offset 1
  *
- *    ARM64:    00 00 00 94           (BL, imm26=0 placeholder)
- *              + R_AARCH64_CALL26 relocation @ offset 0
- *
- *    ARM32:    00 00 00 EB           (BL, imm24=0 placeholder)
- *              + R_ARM_CALL relocation @ offset 0
- *
- *  We patch the placeholder with the real address from the symbol table.
- *
- *  For x86_64:  offset = (target - (section_base + reloc_offset + 4))
- *               Patch 4 bytes at reloc_offset (little-endian i32)
- *
- *  For ARM64:   offset = (target - (section_base + reloc_offset)) / 4
- *               Patch bits [25:0] of the instruction at reloc_offset
- *
- *  For ARM32:   offset = (target - (section_base + reloc_offset + 8)) / 4
- *               Patch bits [23:0] of the instruction at reloc_offset
+ *  We patch the placeholder with the real address from the symbol table:
+ *    offset = (target - (section_base + reloc_offset + 4))
+ *    Patch 4 bytes at reloc_offset (little-endian i32)
  * ====================================================================== */
-
-static uint64_t readLE32(const uint8_t* p) {
-    return (uint64_t)p[0] | ((uint64_t)p[1] << 8) |
-           ((uint64_t)p[2] << 16) | ((uint64_t)p[3] << 24);
-}
 
 static void writeLE32(uint8_t* p, uint32_t v) {
     p[0] = v & 0xFF;
     p[1] = (v >> 8) & 0xFF;
     p[2] = (v >> 16) & 0xFF;
     p[3] = (v >> 24) & 0xFF;
-}
-
-static uint32_t readBE32(const uint8_t* p) {
-    return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) |
-           ((uint32_t)p[2] << 8) | (uint32_t)p[3];
-}
-
-static void writeBE32(uint8_t* p, uint32_t v) {
-    p[0] = (v >> 24) & 0xFF;
-    p[1] = (v >> 16) & 0xFF;
-    p[2] = (v >> 8) & 0xFF;
-    p[3] = v & 0xFF;
 }
 
 /*
@@ -140,98 +110,6 @@ static bool patchOneReloc(std::vector<uint8_t>& code,
         return true;
     }
 
-    /* ── AArch64 ────────────────────────────────────────────────────── */
-    if (arch == llvm::Triple::aarch64 ||
-        arch == llvm::Triple::aarch64_be) {
-        /* R_AARCH64_CALL26 — BL / B instruction, 26-bit signed offset
-         * offset = (symbol - pc) / 4
-         * Patch bits [25:0] of the 32-bit instruction. */
-        int64_t pc = sectionAddr + offset;
-        int64_t delta = (int64_t)symbolAddr - pc;
-
-        if (delta % 4 != 0) return false;
-        int64_t imm26 = delta / 4;
-        if (imm26 < -(1 << 25) || imm26 >= (1 << 25)) return false;
-
-        uint32_t insn;
-        if (triple.isLittleEndian()) {
-            insn = (uint32_t)readLE32(patch);
-            insn = (insn & 0xFC000000) | (uint32_t)(imm26 & 0x03FFFFFF);
-            writeLE32(patch, insn);
-        } else {
-            insn = readBE32(patch);
-            insn = (insn & 0xFC000000) | (uint32_t)(imm26 & 0x03FFFFFF);
-            writeBE32(patch, insn);
-        }
-        return true;
-    }
-
-    /* ── ARM32 ──────────────────────────────────────────────────────── */
-    if (arch == llvm::Triple::arm || arch == llvm::Triple::thumb) {
-        /* R_ARM_CALL — BL instruction, 24-bit signed offset
-         * offset = (symbol - pc - 8) / 4   (ARM pipeline: PC = current + 8)
-         * Patch bits [23:0] of the 32-bit instruction. */
-        int64_t pc = sectionAddr + offset + 8;  /* ARM pipeline offset */
-        int64_t delta = (int64_t)symbolAddr - pc;
-
-        if (delta % 4 != 0) return false;
-        int64_t imm24 = delta / 4;
-        if (imm24 < -(1 << 23) || imm24 >= (1 << 23)) return false;
-
-        uint32_t insn;
-        if (triple.isLittleEndian()) {
-            insn = (uint32_t)readLE32(patch);
-            insn = (insn & 0xFF000000) | (uint32_t)(imm24 & 0x00FFFFFF);
-            writeLE32(patch, insn);
-        } else {
-            insn = readBE32(patch);
-            insn = (insn & 0xFF000000) | (uint32_t)(imm24 & 0x00FFFFFF);
-            writeBE32(patch, insn);
-        }
-        return true;
-    }
-
-    /* ── RISC-V ─────────────────────────────────────────────────────── */
-    if (arch == llvm::Triple::riscv64 || arch == llvm::Triple::riscv32) {
-        /* R_RISCV_CALL / R_RISCV_CALL_PLT — JAL offset
-         * 32-bit instruction: imm[20|10:1|11|19:12] in bits [31:12]
-         * For simplicity, emit a 6-byte sequence: AUIPC + JALR
-         * But LLVM already emits AUIPC+JALR pair. We patch both.
-         *
-         * Instruction at offset:   AUIPC rd, imm[31:12]
-         * Instruction at offset+4: JALR  rd, rd, imm[11:0]
-         *
-         * We need to split the 32-bit PC-relative delta into
-         * upper 20 bits (AUIPC) and lower 12 bits (JALR). */
-        if (offset + 8 > code.size()) return false;
-
-        int64_t pc = sectionAddr + offset;
-        int64_t delta = (int64_t)symbolAddr - pc;
-
-        uint32_t hi20 = (uint32_t)((delta + 0x800) >> 12);  /* round */
-        int32_t  lo12 = (int32_t)(delta - ((int64_t)hi20 << 12));
-
-        uint32_t auipc, jalr;
-        if (triple.isLittleEndian()) {
-            auipc = (uint32_t)readLE32(patch);
-            auipc = (auipc & 0x00000FFF) | (hi20 << 12);
-            writeLE32(patch, auipc);
-
-            jalr = (uint32_t)readLE32(patch + 4);
-            jalr = (jalr & 0x000FFFFF) | ((uint32_t)(lo12 & 0xFFF) << 20);
-            writeLE32(patch + 4, jalr);
-        } else {
-            auipc = readBE32(patch);
-            auipc = (auipc & 0x00000FFF) | (hi20 << 12);
-            writeBE32(patch, auipc);
-
-            jalr = readBE32(patch + 4);
-            jalr = (jalr & 0x000FFFFF) | ((uint32_t)(lo12 & 0xFFF) << 20);
-            writeBE32(patch + 4, jalr);
-        }
-        return true;
-    }
-
     return false; /* Unsupported architecture */
 }
 
@@ -247,23 +125,10 @@ std::string TargetCodeGen::resolveTargetTriple(const std::string& arch) {
     /* pydbg instruments Windows targets only. The host LLVM build may report
      * a Linux triple (→ SysV calling convention), so pin x86/x86_64 to the
      * Windows MSVC ABI: Win64 passes int args in RCX/RDX, Win32 on the stack. */
-    llvm::Triple hostTriple(llvm::sys::getProcessTriple());
-
     if (arch == "x86" || arch == "i686" || arch == "i386")
         return "i686-pc-windows-msvc";
     if (arch == "x86_64" || arch == "amd64" || arch == "x64")
         return "x86_64-pc-windows-msvc";
-    if (arch == "arm64" || arch == "aarch64") {
-        if (hostTriple.isOSDarwin())  return "aarch64-apple-darwin";
-        if (hostTriple.isOSWindows()) return "aarch64-pc-windows-msvc";
-        return "aarch64-unknown-linux-gnu";
-    }
-    if (arch == "arm32" || arch == "arm" || arch == "armv7") {
-        if (hostTriple.isOSDarwin()) return "arm-apple-darwin";
-        return "arm-unknown-linux-gnueabihf";
-    }
-    if (arch == "riscv64") return "riscv64-unknown-linux-gnu";
-    if (arch == "riscv32") return "riscv32-unknown-linux-gnu";
 
     return arch; /* Assume full triple */
 }
@@ -525,11 +390,6 @@ std::string TargetCodeGen::getTargetArchName() const {
     switch (triple.getArch()) {
         case llvm::Triple::x86:        return "x86 (32-bit)";
         case llvm::Triple::x86_64:     return "x86_64 (64-bit)";
-        case llvm::Triple::aarch64:    return "aarch64 / arm64";
-        case llvm::Triple::arm:        return "arm32";
-        case llvm::Triple::thumb:      return "thumb (arm)";
-        case llvm::Triple::riscv64:    return "riscv64";
-        case llvm::Triple::riscv32:    return "riscv32";
         default:                       return triple.getArchName().str();
     }
 }

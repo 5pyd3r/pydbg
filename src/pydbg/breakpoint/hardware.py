@@ -139,6 +139,8 @@ class HardwareBreakpointManager:
             raise BreakpointError(f"Invalid condition '{condition}', use x/w/rw")
         if length not in self.LEN_MAP:
             raise BreakpointError(f"Invalid length {length}, use 1/2/4/8")
+        if condition == "x" and length != 1:
+            raise BreakpointError("execute breakpoints must be 1 byte")
         if self._s.target_arch == 32 and length == 8:
             raise BreakpointError(
                 "8-byte hardware breakpoints are not supported on x86/WOW64 targets"
