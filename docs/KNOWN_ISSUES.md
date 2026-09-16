@@ -48,6 +48,34 @@ because the caller cannot tell it apart from a target that is merely busy.
 
 Verified against `tests.test_debugger.TestFailureIsVisible`.
 
+### Installs that silently ran stale code
+
+**Fixed.** `venv-x64` held a non-editable *wheel copy* of pydbg, and
+`devtools/build-x64-current.ps1` deployed by copying only the compiled `.pyd`
+into site-packages — never the Python layer. Pure-Python edits were therefore
+invisible: the source tree showed the fix, `inspect.signature` on the installed
+package showed the old signature.
+
+This was not theoretical. A set of fixes was written and tested against the
+source tree, then reported complete, while every analysis script importing
+`pydbg` from the venv kept running the unfixed build — one of them losing a
+session to a `run()` that spun forever instead of raising.
+
+`devtools/rebuild-install.ps1` replaces it and installs **editable**, so the venv
+points at the source tree and Python edits take effect on the next import. The
+script verifies against the *installed* package with a bare interpreter, because
+importing from the source tree passes even with a stale install.
+
+Two things to know about the current setup:
+
+- The editable install currently resolves to the `fix/silent-failures` worktree
+  (`.worktrees/silent-failures`). Removing that worktree will break `import pydbg`.
+  After the branch is merged, re-run `devtools/rebuild-install.ps1` from the main
+  checkout to repoint it.
+- meson-python's editable loader regenerates on import, but only needs a compiler
+  when a source file actually changed. The venv's `Scripts` dir must be on `PATH`
+  at import time so `meson` is findable — i.e. the venv must be activated.
+
 Still open, recorded rather than fixed:
 
 - `enum_modules()` raises `ERROR_PARTIAL_COPY` (299) while a target sits on the
