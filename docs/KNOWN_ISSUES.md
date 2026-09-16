@@ -16,6 +16,81 @@
 ### All @unittest.skip Decorators
 **Removed in #9.** All 26 skips removed after fixing the underlying issues.
 
+### Silent failure modes (found by three independent binary-analysis sessions)
+
+Analysing three real 32-bit targets (SpaceSniffer, OllyDbg, μTorrent) surfaced a
+family of defects that share a symptom: **the library reports success, or simply
+spins, while nothing is progressing.** A silent failure is worse than a loud one
+because the caller cannot tell it apart from a target that is merely busy.
+
+- **`run()` spun forever when `WaitForDebugEvent` kept timing out.** `timeout_ms`
+  only bounds each individual wait; on timeout the loop simply continued. An
+  idle or modal-blocked GUI target produces no events at all, so "idle", "done"
+  and "wedged" were indistinguishable, and `run()` never returned. Fixed by
+  adding `run(..., max_idle_timeouts=N)`, which raises `TimeoutError` after N
+  consecutive empty waits. Defaults to `None` — existing behaviour is unchanged.
+- **A breakpoint whose IP could not be rewound reported success.** When setting
+  TF or rewinding the instruction pointer failed, `handle_breakpoint_hit()`
+  re-armed the INT3 and returned `True`, leaving the IP one byte past the
+  breakpoint and the caller believing the hit was handled. The re-arm contract is
+  kept (it is deliberate and separately tested), but the failure is now recorded
+  in `SoftwareBreakpointManager.degraded_hits` / `.last_error`, and `run()`
+  raises `BreakpointError` instead of resuming from mid-instruction.
+- **`get_registers()` / `set_registers()` / `set_register()` / `step()` silently
+  rejected thread ids.** They take a thread `HANDLE`, but `DebugEvent` carries a
+  `tid`, and both are plain Python `int`s — so the mistake is undetectable from
+  the signature and surfaces only at runtime as `ERROR_INVALID_HANDLE` (errno 6),
+  which points nowhere near the cause. All four now accept either, opening (and
+  closing) a handle when given a thread id of the current target.
+- **`attach()` left the session without a thread id**, unlike `create_process()`,
+  so anything relying on a default thread had nothing to work with. It now
+  records the first enumerated thread; this is best-effort and never fatal.
+
+Verified against `tests.test_debugger.TestFailureIsVisible`.
+
+### Installs that silently ran stale code
+
+**Fixed.** `venv-x64` held a non-editable *wheel copy* of pydbg, and
+`devtools/build-x64-current.ps1` deployed by copying only the compiled `.pyd`
+into site-packages — never the Python layer. Pure-Python edits were therefore
+invisible: the source tree showed the fix, `inspect.signature` on the installed
+package showed the old signature.
+
+This was not theoretical. A set of fixes was written and tested against the
+source tree, then reported complete, while every analysis script importing
+`pydbg` from the venv kept running the unfixed build — one of them losing a
+session to a `run()` that spun forever instead of raising.
+
+`devtools/rebuild-install.ps1` replaces it and installs **editable**, so the venv
+points at the source tree and Python edits take effect on the next import. The
+script verifies against the *installed* package with a bare interpreter, because
+importing from the source tree passes even with a stale install.
+
+Two things to know about the current setup:
+
+- The editable install currently resolves to the `fix/silent-failures` worktree
+  (`.worktrees/silent-failures`). Removing that worktree will break `import pydbg`.
+  After the branch is merged, re-run `devtools/rebuild-install.ps1` from the main
+  checkout to repoint it.
+- meson-python's editable loader regenerates on import, but only needs a compiler
+  when a source file actually changed. The venv's `Scripts` dir must be on `PATH`
+  at import time so `meson` is findable — i.e. the venv must be activated.
+
+Still open, recorded rather than fixed:
+
+- `enum_modules()` raises `ERROR_PARTIAL_COPY` (299) while a target sits on the
+  loader breakpoint — precisely when module info is first wanted. The
+  `CREATE_PROCESS` event already carries `lpBaseOfImage`; a `module_at(addr)`
+  accessor built on that would avoid the enumeration entirely.
+- `create_process()` cannot pass a command line, which forces callers onto the
+  `attach()` path (and so loses all startup-time breakpoints) for any target
+  configured by argv.
+- Software breakpoints are silently lost when the target overwrites them
+  (self-unpacking code does this by design); `find_breakpoint()` cannot report
+  that state.
+- `read_memory()` discards partial results across uncommitted pages
+  (`ERROR_PARTIAL_COPY`) rather than returning what it did read.
+
 ## WOW64 (32 位目标) 调试平台特性
 
 - **WX86 异常码**：32 位代码的断点/单步经 WoW64 层上报为

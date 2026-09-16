@@ -339,5 +339,145 @@ class TestRunLoopDeliverBP(unittest.TestCase):
             teardown(dbg)
 
 
+class TestFailureIsVisible(unittest.TestCase):
+    """Regression tests for failure modes that used to be silent.
+
+    Each of these covers a case where the library previously reported success,
+    or simply spun, while nothing was actually progressing. A silent failure is
+    worse than a loud one: the caller cannot tell it apart from a hung target.
+    """
+
+    def test_run_raises_on_prolonged_idle(self):
+        """run() must give up when WaitForDebugEvent keeps timing out."""
+        from unittest import mock
+
+        from pydbg import Debugger
+
+        dbg = Debugger()
+        with mock.patch.object(Debugger, "wait_event", return_value=None):
+            with self.assertRaises(TimeoutError):
+                dbg.run(lambda e: None, timeout_ms=10, max_idle_timeouts=3)
+
+    def test_run_idle_cap_is_optional(self):
+        """Without max_idle_timeouts, idling is tolerated (old behaviour)."""
+        from unittest import mock
+
+        from pydbg import Debugger
+
+        dbg = Debugger()
+        calls = {"n": 0}
+
+        def fake_wait(_timeout):
+            calls["n"] += 1
+            if calls["n"] < 5:
+                return None          # idle, repeatedly
+            return exit_event()
+
+        def exit_event():
+            ev = mock.MagicMock()
+            ev.type = "EXIT_PROCESS"
+            ev.pid = 1
+            ev.tid = 2
+            ev.raw = {"exit_code": 7}
+            return ev
+
+        with mock.patch.object(Debugger, "wait_event", side_effect=fake_wait):
+            with mock.patch.object(Debugger, "continue_event", return_value=None):
+                code = dbg.run(lambda e: None, timeout_ms=10, max_idle_timeouts=None)
+
+        self.assertEqual(calls["n"], 5, "loop did not simply continue idling")
+        self.assertEqual(code, 7)
+
+    @unittest.skipUnless(_has_cython, "requires Cython extension")
+    def test_get_registers_accepts_thread_id(self):
+        """A tid works where a handle is expected - the mistake callers make."""
+        from tests.helpers import create_debugger, teardown
+
+        dbg, pid, tid = create_debugger()
+        try:
+            tids = dbg.get_thread_ids(pid)
+            self.assertTrue(tids, "no threads enumerated")
+            regs = dbg.get_registers(tids[0])
+            self.assertIsInstance(regs, dict)
+            self.assertTrue(regs, "empty context")
+        finally:
+            teardown(dbg)
+
+    @unittest.skipUnless(_has_cython, "requires Cython extension")
+    def test_set_register_accepts_thread_id(self):
+        from tests.helpers import create_debugger, teardown
+
+        dbg, pid, tid = create_debugger()
+        try:
+            tids = dbg.get_thread_ids(pid)
+            before = dbg.get_registers(tids[0])[IP_REG]
+            dbg.set_register(tids[0], IP_REG, before)
+            self.assertEqual(dbg.get_registers(tids[0])[IP_REG], before)
+        finally:
+            teardown(dbg)
+
+    def test_breakpoint_degraded_hit_is_recorded(self):
+        """A hit whose IP cannot be rewound must be recorded, not just retried.
+
+        The INT3 is still re-armed (that contract is deliberate and tested
+        elsewhere), but the failure must leave a trace: previously it was
+        indistinguishable from a normal handled hit.
+        """
+        from unittest import mock
+
+        from pydbg import _pydbg
+        from pydbg.breakpoint.software import SoftwareBreakpointManager
+        from pydbg.core.session import DebugSession
+
+        session = DebugSession()
+        mgr = SoftwareBreakpointManager(session)
+        session.breakpoints[1] = ("int3", 0x401000, b"\x90", 0x1234)
+
+        with mock.patch.object(_pydbg, "open_thread", return_value=0xBEEF):
+            with mock.patch.object(_pydbg, "close_handle", return_value=None):
+                with mock.patch.object(_pydbg, "get_thread_context",
+                                       side_effect=OSError(6, "GetThreadContext failed")):
+                    with mock.patch.object(mgr, "_restore_byte_handle", return_value=None):
+                        # Synthetic address/handle: nothing real to patch, and
+                        # the re-arm must not be what the test is measuring.
+                        with mock.patch.object(mgr, "_write_int3_handle", return_value=None):
+                            with mock.patch.object(mgr, "find", return_value=1):
+                                handled = mgr.handle_breakpoint_hit(4242, 0x401000)
+
+        self.assertTrue(handled, "the re-arm contract must be preserved")
+        self.assertEqual(mgr.degraded_hits, 1, "the failure left no trace")
+        self.assertIsNotNone(mgr.last_error)
+
+    def test_run_raises_when_a_breakpoint_degrades(self):
+        """run() must not carry on as if a degraded hit had been handled."""
+        from unittest import mock
+
+        from pydbg import BreakpointError, Debugger
+        from pydbg.core.event import DebugEvent
+
+        dbg = Debugger()
+        dbg.brk_sw.degraded_hits = 0
+
+        def degrade(tid, addr):
+            # Emulate the OSError path: reports handled, but records a failure.
+            dbg.brk_sw.degraded_hits += 1
+            dbg.brk_sw.last_error = OSError(6, "GetThreadContext failed")
+            return True
+
+        event = DebugEvent({
+            "event_name": "EXCEPTION",
+            "pid": 1,
+            "tid": 2,
+            "exception_code": 0x80000003,
+            "exception_addr": 0x401000,
+        })
+
+        with mock.patch.object(Debugger, "wait_event", side_effect=[event, None]):
+            with mock.patch.object(dbg.brk_sw, "handle_breakpoint_hit",
+                                   side_effect=degrade):
+                with self.assertRaises(BreakpointError):
+                    dbg.run(lambda e: None, timeout_ms=10)
+
+
 if __name__ == "__main__":
     unittest.main()

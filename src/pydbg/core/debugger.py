@@ -120,6 +120,17 @@ class Debugger:
 
         self._session.register_pid_arch(pid, self._session.target_arch)
 
+        # create_process() leaves a session tid behind; attach() did not, so
+        # anything relying on a default thread (the manual breakpoint helpers,
+        # for one) had nothing to work with. Best-effort: an attached process
+        # may legitimately have no thread we can open yet.
+        try:
+            tids = self.get_thread_ids(pid)
+            if tids:
+                self._session.tid = tids[0]
+        except (OSError, ProcessError):
+            pass
+
     def detach(self, pid=None):
         target = pid or self._session.pid
         if target is None:
@@ -293,7 +304,7 @@ class Debugger:
             # Non-fatal: process may have already exited (common with children)
             pass
 
-    def run(self, callback, timeout_ms=10000):
+    def run(self, callback, timeout_ms=10000, max_idle_timeouts=None):
         """Event-driven debug loop. Runs until process exits or callback returns False.
 
         User software breakpoints are always delivered to the callback
@@ -311,12 +322,31 @@ class Debugger:
         Args:
             callback: Called for each debug event. Return False to stop.
             timeout_ms: WaitForDebugEvent timeout in ms.
+            max_idle_timeouts: Fail after this many consecutive WaitForDebugEvent
+                timeouts with no event at all. Without it an idle or wedged
+                target is indistinguishable from a running one — the loop just
+                spins, and an idle GUI target can produce no events for minutes.
+                Raises TimeoutError when exceeded.
+
+        Raises:
+            BreakpointError: a software breakpoint hit could not be completed
+                (see SoftwareBreakpointManager.handle_breakpoint_hit). Continuing
+                would leave the instruction pointer mid-instruction, so this is
+                surfaced rather than retried.
         """
         exit_code = 1
+        idle = 0
         while True:
             event = self.wait_event(timeout_ms)
             if event is None:
+                idle += 1
+                if max_idle_timeouts is not None and idle >= max_idle_timeouts:
+                    raise TimeoutError(
+                        f"no debug event for {idle} consecutive waits "
+                        f"({timeout_ms} ms each); the target is idle, blocked, "
+                        f"or wedged")
                 continue
+            idle = 0
 
             # Auto-handle breakpoint lifecycle
             if event.type == "EXCEPTION":
@@ -325,7 +355,18 @@ class Debugger:
 
                 if code == _pydbg.EXCEPTION_BREAKPOINT or code == _pydbg.STATUS_WX86_BREAKPOINT:
                     # Remove INT3, rewind IP, set TF for single-step.
-                    if self.brk_sw.handle_breakpoint_hit(event.tid, addr):
+                    degraded = self.brk_sw.degraded_hits
+                    handled = self.brk_sw.handle_breakpoint_hit(event.tid, addr)
+                    if self.brk_sw.degraded_hits != degraded:
+                        # Our breakpoint, but the IP could not be rewound onto
+                        # it. The thread would resume mid-instruction; surface
+                        # it rather than continuing as though nothing is wrong.
+                        raise BreakpointError(
+                            f"breakpoint at 0x{addr:X} (tid {event.tid}) could not "
+                            f"be completed: {self.brk_sw.last_error}. The "
+                            f"instruction pointer was not rewound, so resuming "
+                            f"would execute from the middle of an instruction.")
+                    if handled:
                         result = callback(event)
                         if result is False:
                             break
@@ -441,14 +482,53 @@ class Debugger:
     def open_thread(self, tid):
         return self.thread.open(tid)
 
+    def _as_thread_handle(self, h_thread):
+        """Accept either a thread HANDLE or a thread id; return a usable handle.
+
+        Both are plain Python ints, so they cannot be told apart by type. A tid
+        passed where a handle belongs fails at runtime with ERROR_INVALID_HANDLE
+        (errno 6), which points nowhere near the real cause — and since
+        DebugEvent carries a tid, that is the mistake callers actually make.
+        If the value is a thread id of the current target, open it and hand back
+        a handle the caller must close; `_opened` reports which case it was.
+        """
+        if h_thread is None:
+            raise ThreadError("no thread handle or id given")
+        pid = self._session.pid
+        if pid is not None:
+            try:
+                if h_thread in set(self.get_thread_ids(pid)):
+                    return _pydbg.open_thread(h_thread), True
+            except (OSError, ProcessError, ThreadError):
+                pass  # cannot enumerate; fall back to treating it as a handle
+        return h_thread, False
+
     def get_registers(self, h_thread):
-        return self.thread.get_context(h_thread)
+        """Read thread context. Accepts a thread HANDLE or a thread id."""
+        h, opened = self._as_thread_handle(h_thread)
+        try:
+            return self.thread.get_context(h)
+        finally:
+            if opened:
+                _pydbg.close_handle(h)
 
     def set_registers(self, h_thread, context):
-        return self.thread.set_context(h_thread, context)
+        """Write thread context. Accepts a thread HANDLE or a thread id."""
+        h, opened = self._as_thread_handle(h_thread)
+        try:
+            return self.thread.set_context(h, context)
+        finally:
+            if opened:
+                _pydbg.close_handle(h)
 
     def set_register(self, h_thread, name, value):
-        return self.thread.set_register(h_thread, name, value)
+        """Write one register. Accepts a thread HANDLE or a thread id."""
+        h, opened = self._as_thread_handle(h_thread)
+        try:
+            return self.thread.set_register(h, name, value)
+        finally:
+            if opened:
+                _pydbg.close_handle(h)
 
     def suspend_thread(self, h_thread):
         return self.thread.suspend(h_thread)
@@ -469,7 +549,13 @@ class Debugger:
         return self.thread.get_ids(target)
 
     def step(self, h_thread):
-        self.thread.step(h_thread)
+        """Single-step. Accepts a thread HANDLE or a thread id."""
+        h, opened = self._as_thread_handle(h_thread)
+        try:
+            self.thread.step(h)
+        finally:
+            if opened:
+                _pydbg.close_handle(h)
 
     # ── delegated: breakpoints ─────────────────────────────────
 
