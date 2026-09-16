@@ -12,6 +12,9 @@ class SoftwareBreakpointManager:
 
     def __init__(self, session):
         self._s = session
+        # Diagnostics for hits we could not complete (see handle_breakpoint_hit).
+        self.last_error = None
+        self.degraded_hits = 0
 
     def remove(self, bp_id):
         if bp_id not in self._s.breakpoints:
@@ -92,19 +95,29 @@ class SoftwareBreakpointManager:
         # the middle of it (which would corrupt the process).
         try:
             h_thread = _pydbg.open_thread(tid)
-            machine = self._s.arch_for_tid(tid)
-            regs = _pydbg.get_thread_context(h_thread, machine)
-            regs["eflags"] = regs.get("eflags", 0) | 0x100
-            if "rip" in regs:
-                regs["rip"] -= 1
-            elif "eip" in regs:
-                regs["eip"] -= 1
-            _pydbg.set_thread_context(h_thread, regs, machine)
-            _pydbg.close_handle(h_thread)
-        except OSError:
+            try:
+                machine = self._s.arch_for_tid(tid)
+                regs = _pydbg.get_thread_context(h_thread, machine)
+                regs["eflags"] = regs.get("eflags", 0) | 0x100
+                if "rip" in regs:
+                    regs["rip"] -= 1
+                elif "eip" in regs:
+                    regs["eip"] -= 1
+                _pydbg.set_thread_context(h_thread, regs, machine)
+            finally:
+                _pydbg.close_handle(h_thread)
+        except OSError as exc:
             # Cannot set TF — re-arm the breakpoint so the code is not left
             # with a permanently-removed INT3.
+            #
+            # The re-arm is kept, but the failure is now *recorded*: this path
+            # leaves the instruction pointer one byte past the breakpoint, so
+            # the thread cannot execute correctly, and the caller had no way to
+            # find that out. run() turns a rising degraded_hits into a raised
+            # error instead of continuing as if the hit had been handled.
             self._write_int3_handle(h_process, bp_addr)
+            self.last_error = exc
+            self.degraded_hits += 1
             return True
 
         # Schedule restore on next single-step event

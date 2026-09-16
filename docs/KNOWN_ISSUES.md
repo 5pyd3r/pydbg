@@ -16,6 +16,53 @@
 ### All @unittest.skip Decorators
 **Removed in #9.** All 26 skips removed after fixing the underlying issues.
 
+### Silent failure modes (found by three independent binary-analysis sessions)
+
+Analysing three real 32-bit targets (SpaceSniffer, OllyDbg, μTorrent) surfaced a
+family of defects that share a symptom: **the library reports success, or simply
+spins, while nothing is progressing.** A silent failure is worse than a loud one
+because the caller cannot tell it apart from a target that is merely busy.
+
+- **`run()` spun forever when `WaitForDebugEvent` kept timing out.** `timeout_ms`
+  only bounds each individual wait; on timeout the loop simply continued. An
+  idle or modal-blocked GUI target produces no events at all, so "idle", "done"
+  and "wedged" were indistinguishable, and `run()` never returned. Fixed by
+  adding `run(..., max_idle_timeouts=N)`, which raises `TimeoutError` after N
+  consecutive empty waits. Defaults to `None` — existing behaviour is unchanged.
+- **A breakpoint whose IP could not be rewound reported success.** When setting
+  TF or rewinding the instruction pointer failed, `handle_breakpoint_hit()`
+  re-armed the INT3 and returned `True`, leaving the IP one byte past the
+  breakpoint and the caller believing the hit was handled. The re-arm contract is
+  kept (it is deliberate and separately tested), but the failure is now recorded
+  in `SoftwareBreakpointManager.degraded_hits` / `.last_error`, and `run()`
+  raises `BreakpointError` instead of resuming from mid-instruction.
+- **`get_registers()` / `set_registers()` / `set_register()` / `step()` silently
+  rejected thread ids.** They take a thread `HANDLE`, but `DebugEvent` carries a
+  `tid`, and both are plain Python `int`s — so the mistake is undetectable from
+  the signature and surfaces only at runtime as `ERROR_INVALID_HANDLE` (errno 6),
+  which points nowhere near the cause. All four now accept either, opening (and
+  closing) a handle when given a thread id of the current target.
+- **`attach()` left the session without a thread id**, unlike `create_process()`,
+  so anything relying on a default thread had nothing to work with. It now
+  records the first enumerated thread; this is best-effort and never fatal.
+
+Verified against `tests.test_debugger.TestFailureIsVisible`.
+
+Still open, recorded rather than fixed:
+
+- `enum_modules()` raises `ERROR_PARTIAL_COPY` (299) while a target sits on the
+  loader breakpoint — precisely when module info is first wanted. The
+  `CREATE_PROCESS` event already carries `lpBaseOfImage`; a `module_at(addr)`
+  accessor built on that would avoid the enumeration entirely.
+- `create_process()` cannot pass a command line, which forces callers onto the
+  `attach()` path (and so loses all startup-time breakpoints) for any target
+  configured by argv.
+- Software breakpoints are silently lost when the target overwrites them
+  (self-unpacking code does this by design); `find_breakpoint()` cannot report
+  that state.
+- `read_memory()` discards partial results across uncommitted pages
+  (`ERROR_PARTIAL_COPY`) rather than returning what it did read.
+
 ## WOW64 (32 位目标) 调试平台特性
 
 - **WX86 异常码**：32 位代码的断点/单步经 WoW64 层上报为
