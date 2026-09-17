@@ -68,13 +68,28 @@ importing from the source tree passes even with a stale install.
 
 Two things to know about the current setup:
 
-- The editable install currently resolves to the `fix/silent-failures` worktree
-  (`.worktrees/silent-failures`). Removing that worktree will break `import pydbg`.
-  After the branch is merged, re-run `devtools/rebuild-install.ps1` from the main
-  checkout to repoint it.
 - meson-python's editable loader regenerates on import, but only needs a compiler
   when a source file actually changed. The venv's `Scripts` dir must be on `PATH`
-  at import time so `meson` is findable — i.e. the venv must be activated.
+  at import time so `meson` is findable — i.e. the venv must be activated. Without
+  it the error is `re-building the pydbg meson-python editable wheel package
+  failed`, which points away from the actual cause.
+
+Two traps that bite when rebuilding in a checkout that has been built before,
+both of which surface as misleading errors:
+
+- **`src/pydbg/_pydbg.cp314-win_amd64.pyd` shadows the editable build.** It is
+  placed there by `scripts/build_venv.py` and gitignored, so it is easy to forget.
+  An out-of-date copy makes the import fail with
+  `cannot import name 'STATUS_WX86_BREAKPOINT'` — which reads like a broken build,
+  when the fresh build is fine and merely hidden. Copy the newly built extension
+  from `build/cp314/src/pydbg/cython/` over it.
+- **A stale `build/cp314/` from a 32-bit build** fails the link with
+  `LNK1112: module machine type 'x64' conflicts with target machine type 'x86'`.
+  Remove `build/cp314` and reconfigure.
+
+Neither is visible from the source tree. Both are caught by importing the
+*installed* package with a bare interpreter, which is what the verify step in
+`devtools/rebuild-install.ps1` does.
 
 Still open, recorded rather than fixed:
 
