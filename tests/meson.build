@@ -73,6 +73,14 @@ test(
 )
 
 test(
+  'pe_directories',
+  py,
+  args: ['-m', 'unittest', 'tests.test_pe_directories'],
+  env: test_env,
+  workdir: meson.project_build_root(),
+)
+
+test(
   'debugger',
   py,
   args: ['-m', 'unittest', 'tests.test_debugger'],
