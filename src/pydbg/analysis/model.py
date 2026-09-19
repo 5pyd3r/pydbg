@@ -56,6 +56,21 @@ class CoverageReport:
         return (self.covered / self.total) if self.total else 0.0
 
 
+@dataclass(frozen=True, slots=True)
+class IndirectSite:
+    """A branch whose target the analysis could not resolve.
+
+    Recorded so the incompleteness is visible rather than implied. A call graph
+    with no entry for a function and no record of why is indistinguishable from
+    one that simply has no callers — and one target's entry point really was
+    reached only through `call [esi+0x18]`, so it appeared nowhere.
+    """
+
+    rva: int
+    is_call: bool
+    text: str            # the operand as written, for the report
+
+
 @dataclass
 class AnalysisStats:
     """Counters, named after the prototype's so runs can be compared."""
@@ -71,6 +86,11 @@ class AnalysisStats:
     overlap_conflicts: int = 0
     entry_point: int = 0
     seed_functions: int = 0
+    # Indirect branches split by outcome. The pair matters more than either
+    # number: "resolved 400" reads as progress while 12,000 sites stay unknown,
+    # and without the second figure there is no way to tell.
+    indirect_resolved: int = 0
+    indirect_unknown: int = 0
 
     def as_dict(self):
         return dict(self.__dict__)
@@ -99,14 +119,36 @@ class AnalysisResult:
     stats: AnalysisStats = field(default_factory=AnalysisStats)
     coverage: dict = field(default_factory=dict)  # section name -> CoverageReport
     undecodable: tuple = ()      # RVAs a branch targeted that would not decode
+    # Branches with no resolved target. Present so that "no callers" can be
+    # told apart from "no callers we could see".
+    indirect_sites: tuple = ()
     # Kept so a CFG can be built after the fact without re-decoding. The
     # decoder's bookkeeping is small (bytearrays, not Instruction objects), so
     # holding it costs little and re-running the analysis would cost a lot.
     decoder: object = None
 
     def callers_of(self, rva):
-        """RVAs of the instructions that reference 'rva', ascending."""
+        """RVAs of the instructions that reference 'rva', ascending.
+
+        May be incomplete: a branch through a register or memory is not an edge
+        unless constant propagation resolved it. Callers that need to know
+        whether the answer is exhaustive should check `indirect_call_sites()`,
+        which lists the branches that were left unknown.
+        """
         return tuple(sorted({xref.source for xref in self.xrefs.get(rva, ())}))
+
+    def indirect_call_sites(self):
+        """Branches left unresolved that could be calling something.
+
+        The honest footnote to `callers_of`: these are the places a call edge
+        could be hidden. A target reached only through one of them appears to
+        have no callers at all.
+        """
+        return tuple(site for site in self.indirect_sites if site.is_call)
+
+    def call_graph_is_complete(self):
+        """False when some call site has no resolved target."""
+        return not self.indirect_call_sites()
 
     def function_of(self, rva):
         """The function containing 'rva', or None."""
@@ -142,6 +184,10 @@ class AnalysisResult:
     def render_listing(self, rva, size):
         from .report import render_listing
         return render_listing(self.image, rva, size)
+
+    def render_indirect_sites(self, limit=40, calls_only=True):
+        from .report import render_indirect_sites
+        return render_indirect_sites(self, limit=limit, calls_only=calls_only)
 
     def cfg_of(self, rva, max_blocks=4096):
         """The CFG of the function containing 'rva', or None if there is none."""

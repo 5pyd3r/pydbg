@@ -15,14 +15,15 @@ has drifted out of alignment, which is exactly when it should read low.
 """
 
 from .cfg import CFGBlock, FunctionCFG, build_function_cfg, cfg_to_dot
+from .consts import ConstantTracker
 from .engine import (
     StaticAnalyzer, analyze_bytes, analyze_file, analyze_pe, analyze_process,
 )
 from .functions import FunctionTable
 from .image import AnalyzedImage, SectionInfo
 from .model import (
-    AnalysisResult, AnalysisStats, CoverageReport, Function, RefKind,
-    SeedConfig, Xref,
+    AnalysisResult, AnalysisStats, CoverageReport, Function, IndirectSite,
+    RefKind, SeedConfig, Xref,
 )
 from .process_source import ProcessSource
 from .refs import branch_target, classify_refs, is_indirect_branch, memory_address
@@ -34,7 +35,8 @@ __all__ = [
     'AnalyzedImage', 'SectionInfo', 'ProcessSource',
     'FunctionTable', 'SeedProvider', 'SeedSet', 'looks_like_entry',
     'AnalysisResult', 'AnalysisStats', 'CoverageReport', 'Function',
-    'RefKind', 'SeedConfig', 'Xref',
+    'IndirectSite', 'RefKind', 'SeedConfig', 'Xref',
     'FunctionCFG', 'CFGBlock', 'build_function_cfg', 'cfg_to_dot',
+    'ConstantTracker',
     'branch_target', 'classify_refs', 'is_indirect_branch', 'memory_address',
 ]

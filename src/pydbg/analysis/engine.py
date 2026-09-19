@@ -1,10 +1,16 @@
 """StaticAnalyzer — recursive descent to a fixpoint, without a live process."""
 
+from .consts import ConstantTracker
 from .decoder import InstructionDecoder
 from .functions import FunctionTable
 from .image import AnalyzedImage
-from .model import AnalysisResult, AnalysisStats, CoverageReport, RefKind, SeedConfig, Xref
-from .refs import branch_target, classify_refs, memory_address
+from .model import (
+    AnalysisResult, AnalysisStats, CoverageReport, IndirectSite, RefKind,
+    SeedConfig, Xref,
+)
+from .refs import (
+    branch_target, classify_refs, is_indirect_branch, memory_address,
+)
 from .seeds import SeedProvider, looks_like_entry
 
 
@@ -28,6 +34,7 @@ class StaticAnalyzer:
         self.functions = FunctionTable(image)
         self.xrefs = {}
         self.undecodable = set()
+        self.indirect_sites = {}
         self.stats = AnalysisStats()
         self._pending = []
         self._queued = set()
@@ -68,6 +75,8 @@ class StaticAnalyzer:
             stats=self.stats,
             coverage=self._coverage(),
             undecodable=tuple(sorted(self.undecodable)),
+            indirect_sites=tuple(self.indirect_sites[rva]
+                                 for rva in sorted(self.indirect_sites)),
             decoder=self.decoder,
         )
 
@@ -84,6 +93,27 @@ class StaticAnalyzer:
             self._pending.append(rva)
             return True
         return False
+
+    def _resolve_indirect(self, insn, rva, tracker):
+        """Try to turn an indirect branch into a real edge.
+
+        Either outcome is recorded. Resolved branches become ordinary BRANCH
+        cross-references — the call graph gains the edge it was missing. The
+        rest are kept as sites, because a function with no recorded callers and
+        a function whose callers are all indirect look identical otherwise, and
+        one target's entry point really was reachable only through
+        `call [esi+0x18]`.
+        """
+        target = tracker.resolve_branch(insn)
+        if target is None:
+            self.indirect_sites[rva] = IndirectSite(
+                rva=rva, is_call=bool(insn.is_call), text=insn.op_str)
+            return None
+
+        self.xrefs.setdefault(target, []).append(Xref(rva, int(RefKind.BRANCH)))
+        self._xref_targets.add(target)
+        self.stats.indirect_resolved += 1
+        return target
 
     def _seed_branch_target(self, insn, target):
         """Decide what a branch target is, and register it as that.
@@ -144,6 +174,7 @@ class StaticAnalyzer:
         to measure how much of the decode is untrustworthy.
         """
         budget = budget or self.config.max_instructions
+        tracker = ConstantTracker(self.image)
         addr = start
 
         while budget > 0:
@@ -161,9 +192,26 @@ class StaticAnalyzer:
             self._record_refs(insn, addr)
 
             target = branch_target(insn, self.image)
+            indirect = target is None and is_indirect_branch(insn)
+            if indirect:
+                target = self._resolve_indirect(insn, addr, tracker)
+
             if target is not None and self.image.is_exec(target):
                 self.functions.add_call_target(target)
-                self._seed_branch_target(insn, target)
+                if indirect and not insn.is_call:
+                    # A resolved indirect jump goes wherever the data says, and
+                    # the data cannot say whether that is a switch case body or
+                    # a tail-called function. Decode it; do not name it — the
+                    # same treatment a jump-table entry gets, and for the same
+                    # reason: claiming one cuts the function containing the
+                    # switch apart at every case.
+                    self._enqueue_code_seed(target)
+                else:
+                    self._seed_branch_target(insn, target)
+
+            # After the branch has been resolved: observe() forgets everything
+            # on an instruction it does not recognise, and every branch is one.
+            tracker.observe(insn)
 
             if insn.is_ret:
                 break
@@ -278,6 +326,7 @@ class StaticAnalyzer:
         stats.xrefs = sum(len(v) for v in self.xrefs.values())
         stats.overlap_bytes = self.decoder.overlap_bytes
         stats.overlap_conflicts = self.decoder.overlap_conflicts
+        stats.indirect_unknown = len(self.indirect_sites)
 
 
 def analyze_file(path, **kwargs):

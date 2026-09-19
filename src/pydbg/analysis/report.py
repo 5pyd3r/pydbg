@@ -129,6 +129,28 @@ def render_cfg(cfg):
     return "\n".join(lines)
 
 
+def render_indirect_sites(result, limit=40, calls_only=True):
+    """Branches whose target was not resolved.
+
+    This is the footnote to `callers_of`. A function reached only through one
+    of these has no recorded callers, and without this list that is
+    indistinguishable from having none.
+    """
+    sites = (result.indirect_call_sites() if calls_only
+             else result.indirect_sites)
+    header = ("indirect call sites (call graph is incomplete through these)"
+              if calls_only else "unresolved indirect branches")
+    lines = [header]
+    for site in sites[:limit]:
+        lines.append(f"{site.rva:#010x}  {'call' if site.is_call else 'jmp '}"
+                     f"  {site.text}")
+    if len(sites) > limit:
+        lines.append(f"... {len(sites) - limit} more")
+    if not sites:
+        lines.append("(none)")
+    return "\n".join(lines)
+
+
 def render_summary(result):
     """The one-screen overview: what was found and how much to trust it."""
     stats = result.stats
@@ -139,6 +161,11 @@ def render_summary(result):
         f"({stats.func_starts_confident} confident)",
         f"cross-references {stats.xrefs} over {stats.xref_targets} targets",
         f"undecodable      {len(result.undecodable)}",
+        # Both halves of the indirect story on one line. The resolved count
+        # alone reads as progress even while most sites stay unknown.
+        f"indirect branches {stats.indirect_resolved} resolved, "
+        f"{stats.indirect_unknown} unresolved"
+        f"{'' if result.call_graph_is_complete() else '  <- call graph incomplete'}",
         "",
         render_coverage(result),
     ]
