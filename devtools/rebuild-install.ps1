@@ -83,61 +83,62 @@ Write-Host "[build+install] $pipArgs"
 cmd /c "call `"$vcvars`" amd64 >nul 2>&1 && cd /d `"$Root`" && `"$Py`" $pipArgs"
 if ($LASTEXITCODE -ne 0) { Write-Host "[fail] build/install"; exit 1 }
 
-# An extension sitting next to the package sources wins over the editable build.
-# scripts/build_venv.py (the older, non-editable build path) copies the built
-# .pyd into src/pydbg/ and leaves it there, so src/pydbg/_pydbg*.pyd shadows the
-# one this script just built.
+# A .pyd sitting next to the package sources wins over the editable build, so
+# src/pydbg/_pydbg*.pyd shadows the one this script just built. It used to be
+# put there deliberately — scripts/build_venv.py copied the built extension into
+# src/pydbg/ so the package was importable without installing it, and this
+# script refreshed that copy.
 #
-# That shadow is stale after any Cython change, and it fails *silently*: the
-# Python layer is current, the compiled layer is not, so `import pydbg` succeeds
-# and the damage only shows up later as an AttributeError from a function the
-# old extension never had. Refresh the copy, then prove below that the
-# extension Python actually loads is the one built here.
-Write-Host "[ext]  refreshing the shadowing copy in src/pydbg/"
-$freshExt = Get-ChildItem -Path (Join-Path $Root "build") -Recurse `
-    -Filter "_pydbg*.pyd" -ErrorAction SilentlyContinue |
-    Sort-Object LastWriteTime -Descending | Select-Object -First 1
-if (-not $freshExt) {
-    Write-Host "[fail] no built _pydbg*.pyd under $Root\build"
-    exit 1
+# That whole arrangement is gone. The copy was never needed: with it removed,
+# _pydbg resolves to the editable build's own output under build/ (verified —
+# import and every symbol work, and the suite passes), because the editable
+# loader maps the compiled module exactly as it maps the Python one. The copy
+# only ever *hid* the real extension, and it went stale after any Cython
+# change — silently, because the Python layer stayed current while the compiled
+# layer did not: `import pydbg` succeeded and the damage surfaced later as an
+# AttributeError from a function the old extension never had.
+#
+# So: delete it rather than refresh it, and assert below that the extension
+# Python loads is the editable build's. Nothing under version control may hold
+# a build output — the editable loader turns that from a style rule into a
+# correctness one.
+Write-Host "[ext]  removing any shadowing copy from src/pydbg/"
+$shadow = Get-ChildItem -Path (Join-Path $Root "src\pydbg") `
+    -Filter "_pydbg*.pyd" -ErrorAction SilentlyContinue
+foreach ($stale in $shadow) {
+    Write-Host "       deleted $($stale.Name)"
+    Remove-Item $stale.FullName -Force
 }
-Write-Host "       from $($freshExt.FullName)"
-Copy-Item $freshExt.FullName (Join-Path $Root "src\pydbg\$($freshExt.Name)") -Force
-# _pydbg.pyd (unversioned) is the legacy name build_venv.py also writes. Python
-# prefers the versioned suffix, but leave no stale copy behind either way.
-$legacyExt = Join-Path $Root "src\pydbg\_pydbg.pyd"
-if (Test-Path $legacyExt) { Copy-Item $freshExt.FullName $legacyExt -Force }
+if (-not $shadow) { Write-Host "       (none present)" }
 
 # Verify against the *installed* package, not the source tree: importing with a
 # bare interpreter is the only way to catch a stale or non-editable install.
 Write-Host "[verify] importing pydbg without PYTHONPATH"
-$env:PYDBG_FRESH_EXT = $freshExt.FullName
+$env:PYDBG_ROOT = $Root
 $verify = @'
-import hashlib, inspect, os, sys
+import os, sys
 import pydbg
-from pydbg import Debugger, _pydbg
+from pydbg import _pydbg
 
-print("  resolved ->", pydbg.__file__)
-print("  run()     ", inspect.signature(Debugger.run))
-missing = [n for n in ("_as_thread_handle",) if not hasattr(Debugger(), n)]
-print("  expected attributes present:", not missing)
+root = os.path.abspath(os.environ["PYDBG_ROOT"])
+print("  package   ->", pydbg.__file__)
+print("  extension ->", _pydbg.__file__)
 
+problems = []
+if not os.path.abspath(pydbg.__file__).startswith(os.path.join(root, "src")):
+    problems.append("pydbg did not resolve into this checkout's src/ "
+                    "(not an editable install of it?)")
+if not os.path.abspath(_pydbg.__file__).startswith(os.path.join(root, "build")):
+    problems.append("the compiled extension did not come from build/ "
+                    "(a copy in src/pydbg/ is shadowing the editable build?)")
 
-def digest(path):
-    with open(path, "rb") as handle:
-        return hashlib.sha256(handle.read()).hexdigest()
-
-
-loaded = os.path.abspath(_pydbg.__file__)
-fresh = os.path.abspath(os.environ["PYDBG_FRESH_EXT"])
-same = digest(loaded) == digest(fresh)
-print("  extension ->", loaded)
-print("  is the freshly built one:", same)
-if not same:
-    print("  [stale] differs from", fresh)
-    print("          Nothing above this line catches it: a pure-Python")
-    print("          assertion passes while the compiled layer is old.")
-sys.exit(1 if (missing or not same) else 0)
+if problems:
+    for line in problems:
+        print("  [fail]", line)
+    print("")
+    print("  Both cases pass a pure-Python assertion while the compiled")
+    print("  layer is old or elsewhere; only the resolved paths show it.")
+sys.exit(1 if problems else 0)
 '@
 $tmp = Join-Path $env:TEMP "pydbg_verify.py"
 Set-Content -Path $tmp -Value $verify -Encoding UTF8

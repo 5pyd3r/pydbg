@@ -4,7 +4,8 @@ Test categories:
   1. Exception hierarchy
   2. DebugSession dataclass
   3. PE Source/View layers
-  4. Disasm analysis edge cases
+  3b. No build output inside the package directory
+  4. Control-flow analysis lives in pydbg.analysis
   5. Symbol resolver
   6. Module resolver
   7. Hook integration
@@ -316,6 +317,60 @@ class TestLoadedView(unittest.TestCase):
         from pydbg.pe.view import LoadedView
         view = LoadedView()
         self.assertEqual(view.rva_to_source_offset(0x7FFFFFFF), 0x7FFFFFFF)
+
+
+# ═══════════════════════════════════════════════════════════════════
+# 3b. No build output inside the package directory
+# ═══════════════════════════════════════════════════════════════════
+#
+# A .pyd sitting next to the package sources wins over an editable install's
+# loader, so src/pydbg/_pydbg*.pyd silently replaces the compiled module the
+# loader would otherwise map. scripts/build_venv.py used to put it there (so the
+# package was importable without installing it) and rebuild-install.ps1 used to
+# refresh it. The copy was never needed — with it gone, `_pydbg` resolves into
+# build/ and everything imports — and it went stale after any Cython change,
+# leaving the Python layer current and the compiled layer old.
+#
+# This coupling has bitten three times, each time reported as "fixed" while a
+# copy survived somewhere. Hence a test rather than another paragraph.
+
+class TestNoBuildOutputInThePackage(unittest.TestCase):
+    """The invariant is structural, so check the structure.
+
+    Skips rather than fails when pydbg is not being used from a source
+    checkout: a non-editable `pip install .` legitimately puts the extension
+    inside site-packages/pydbg/, and that is not this defect.
+    """
+
+    def setUp(self):
+        import pydbg
+        self.package_dir = os.path.dirname(os.path.abspath(pydbg.__file__))
+        # <root>/src/pydbg -> <root>. Walking up rather than assuming one level
+        # keeps this honest about *which* checkout it is guarding.
+        self.repo_root = None
+        candidate = self.package_dir
+        for _ in range(4):
+            candidate = os.path.dirname(candidate)
+            if os.path.exists(os.path.join(candidate, "pyproject.toml")):
+                self.repo_root = candidate
+                break
+        if self.repo_root is None:
+            self.skipTest("pydbg is not running from a source checkout")
+
+    def test_no_extension_beside_the_package_sources(self):
+        strays = sorted(name for name in os.listdir(self.package_dir)
+                        if name.startswith("_pydbg") and name.endswith(".pyd"))
+        self.assertEqual(
+            strays, [],
+            f"{strays} in {self.package_dir} shadow the editable build's "
+            f"extension; the resolved path is what to check, not this list")
+
+    def test_the_old_build_script_is_gone(self):
+        """Removing it was the fix; re-adding it would restore the producer."""
+        self.assertFalse(
+            os.path.exists(os.path.join(self.repo_root, "scripts",
+                                        "build_venv.py")),
+            "scripts/build_venv.py copied the built extension into src/pydbg/")
 
 
 # ═══════════════════════════════════════════════════════════════════
