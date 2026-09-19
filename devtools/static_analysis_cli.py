@@ -68,6 +68,14 @@ def cmd_callers(args):
     return 0
 
 
+def cmd_indirect(args):
+    """Branches with no resolved target — the call graph's blind spots."""
+    result = analyze_file(args.image)
+    print(result.render_indirect_sites(limit=args.limit,
+                                       calls_only=not args.all))
+    return 0
+
+
 def cmd_cfg(args):
     result = analyze_file(args.image)
     cfg = result.cfg_of(args.at)
@@ -120,6 +128,11 @@ def build_parser():
     xref.add_argument("--limit", type=int, default=8)
 
     add("callers", cmd_callers, target_dest="target")
+
+    indirect = add("indirect", cmd_indirect)
+    indirect.add_argument("--limit", type=int, default=40)
+    indirect.add_argument("--all", action="store_true",
+                          help="include unresolved jumps, not just calls")
     add("cfg", cmd_cfg, target_dest="at")
     add("dot", cmd_dot, target_dest="at")
 

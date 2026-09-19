@@ -105,6 +105,14 @@ test(
 )
 
 test(
+  'analysis_indirect',
+  py,
+  args: ['-m', 'unittest', 'tests.test_analysis_indirect'],
+  env: test_env,
+  workdir: meson.project_build_root(),
+)
+
+test(
   'debugger',
   py,
   args: ['-m', 'unittest', 'tests.test_debugger'],
