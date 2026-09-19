@@ -66,3 +66,84 @@ class ImportEntry:
     name: str | None     # None if imported by ordinal only
     ordinal: int | None  # None if imported by name
     rva: int             # RVA of the IAT entry (thunk)
+
+
+@dataclass
+class RelocationEntry:
+    """One IMAGE_REL_BASED_* fixup within a relocation block."""
+
+    kind: int            # high nibble of the word: 3 = HIGHLOW, 10 = DIR64
+    offset: int          # low 12 bits: offset within the page
+
+
+@dataclass
+class RelocationBlock:
+    """A 4KB page's worth of fixups.
+
+    Deliberately structure only — the parser does not dereference the slots.
+    Reading a slot's value needs the image's pointer width and the base the
+    VAs are relative to, both of which belong to whoever is interpreting the
+    relocations, not to the format parser. Keeping that split is what makes
+    the 32-bit HIGHLOW / 64-bit DIR64 difference a single decision in one
+    place instead of two.
+    """
+
+    page_rva: int
+    block_size: int
+    entries: list        # list[RelocationEntry]
+
+
+@dataclass
+class TLSDirectory:
+    """IMAGE_TLS_DIRECTORY. Addresses are VAs as stored in the image."""
+
+    start_address_of_raw_data: int
+    end_address_of_raw_data: int
+    address_of_index: int
+    address_of_callbacks: int
+    size_of_zero_fill: int
+    characteristics: int
+    callbacks: list      # list[int], raw VAs; empty when there is no array
+
+
+@dataclass
+class DebugEntry:
+    """One IMAGE_DEBUG_DIRECTORY record (data directory 6)."""
+
+    characteristics: int
+    time_date_stamp: int
+    major_version: int
+    minor_version: int
+    type: int            # 2 = IMAGE_DEBUG_TYPE_CODEVIEW (holds the PDB path)
+    size_of_data: int
+    address_of_raw_data: int
+    pointer_to_raw_data: int
+
+
+@dataclass
+class ExceptionEntry:
+    """One RUNTIME_FUNCTION from the exception directory (data directory 3).
+
+    On x64 this is the loader's own function table: an authoritative
+    [begin, end) range per function, which no prologue heuristic matches.
+    """
+
+    begin_rva: int
+    end_rva: int
+    unwind_info_rva: int
+
+
+@dataclass
+class RichHeaderEntry:
+    """One (tool, build) pair from the Rich header."""
+
+    comp_id: int
+    count: int
+
+
+@dataclass
+class RichHeader:
+    """Decoded Rich header — the toolchain fingerprint MSVC leaves behind."""
+
+    xor_key: int
+    entries: list        # list[RichHeaderEntry]

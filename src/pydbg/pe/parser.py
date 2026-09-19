@@ -5,8 +5,24 @@ import struct
 from .types import (
     DosHeader, FileHeader, OptionalHeader, DataDirectory,
     SectionHeader, ExportEntry, ImportEntry,
+    RelocationEntry, RelocationBlock, TLSDirectory, DebugEntry,
+    ExceptionEntry, RichHeader, RichHeaderEntry,
 )
 from .view import View
+
+# Data directory indices this module understands. Only dirs 0 and 1 are parsed
+# eagerly at construction; the rest are lazy (see PE).
+DIR_EXPORT = 0
+DIR_IMPORT = 1
+DIR_RESOURCE = 2          # parsed on a separate branch (feat/pe-resource-parser)
+DIR_EXCEPTION = 3
+DIR_SECURITY = 4
+DIR_BASERELOC = 5
+DIR_DEBUG = 6
+DIR_TLS = 9
+
+# All 16 slots fit; the cap is what keeps a lying NumberOfRvaAndSizes bounded.
+MAX_DATA_DIRECTORIES = 16
 
 
 class PEParser:
@@ -15,6 +31,17 @@ class PEParser:
     def __init__(self, source, view: View):
         self._src = source
         self._view = view
+
+    def _read_rva(self, rva, size):
+        """Bytes at 'rva', or None when that range is not fully available.
+
+        Every table walk below goes through this, so a truncated or unmapped
+        directory ends its own parse instead of raising out of the caller.
+        """
+        offset = self._view.rva_to_source_offset(rva)
+        if offset is None:
+            return None
+        return self._src.try_read(offset, size)
 
     def parse_dos_header(self) -> DosHeader:
         data = self._src.read(0, 64)
@@ -94,7 +121,7 @@ class PEParser:
 
     def _parse_data_directories(self, offset: int, count: int) -> dict:
         data_dirs = {}
-        for i in range(min(count, 16)):
+        for i in range(min(count, MAX_DATA_DIRECTORIES)):
             dd_offset = offset + i * 8
             dd_data = self._src.read(dd_offset, 8)
             rva, size = struct.unpack_from('<II', dd_data, 0)
@@ -212,6 +239,184 @@ class PEParser:
                     t_index += 1
             cursor += 20
         return imports
+
+    # ── data directories 3, 5, 6, 9 and the Rich header ────────
+    #
+    # Parsed lazily (see PE), because most consumers want none of them and
+    # several are large: a 30k-function .pdata is 360KB nobody asked for.
+
+    def parse_relocations(self, data_dirs: dict, max_blocks: int = 4096) -> list:
+        """Base relocation blocks (data directory 5).
+
+        Returns structure only — see RelocationBlock for why the slots are not
+        dereferenced here.
+        """
+        blocks = []
+        dd = data_dirs.get(DIR_BASERELOC)
+        if dd is None or dd.virtual_address == 0 or dd.size == 0:
+            return blocks
+
+        cursor = dd.virtual_address
+        end = dd.virtual_address + dd.size
+        for _ in range(max_blocks):
+            if cursor + 8 > end:
+                break
+            header = self._read_rva(cursor, 8)
+            if header is None:
+                break
+            page_rva, block_size = struct.unpack_from('<II', header, 0)
+            if page_rva == 0 and block_size == 0:
+                break                       # terminator
+            if block_size < 8 or cursor + block_size > end:
+                break                       # malformed, or a size that lies
+            body = self._read_rva(cursor + 8, block_size - 8)
+            if body is None:
+                break
+
+            entries = []
+            for i in range((block_size - 8) // 2):
+                value = struct.unpack_from('<H', body, i * 2)[0]
+                entries.append(RelocationEntry(kind=value >> 12,
+                                               offset=value & 0x0FFF))
+            blocks.append(RelocationBlock(page_rva=page_rva,
+                                          block_size=block_size,
+                                          entries=entries))
+            cursor += block_size
+        return blocks
+
+    def parse_tls(self, data_dirs: dict, magic: int, va_base: int = 0,
+                  max_callbacks: int = 64):
+        """TLS directory (data directory 9), or None when absent.
+
+        'va_base' is what the directory's stored addresses are relative to.
+        For a file that is the optional header's ImageBase; for a live module
+        it is the module's runtime base, which ASLR makes a different number —
+        pass the wrong one and every callback lands outside the image.
+        """
+        dd = data_dirs.get(DIR_TLS)
+        if dd is None or dd.virtual_address == 0 or dd.size == 0:
+            return None
+
+        is_pe32plus = magic == 0x20B
+        header_size = 40 if is_pe32plus else 24
+        raw = self._read_rva(dd.virtual_address, header_size)
+        if raw is None:
+            return None
+
+        if is_pe32plus:
+            start, end, index, callbacks, zero_fill, chars = struct.unpack_from(
+                '<QQQQII', raw, 0)
+            stride, fmt = 8, '<Q'
+        else:
+            start, end, index, callbacks, zero_fill, chars = struct.unpack_from(
+                '<IIIIII', raw, 0)
+            stride, fmt = 4, '<I'
+
+        return TLSDirectory(
+            start_address_of_raw_data=start,
+            end_address_of_raw_data=end,
+            address_of_index=index,
+            address_of_callbacks=callbacks,
+            size_of_zero_fill=zero_fill,
+            characteristics=chars,
+            callbacks=self._read_va_array(callbacks, va_base, stride, fmt,
+                                          max_callbacks))
+
+    def _read_va_array(self, va, va_base, stride, fmt, limit):
+        """Read a NULL-terminated array of VAs, as RVAs relative to 'va_base'."""
+        if not va:
+            return []
+        values = []
+        for i in range(limit):
+            rva = va + i * stride - va_base
+            raw = self._read_rva(rva, stride)
+            if raw is None:
+                break
+            value = struct.unpack_from(fmt, raw, 0)[0]
+            if value == 0:
+                break                       # NULL terminator
+            values.append(value)
+        return values
+
+    def parse_debug(self, data_dirs: dict, max_entries: int = 64) -> list:
+        """Debug directory records (data directory 6).
+
+        Entry type 2 (IMAGE_DEBUG_TYPE_CODEVIEW) is the one that carries the
+        PDB path and GUID for a build.
+        """
+        entries = []
+        dd = data_dirs.get(DIR_DEBUG)
+        if dd is None or dd.virtual_address == 0 or dd.size == 0:
+            return entries
+
+        count = min(dd.size // 28, max_entries)
+        for i in range(count):
+            raw = self._read_rva(dd.virtual_address + i * 28, 28)
+            if raw is None:
+                break
+            chars, stamp, major, minor, kind, size, addr, ptr = struct.unpack_from(
+                '<IIHHIIII', raw, 0)
+            entries.append(DebugEntry(
+                characteristics=chars, time_date_stamp=stamp,
+                major_version=major, minor_version=minor, type=kind,
+                size_of_data=size, address_of_raw_data=addr,
+                pointer_to_raw_data=ptr))
+        return entries
+
+    def parse_exception(self, data_dirs: dict, max_entries: int = 65536) -> list:
+        """RUNTIME_FUNCTION table (data directory 3).
+
+        x64 only in practice — a PE32 image has no .pdata, so this returns []
+        there. Where it exists it is the authoritative function table, which is
+        why it is worth reading before any prologue heuristic.
+        """
+        entries = []
+        dd = data_dirs.get(DIR_EXCEPTION)
+        if dd is None or dd.virtual_address == 0 or dd.size == 0:
+            return entries
+
+        count = min(dd.size // 12, max_entries)
+        for i in range(count):
+            raw = self._read_rva(dd.virtual_address + i * 12, 12)
+            if raw is None:
+                break
+            begin, end, unwind = struct.unpack_from('<III', raw, 0)
+            if begin == 0 and end == 0:
+                break                       # terminator
+            entries.append(ExceptionEntry(begin_rva=begin, end_rva=end,
+                                          unwind_info_rva=unwind))
+        return entries
+
+    def parse_rich_header(self, e_lfanew: int):
+        """Decode the Rich header from the DOS stub, or None.
+
+        The header is XOR-obfuscated with a key stored after the "Rich" marker
+        and is located by XOR-searching for the "DanS" marker, so the scan is
+        bounded by the PE header rather than the whole file.
+        """
+        if e_lfanew <= 0x40:
+            return None
+        region = self._src.try_read(0x40, e_lfanew - 0x40)
+        if not region or len(region) < 8:
+            return None
+
+        rich = region.rfind(b"Rich")
+        if rich == -1 or rich + 8 > len(region):
+            return None
+        key = struct.unpack_from('<I', region, rich + 4)[0]
+
+        encoded_dans = struct.pack('<I', 0x536E6144 ^ key)
+        dans = region.rfind(encoded_dans, 0, rich)
+        if dans == -1:
+            return None
+
+        # Entries follow the marker and three encoded zero dwords.
+        entries = []
+        for off in range(dans + 16, rich - 7, 8):
+            comp_id = struct.unpack_from('<I', region, off)[0] ^ key
+            count = struct.unpack_from('<I', region, off + 4)[0] ^ key
+            entries.append(RichHeaderEntry(comp_id=comp_id, count=count))
+        return RichHeader(xor_key=key, entries=entries)
 
     def _read_rva_table(self, table_rva: int, count: int,
                         entry_size: int, fmt: str) -> list[int]:
