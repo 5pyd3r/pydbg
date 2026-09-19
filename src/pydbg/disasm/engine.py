@@ -18,6 +18,11 @@ OP_MEM = 3
 # matches no real operand.
 REG_RIP = capstone.x86.X86_REG_RIP if capstone is not None else 0
 
+# Operand access flags, mirroring capstone's CS_AC_*. An operand can be both,
+# hence a bitmask rather than a boolean.
+ACC_READ = 1
+ACC_WRITE = 2
+
 
 @dataclass(frozen=True, slots=True)
 class Operand:
@@ -35,6 +40,7 @@ class Operand:
     reg: int = 0         # OP_REG: capstone register id
     imm: int = 0         # OP_IMM: already sign-extended by capstone
     mem_segment: int = 0  # OP_MEM: fs/gs override, 0 when there is none
+    access: int = 0      # ACC_READ | ACC_WRITE; 0 when capstone did not say
     mem_base: int = 0    # OP_MEM
     mem_index: int = 0
     mem_scale: int = 0
@@ -160,14 +166,28 @@ class DisasmEngine:
         displacement becomes 0xFFFFF000-shaped nonsense. Widening is the
         consumer's job — it knows the image base and the address window.
         """
+        access = getattr(op, "access", 0)
         if op.type == capstone.x86.X86_OP_REG:
-            return Operand(kind=OP_REG, size=op.size, reg=op.reg)
+            return Operand(kind=OP_REG, size=op.size, reg=op.reg,
+                           access=access)
         if op.type == capstone.x86.X86_OP_IMM:
-            return Operand(kind=OP_IMM, size=op.size, imm=op.imm)
+            return Operand(kind=OP_IMM, size=op.size, imm=op.imm,
+                           access=access)
         mem = op.mem
-        return Operand(kind=OP_MEM, size=op.size, mem_segment=mem.segment,
-                       mem_base=mem.base, mem_index=mem.index,
-                       mem_scale=mem.scale, mem_disp=mem.disp)
+        return Operand(kind=OP_MEM, size=op.size, access=access,
+                       mem_segment=mem.segment, mem_base=mem.base,
+                       mem_index=mem.index, mem_scale=mem.scale,
+                       mem_disp=mem.disp)
+
+    def reg_name(self, reg_id):
+        """Capstone's name for a register id, or '' when it has none.
+
+        Names rather than ids wherever one has to be written down: a table
+        keyed by `esp`/`rbp` can be reviewed, and one keyed by 20 and 21
+        cannot.
+        """
+        self._init_capstone()
+        return self._cs.reg_name(reg_id) or ""
 
     def _make_instruction(self, insn):
         groups = [insn.group_name(g) for g in insn.groups]

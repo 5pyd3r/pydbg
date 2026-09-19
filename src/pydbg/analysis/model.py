@@ -103,6 +103,10 @@ class SeedConfig:
     max_instructions: int = 2_000_000
     collect_xrefs: bool = True
     decode_cache_size: int = 4096
+    # Recording base-relative accesses costs a tuple per memory operand and
+    # saves decoding the whole image a second time to recover them. For a
+    # system DLL that is tens of thousands of tuples against half a minute.
+    collect_accesses: bool = True
     # What to do when a branch targets a byte that does not decode. Recording
     # them is cheap and they are the signal that a seed was wrong; silently
     # dropping them hides exactly that.
@@ -124,6 +128,11 @@ class AnalysisResult:
     indirect_sites: tuple = ()
     # Import thunk rva -> the IAT slot it jumps through. Names come from here.
     import_thunks: dict = field(default_factory=dict)
+    # Base-relative memory accesses recorded during the sweep, as
+    # (rva, reg id, offset, size, access flags, is branch). None when the run
+    # was configured not to collect them. Named 'records' because
+    # `accesses()` below turns them into Access objects.
+    access_records: tuple = None
     # Kept so a CFG can be built after the fact without re-decoding. The
     # decoder's bookkeeping is small (bytearrays, not Instruction objects), so
     # holding it costs little and re-running the analysis would cost a lot.
@@ -217,6 +226,27 @@ class AnalysisResult:
         from .report import render_names
         return render_names(self, workspace=workspace, limit=limit,
                             source=source)
+
+    def accesses(self, **kwargs):
+        """Every `[reg + disp]` access in the decoded code."""
+        from .access import collect_accesses
+        return collect_accesses(self, **kwargs)
+
+    def structures(self, min_offsets=None, accesses=None):
+        """(function, base register) -> StructureProfile, plausible ones only.
+
+        Keyed by register, not by class: which register holds an object is not
+        statically determinable, so the honest unit is "inside this function,
+        this register is used as a base at these offsets".
+        """
+        from .access import profiles
+        return profiles(self, accesses=accesses, min_offsets=min_offsets)
+
+    def render_structures(self, workspace=None, limit=None, function=None,
+                          min_offsets=None):
+        from .report import render_structures
+        return render_structures(self, workspace=workspace, limit=limit,
+                                 function=function, min_offsets=min_offsets)
 
     def attribution(self, min_run=4):
         """Break the coverage and overlap numbers down by cause.
