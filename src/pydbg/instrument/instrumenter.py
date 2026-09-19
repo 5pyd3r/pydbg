@@ -3,6 +3,7 @@
 from dataclasses import dataclass
 
 from ..exceptions import PydbgError
+from ..memory.manager import MemoryManager
 
 _STUB_ALLOC = 0x2000   # payload 缓冲固定大小；以真实基址编译后写入实际机器码
 
@@ -44,6 +45,10 @@ class InstrumentInfo:
 class Instrumenter:
     def __init__(self, session):
         self._s = session
+        # Own MemoryManager rather than reaching for Debugger.memory: the
+        # session is what this was handed, and a second instance is free —
+        # MemoryManager holds nothing but the session.
+        self._mem = MemoryManager(session)
         self._hooks = {}  # target_addr -> InstrumentInfo
 
     @property
@@ -187,22 +192,23 @@ class Instrumenter:
     def _alloc_near(self, h, near, size):
         """在 [near-_RELOC_WINDOW, near+_RELOC_WINDOW] 内扫描空闲区域并就近分配。
 
-        用 VirtualQueryEx 步进区域，跳过已占用区域，在首个足够大的 MEM_FREE
-        区域分配 size 字节。返回分配基址或 0。
+        区域步进交给 MemoryManager.regions_handle（VirtualQueryEx 全链封装）。
+        这里原有一套手写步进，和它是同一件事：两处各自维护「region_size 为 0
+        怎么办」「地址回绕怎么停」，修一处不会修到另一处。窗口上界就是 max_addr，
+        同一条链会自己收住，本函数不必再判一次。
+
+        在首个足够大的 MEM_FREE 区域分配 size 字节。返回分配基址或 0。
         """
         from .. import _pydbg
         lo = (near - _RELOC_WINDOW) & ~0xFFFF
         if lo < 0x10000:
             lo = 0x10000
         hi = near + _RELOC_WINDOW
-        addr = lo
-        for _ in range(100000):  # 安全上限
-            if addr >= hi:
-                break
-            try:
-                info = _pydbg.virtual_query_ex(h, addr)
-            except Exception:
-                break
+        try:
+            regions = self._mem.regions_handle(h, lo, hi)
+        except Exception:
+            return 0
+        for info in regions:
             base = info['base_address']
             rsize = info['region_size']
             if info['state'] == _MEM_FREE and rsize >= size:
@@ -222,10 +228,6 @@ class Instrumenter:
                             return got
                     except Exception:
                         pass
-            nxt = base + rsize
-            if nxt <= addr:  # 防死循环
-                nxt = addr + 0x1000
-            addr = nxt
         return 0
 
     def _free_rwx(self, mem, addr, size):

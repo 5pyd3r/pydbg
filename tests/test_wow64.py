@@ -290,6 +290,42 @@ class TestWow64HardwareBreakpoint(unittest.TestCase):
 @unittest.skipUnless(_HAS_TARGET and _wow64_available(),
                      "requires 32-bit target and 64-bit host")
 class TestWow64Modules(unittest.TestCase):
+    def test_the_event_fallback_covers_what_psapi_cannot_see_yet(self):
+        """The fallback on a real target, with no mock in the way.
+
+        Everything else here runs _launch(run=True) — past both loader
+        breakpoints, by which time PSAPI is healthy and the fallback is never
+        reached. The case it exists for is the one before that, and until now
+        the chain was only covered by mock.patch over the syscall, which
+        proves the merge logic and nothing about the real enumeration it is
+        supposed to rescue.
+        """
+        from pydbg import Debugger
+        from tests.helpers import teardown
+
+        dbg = Debugger()
+        try:
+            pid, _tid = _launch(dbg)          # first loader breakpoint
+            recorded = dbg._session.modules_for(pid)
+            self.assertTrue(recorded, "no modules recorded from debug events")
+
+            modules = dbg.enum_modules()
+            by_base = {m["base_address"] for m in modules}
+            # The contract: every image a debug event named is in the answer,
+            # whatever PSAPI managed on this particular run.
+            for rec in recorded:
+                self.assertIn(rec["base_address"], by_base)
+
+            # ...and the 32-bit image specifically, which at this point is not
+            # mapped yet, so the only thing that can have reported it is the
+            # event table.
+            x86 = [m for m in modules if m["arch"] == "x86"]
+            self.assertTrue(x86, "no 32-bit module in the enumeration")
+            self.assertTrue(any(m.get("source") == "events" for m in x86),
+                            "no 32-bit module came from the event fallback")
+        finally:
+            teardown(dbg)
+
     def test_enum_modules_sees_x86_exe_and_ntdll32(self):
         from pydbg import Debugger
         from tests.helpers import teardown

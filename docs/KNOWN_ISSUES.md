@@ -157,6 +157,77 @@ Two bugs were found in the same code while fixing these:
   `__all__`. `except pydbg.exceptions.TimeoutError` never fired. It now raises
   the documented class.
 
+### Two control-flow graphs, one exported surface
+
+`pydbg.analysis.cfg` replaced the older CFG in `disasm/analysis.py` — explicit
+`indirect`/`ret` markers, a `complete` flag, and calls kept out of the
+intra-function flow instead of modelled as flow into the callee. The old one
+was never removed, so `pydbg.build_cfg` and `pydbg.analysis` both answered
+"what does this function's control flow look like" and callers got whichever
+they reached for first. The old one parsed branch targets out of the
+disassembler's *text* output and walked with recursion.
+
+Removed, along with its exports and the 29 tests that covered it — an API break
+that was signed off before it was made. What those tests were protecting is
+covered against the surviving implementation in
+`test_analysis_runtime.py::TestFunctionCFG`.
+
+The residue is worth naming: **a re-added alias fails nothing.** Both graphs
+build, both return blocks, both have edges; only their answers differ, and
+nothing compares them. `TestOnlyOneControlFlowGraph` exists so that the
+removal stays done and says why.
+
+### Reads that returned short instead of failing
+
+`FileSource.read(offset, size)` past the end of a file returned a short slice,
+where `BytesSource` raised `ValueError`. A short slice is indistinguishable
+from data at the call site, so a caller that did not check `len()` parsed a
+truncated structure and had nothing to notice. `Source.try_read` normalised
+both into `None` and every directory walk went through it, which is why this
+survived: the one path that papered over the disagreement was the one
+everything used.
+
+Both sources raise now. `try_read` keeps its length check anyway, because it
+is the single place that decides what leniency means to the `pe/` callers.
+
+The same shape appeared twice more in this round: `parse_rich_header` returned
+`None` both for "this image has no Rich header" and for "it has one that does
+not decode" — the second being the interesting one, since it means a
+nonstandard or deliberately mangled stub. It now returns a `RichHeader` with
+`malformed` set for the second case, and `xor_key` is `None` rather than a
+made-up zero when the key itself was truncated.
+
+### A test that only ran under an optional backend
+
+`Instrumenter._alloc_near` scans ±2GB of the target's address space for a free
+region. Its only coverage was the live instrument round-trip tests, and those
+are skipped unless the LLVM backend is built — so in a default local build the
+entire scan never executed. Rewriting it onto `MemoryManager.regions_handle`
+would have been verified only in CI's `llvm-instrument` job.
+
+`TestAllocNear` covers it without the backend: the allocation lands inside the
+window, is 64KB-aligned (the E9 rel32 range check depends on that), and two
+successive calls do not return the same address.
+
+The general lesson is the one §D of `targets/pydbg-gaps.md` keeps re-teaching:
+**"covered by a test" and "covered in the configuration you are running" are
+different claims**, and a `skipUnless` on an optional backend silently moves a
+test from the first to the second.
+
+### An unbounded read whose size came from the target
+
+`read_memory_safe(addr, size)` walked regions and issued a read per region with
+no ceiling. `size` normally comes from a header field or a length in the
+target's own memory, so a corrupt one meant a multi-gigabyte allocation and a
+sweep of the address space, with nothing to say it was a typo.
+
+It now refuses a request over `max_bytes` (default `DEFAULT_MAX_READ`, 512 MiB)
+by raising `ValueError` — not by truncating, which was the tempting option.
+`MemoryRead.gaps` holds `(address, size, win32_error)` triples and a
+policy truncation has no `win32_error` to report, so it would have arrived
+looking exactly like uncommitted memory. Truncating here would have produced
+one more entry in this file.
+
 ## WOW64 (32 位目标) 调试平台特性
 
 - **WX86 异常码**：32 位代码的断点/单步经 WoW64 层上报为

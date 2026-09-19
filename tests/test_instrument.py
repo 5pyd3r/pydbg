@@ -131,6 +131,74 @@ class TestInstrumentTemplates(unittest.TestCase):
         self.assertIn('L(b)', src)
 
 
+class TestAllocNear(unittest.TestCase):
+    """_alloc_near on its own, without the LLVM backend in the way.
+
+    The live round-trip tests above cover this path end to end but need the
+    LLVM backend, so in a build without it — the default, and every local run
+    — the whole ±2GB region scan was never executed by a test. Its rewrite
+    onto MemoryManager.regions_handle would have been verified only in CI's
+    llvm-instrument job.
+    """
+
+    WINDOW = 0x7F000000          # _RELOC_WINDOW
+
+    def setUp(self):
+        try:
+            from pydbg import _pydbg     # noqa: F401
+        except ImportError:
+            self.skipTest("requires the Cython extension")
+        from tests.helpers import create_debugger, module_base
+        self.dbg, _pid, _tid = create_debugger()
+        self.near = module_base(self.dbg)
+
+    def tearDown(self):
+        from tests.helpers import teardown
+        teardown(self.dbg)
+
+    def test_allocates_a_single_region_within_the_window(self):
+        inst = Instrumenter(self.dbg._session)
+        h = self.dbg._session.process_handle
+
+        addr = inst._alloc_near(h, self.near, 0x2000)
+        self.assertNotEqual(addr, 0, "no free region found near the image")
+        try:
+            self.assertLessEqual(abs(addr - self.near), self.WINDOW)
+            # VirtualAllocEx rounds the hint down to the allocation
+            # granularity, so what comes back must already be aligned — if
+            # this drifts, the E9 rel32 detour range check stops meaning
+            # anything at the edges of the window.
+            self.assertEqual(addr % 0x10000, 0)
+            region = self.dbg.memory.query(addr)
+            self.assertTrue(region)
+        finally:
+            from pydbg import _pydbg
+            _pydbg.virtual_free(h, addr, 0, 0x8000)   # MEM_RELEASE
+
+    def test_two_allocations_do_not_land_on_each_other(self):
+        """The scan must look at *free* regions, not just big ones.
+
+        A walk that ignored the state field would be happy to hand back the
+        same address twice, and the second install would then overwrite the
+        first one's trampoline.
+        """
+        from pydbg import _pydbg
+        inst = Instrumenter(self.dbg._session)
+        h = self.dbg._session.process_handle
+
+        first = inst._alloc_near(h, self.near, 0x2000)
+        self.assertNotEqual(first, 0)
+        try:
+            second = inst._alloc_near(h, self.near, 0x2000)
+            self.assertNotEqual(second, 0)
+            try:
+                self.assertNotEqual(first, second)
+            finally:
+                _pydbg.virtual_free(h, second, 0, 0x8000)
+        finally:
+            _pydbg.virtual_free(h, first, 0, 0x8000)
+
+
 class TestInstrumenter(unittest.TestCase):
 
     def setUp(self):

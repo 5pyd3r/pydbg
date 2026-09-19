@@ -9,6 +9,12 @@ from ..exceptions import MemError
 _MEM_COMMIT = 0x1000
 _PAGE_SIZE = 0x1000
 
+# Ceiling on a single tolerant read. Generous enough for the largest image
+# anyone dumps in one call (a whole 512MB process would still fit), small
+# enough that a length field which lies fails loudly instead of trying to
+# allocate its way through the address space.
+DEFAULT_MAX_READ = 0x20000000      # 512 MiB
+
 
 @dataclass
 class MemoryRead:
@@ -108,7 +114,7 @@ class MemoryManager:
         """
         return _pydbg.virtual_query_all(h_process, start, max_addr)
 
-    def read_safe_handle(self, h_process, addr, size):
+    def read_safe_handle(self, h_process, addr, size, max_bytes=DEFAULT_MAX_READ):
         """Read [addr, addr+size) without losing the readable parts.
 
         read() raises on the first unreadable page and discards what it already
@@ -117,9 +123,23 @@ class MemoryManager:
         target would give up, and reports the rest as gaps.
 
         Returns a MemoryRead; never raises for unreadable memory.
+
+        It does refuse an unreasonable *request*, though. 'size' usually comes
+        from a header field or a length in the target's own memory, so a
+        corrupt one turns into a multi-gigabyte allocation and a read per
+        region across the address space, with nothing to say it was a typo.
+        Above max_bytes this raises rather than returning a short result:
+        MemoryRead.gaps holds (address, size, win32_error) and a policy
+        truncation has no win32 error to report, so it would arrive looking
+        exactly like uncommitted memory. Pass a larger max_bytes when the
+        caller really does mean it.
         """
         if size <= 0:
             return MemoryRead(addr, size, b"", [])
+        if max_bytes is not None and size > max_bytes:
+            raise ValueError(
+                f"refusing a {size}-byte read at 0x{addr:X}: over the "
+                f"{max_bytes}-byte limit (pass max_bytes= to raise it)")
 
         end = addr + size
         buf = bytearray(size)
