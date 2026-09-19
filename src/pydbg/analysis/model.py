@@ -122,6 +122,8 @@ class AnalysisResult:
     # Branches with no resolved target. Present so that "no callers" can be
     # told apart from "no callers we could see".
     indirect_sites: tuple = ()
+    # Import thunk rva -> the IAT slot it jumps through. Names come from here.
+    import_thunks: dict = field(default_factory=dict)
     # Kept so a CFG can be built after the fact without re-decoding. The
     # decoder's bookkeeping is small (bytearrays, not Instruction objects), so
     # holding it costs little and re-running the analysis would cost a lot.
@@ -181,13 +183,40 @@ class AnalysisResult:
         from .report import render_stats
         return render_stats(self)
 
-    def render_listing(self, rva, size):
+    def render_listing(self, rva, size, workspace=None):
         from .report import render_listing
-        return render_listing(self.image, rva, size)
+        table = self.names(workspace) if workspace is not None else None
+        comments = workspace.comments if workspace is not None else None
+        return render_listing(self.image, rva, size, names=table,
+                              comments=comments)
 
     def render_indirect_sites(self, limit=40, calls_only=True):
         from .report import render_indirect_sites
         return render_indirect_sites(self, limit=limit, calls_only=calls_only)
+
+    # ── names ──────────────────────────────────────────────────
+
+    def names(self, workspace=None):
+        """Recovered names, with any a person supplied on top.
+
+        Built on request: it walks the exports and every function start, which
+        is real work for an image with thousands of them, and a caller
+        interested only in coverage should not pay for it.
+        """
+        from .names import resolve
+        supplied = None
+        if workspace is not None:
+            supplied = {rva: name for rva, name in workspace.names.items()}
+        return resolve(self, supplied)
+
+    def label(self, rva, workspace=None):
+        """A stable name for 'rva', inventing one when nothing named it."""
+        return self.names(workspace).label(rva)
+
+    def render_names(self, workspace=None, limit=None, source=None):
+        from .report import render_names
+        return render_names(self, workspace=workspace, limit=limit,
+                            source=source)
 
     def attribution(self, min_run=4):
         """Break the coverage and overlap numbers down by cause.

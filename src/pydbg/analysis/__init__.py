@@ -29,6 +29,8 @@ from .model import (
     AnalysisResult, AnalysisStats, CoverageReport, Function, IndirectSite,
     RefKind, SeedConfig, Xref,
 )
+from .names import Name, NameTable, auto_names, import_names
+from .workspace import Workspace, WorkspaceError, image_fingerprint
 from .process_source import ProcessSource
 from .refs import branch_target, classify_refs, is_indirect_branch, memory_address
 from .seeds import SeedProvider, SeedSet, looks_like_entry
@@ -44,5 +46,7 @@ __all__ = [
     'ConstantTracker',
     'CoverageAttribution', 'UncoveredBreakdown', 'attribute_coverage',
     'deltas', 'span_summary',
+    'Name', 'NameTable', 'auto_names', 'import_names',
+    'Workspace', 'WorkspaceError', 'image_fingerprint',
     'branch_target', 'classify_refs', 'is_indirect_branch', 'memory_address',
 ]

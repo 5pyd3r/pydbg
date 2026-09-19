@@ -45,15 +45,38 @@ def render_coverage(result):
     return "\n".join(lines)
 
 
-def render_functions(result, limit=None):
-    """Recovered functions, ascending, with confidence shown."""
+def render_names(result, workspace=None, limit=None, source=None):
+    """The name table, with provenance.
+
+    Provenance is shown because it is the only thing that says how much to
+    trust a name: an export is the linker's own statement, an import thunk
+    name is exact, and `sub_401000` is this analysis admitting it does not
+    know. They must not look alike in the output.
+    """
+    table = result.names(workspace)
+    rows = sorted(table.items())
+    if source is not None:
+        rows = [(rva, name) for rva, name in rows if name.source == source]
+    if limit is not None:
+        rows = rows[:limit]
+    lines = [f"{'rva':>10s}  {'source':9s} name"]
+    for rva, name in rows:
+        lines.append(f"{rva:#010x}  {name.source:9s} {name.text}")
+    return "\n".join(lines)
+
+
+def render_functions(result, limit=None, workspace=None, names=True):
+    """Recovered functions, ascending, with confidence and names."""
     functions = result.functions.functions()
     if limit is not None:
         functions = functions[:limit]
-    lines = [f"{'rva':>10s} {'size':>6s}  conf"]
+    table = result.names(workspace) if names else None
+
+    lines = [f"{'rva':>10s} {'size':>6s}  conf  name"]
     for function in functions:
+        shown = table.label(function.rva) if table is not None else ""
         lines.append(f"{function.rva:#010x} {function.size:6d}  "
-                     f"{'yes' if function.confident else 'no'}")
+                     f"{'yes' if function.confident else 'no'}   {shown}")
     if limit is not None and len(result.functions) > limit:
         lines.append(f"... {len(result.functions) - limit} more")
     return "\n".join(lines)
@@ -84,8 +107,13 @@ def render_xrefs(result, target=None, limit=8):
     return "\n".join(lines) if lines else "(no cross-references)"
 
 
-def render_listing(image, rva, size, engine=None):
-    """Disassembly of a range, annotated with the references it makes."""
+def render_listing(image, rva, size, engine=None, names=None, comments=None):
+    """Disassembly of a range, annotated with references, names and comments.
+
+    Branch targets are shown as names where one is known: `call 0x4012f0` and
+    `call CreateFileW` are the same instruction, and only one of them can be
+    read.
+    """
     from ..disasm.engine import DisasmEngine
     from .refs import classify_refs
 
@@ -97,13 +125,29 @@ def render_listing(image, rva, size, engine=None):
     if not data:
         return f"{rva:#x}: unreadable"
 
+    def describe(target_rva):
+        text = f"{target_rva:#x}"
+        if names is not None:
+            found = names.name_of(target_rva)
+            if found:
+                text = f"{found} ({target_rva:#x})"
+        return text
+
     lines = []
     for insn in engine.disasm(image.rva_to_va(rva), data):
+        insn_rva = image.va_to_rva(insn.address)
         refs = classify_refs(insn, image)
         annotation = ""
         if refs:
             annotation = "  ; " + ", ".join(
-                f"{_kind_name(kind)}->{target:#x}" for target, kind in refs)
+                f"{_kind_name(kind)}->{describe(target)}"
+                for target, kind in refs)
+        if comments and insn_rva in comments:
+            annotation += f"   ; {comments[insn_rva]}"
+        if names is not None and insn_rva is not None:
+            found = names.name_of(insn_rva)
+            if found and found != f"sub_{insn_rva:06x}":
+                lines.append(f"; {found}:")
         raw = insn.raw_bytes.hex()
         lines.append(f"{insn.address:#010x}  {raw:20s} "
                      f"{insn.mnemonic} {insn.op_str}{annotation}")
