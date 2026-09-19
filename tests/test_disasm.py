@@ -1,8 +1,6 @@
 import unittest
 from tests import HOST_ARCH
 from pydbg.disasm.engine import DisasmEngine, Instruction
-from pydbg.disasm.analysis import BasicBlock, ControlFlowGraph, CFGEdge
-from pydbg.disasm.analysis import build_blocks, build_cfg
 
 
 # Simple x64 code: mov rax, 1; ret
@@ -17,16 +15,6 @@ X64_COND = bytes([
     0x85, 0xC0,                   # test eax, eax
     0x75, 0x02,                   # jne +2 (skip inc)
     0xFF, 0xC0,                   # inc eax
-    0xC3,                         # ret
-])
-
-# x64 call: push rbp; mov rbp, rsp; call func; pop rbp; ret
-# call +4: opcode E8, offset = 0x00000004, next ip = 0x1005, target = 0x1009
-X64_CALL = bytes([
-    0x55,                         # push rbp
-    0x48, 0x89, 0xE5,             # mov rbp, rsp
-    0xE8, 0x04, 0x00, 0x00, 0x00,  # call +4
-    0x5D,                         # pop rbp
     0xC3,                         # ret
 ])
 
@@ -101,6 +89,31 @@ class TestDisasmEngine(unittest.TestCase):
         self.assertFalse(jne[0].is_ret)
         self.assertFalse(jne[0].is_call)
 
+    def test_group_names_are_named_once_per_distinct_set(self):
+        """The cache is the whole point: 670k instructions, a handful of sets.
+
+        Asserting on `is` rather than `==` on purpose. Equality would pass
+        whether or not anything is shared, and sharing is the change — an
+        implementation that rebuilds an equal tuple per instruction is exactly
+        the cost this removes.
+        """
+        engine = DisasmEngine(mode="x64")
+        # Two rets, and two nops that have no groups at all.
+        insns = engine.disasm(0x0, b"\xc3" + b"\x90\x90" + b"\xc3")
+        first_ret, second_ret = insns[0], insns[-1]
+        self.assertIn('ret', first_ret.groups)
+        self.assertIs(first_ret.groups, second_ret.groups)
+        self.assertIs(insns[1].groups, insns[2].groups)
+        self.assertEqual(insns[1].groups, ())
+
+    def test_a_second_engine_does_not_inherit_the_first_ones_cache(self):
+        """Per-engine, not global: the cache lives with the capstone handle
+        that produced it, so a torn-down engine leaves nothing behind."""
+        first = DisasmEngine(mode="x64").disasm(0x0, b"\xc3")[0]
+        second = DisasmEngine(mode="x64").disasm(0x0, b"\xc3")[0]
+        self.assertEqual(first.groups, second.groups)
+        self.assertIsNot(first.groups, second.groups)
+
 
 class TestInstructionDataclass(unittest.TestCase):
 
@@ -125,7 +138,7 @@ class TestInstructionDataclass(unittest.TestCase):
         self.assertFalse(insn.is_jmp)
         self.assertFalse(insn.is_ret)
         self.assertFalse(insn.is_cond)
-        self.assertEqual(insn.groups, [])
+        self.assertEqual(insn.groups, ())
         # Additive fields: an Instruction built the old way still works, and
         # reads as "operands not materialized" rather than as a missing field.
         self.assertEqual(insn.operands, ())
@@ -254,82 +267,6 @@ class TestOperandDetail(unittest.TestCase):
         self.assertLess(sys.getsizeof(operand), 200)
         with self.assertRaises(Exception):      # frozen=True was lost
             operand.mem_disp = 1
-
-
-class TestBasicBlocks(unittest.TestCase):
-
-    def test_empty(self):
-        self.assertEqual(build_blocks([]), [])
-
-    def test_single_block(self):
-        engine = DisasmEngine(mode="x64")
-        insns = engine.disasm(0x1000, X64_RET)
-        blocks = build_blocks(insns)
-        self.assertEqual(len(blocks), 1)
-        self.assertEqual(blocks[0].start_addr, 0x1000)
-        self.assertEqual(len(blocks[0].instructions), 2)
-
-    def test_conditional_split(self):
-        engine = DisasmEngine(mode="x64")
-        insns = engine.disasm(0x1000, X64_COND)
-        blocks = build_blocks(insns)
-        self.assertGreaterEqual(len(blocks), 2)
-
-    def test_call_split(self):
-        engine = DisasmEngine(mode="x64")
-        insns = engine.disasm(0x1000, X64_CALL)
-        blocks = build_blocks(insns)
-        self.assertGreaterEqual(len(blocks), 2)
-
-    def test_basicblock_dataclass(self):
-        insn = Instruction(address=0x1000, size=1, mnemonic="nop", op_str="", raw_bytes=b'\x90')
-        block = BasicBlock(start_addr=0x1000, end_addr=0x1000, instructions=[insn], successors=[0x2000])
-        self.assertEqual(block.start_addr, 0x1000)
-        self.assertEqual(block.end_addr, 0x1000)
-        self.assertEqual(len(block.instructions), 1)
-        self.assertEqual(block.successors, [0x2000])
-
-
-class TestControlFlowGraph(unittest.TestCase):
-
-    def test_empty(self):
-        cfg = build_cfg([])
-        self.assertEqual(cfg.entry, 0)
-        self.assertEqual(cfg.blocks, {})
-
-    def test_simple_cfg(self):
-        engine = DisasmEngine(mode="x64")
-        insns = engine.disasm(0x1000, X64_RET)
-        blocks = build_blocks(insns)
-        cfg = build_cfg(blocks)
-        self.assertEqual(cfg.entry, 0x1000)
-        self.assertIn(0x1000, cfg.blocks)
-        self.assertEqual(len(cfg.blocks), 1)
-
-    def test_conditional_cfg(self):
-        engine = DisasmEngine(mode="x64")
-        insns = engine.disasm(0x1000, X64_COND)
-        blocks = build_blocks(insns)
-        cfg = build_cfg(blocks)
-        self.assertEqual(cfg.entry, 0x1000)
-        self.assertGreaterEqual(len(cfg.blocks), 2)
-        edge_types = [e.type for e in cfg.edges]
-        self.assertTrue('branch' in edge_types or 'fallthrough' in edge_types)
-
-    def test_cfg_edge_dataclass(self):
-        edge = CFGEdge(src=0x1000, dst=0x2000, type="branch")
-        self.assertEqual(edge.src, 0x1000)
-        self.assertEqual(edge.dst, 0x2000)
-        self.assertEqual(edge.type, "branch")
-
-    def test_cfg_dataclass(self):
-        block = BasicBlock(start_addr=0x1000, end_addr=0x1003, instructions=[], successors=[0x2000])
-        edge = CFGEdge(src=0x1000, dst=0x2000, type="branch")
-        cfg = ControlFlowGraph(entry=0x1000, blocks={0x1000: block}, edges=[edge])
-        self.assertEqual(cfg.entry, 0x1000)
-        self.assertEqual(len(cfg.blocks), 1)
-        self.assertEqual(len(cfg.edges), 1)
-        self.assertEqual(cfg.edges[0].type, "branch")
 
 
 if __name__ == '__main__':

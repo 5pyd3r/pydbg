@@ -319,188 +319,49 @@ class TestLoadedView(unittest.TestCase):
 
 
 # ═══════════════════════════════════════════════════════════════════
-# 4. Disasm Analysis Edge Cases
+# 4. Control-flow analysis lives in pydbg.analysis
 # ═══════════════════════════════════════════════════════════════════
+#
+# disasm/analysis.py used to carry a second, older CFG: it resolved branch
+# targets by parsing the disassembler's *text* output, walked with recursion,
+# and modelled a call as flow into the callee. pydbg.analysis.cfg replaced it
+# (explicit indirect/ret markers, a `complete` flag, calls kept out of the
+# intra-function flow) but the old one was never removed, so the package
+# exported two answers to one question and callers could pick either.
+#
+# The tests that covered the old implementation went with it. What that
+# behaviour was supposed to guarantee is covered against the surviving one in
+# tests/test_analysis_runtime.py::TestFunctionCFG.
 
-class TestResolveDirectTarget(unittest.TestCase):
-    """Tests for _resolve_direct_target helper."""
+class TestOnlyOneControlFlowGraph(unittest.TestCase):
+    """Removing the old CFG must stay done.
 
-    def test_hex_format(self):
-        from pydbg.disasm.analysis import _resolve_direct_target
-        from pydbg.disasm.engine import Instruction
+    A re-added alias would not fail anywhere else: both graphs build, both
+    return blocks, and only their answers differ — which is exactly how the
+    two coexisted for this long.
+    """
 
-        insn = Instruction(address=0x1000, size=5, mnemonic="call",
-                           op_str="0x401000", raw_bytes=b'')
-        self.assertEqual(_resolve_direct_target(insn), 0x401000)
+    REMOVED = ("BasicBlock", "CFGEdge", "ControlFlowGraph",
+               "build_blocks", "build_cfg")
 
-    def test_hex_with_comma(self):
-        from pydbg.disasm.analysis import _resolve_direct_target
-        from pydbg.disasm.engine import Instruction
+    def test_not_exported_from_the_package(self):
+        import pydbg
 
-        insn = Instruction(address=0x1000, size=5, mnemonic="call",
-                           op_str="0x401000, extra", raw_bytes=b'')
-        self.assertEqual(_resolve_direct_target(insn), 0x401000)
+        for name in self.REMOVED:
+            self.assertFalse(hasattr(pydbg, name), f"pydbg.{name} is back")
+            self.assertNotIn(name, pydbg.__all__)
 
-    def test_hex_suffix_format(self):
-        from pydbg.disasm.analysis import _resolve_direct_target
-        from pydbg.disasm.engine import Instruction
+    def test_not_exported_from_disasm(self):
+        import pydbg.disasm as disasm
 
-        insn = Instruction(address=0x1000, size=5, mnemonic="jmp",
-                           op_str="401000h", raw_bytes=b'')
-        self.assertEqual(_resolve_direct_target(insn), 0x401000)
+        for name in self.REMOVED:
+            self.assertFalse(hasattr(disasm, name), f"pydbg.disasm.{name} is back")
 
-    def test_empty_op_str(self):
-        from pydbg.disasm.analysis import _resolve_direct_target
-        from pydbg.disasm.engine import Instruction
+    def test_the_module_is_gone(self):
+        import importlib
 
-        insn = Instruction(address=0x1000, size=1, mnemonic="ret",
-                           op_str="", raw_bytes=b'')
-        self.assertIsNone(_resolve_direct_target(insn))
-
-    def test_none_instruction(self):
-        from pydbg.disasm.analysis import _resolve_direct_target
-        self.assertIsNone(_resolve_direct_target(None))
-
-    def test_register_operand(self):
-        from pydbg.disasm.analysis import _resolve_direct_target
-        from pydbg.disasm.engine import Instruction
-
-        insn = Instruction(address=0x1000, size=2, mnemonic="call",
-                           op_str="rax", raw_bytes=b'')
-        self.assertIsNone(_resolve_direct_target(insn))
-
-    def test_memory_operand(self):
-        from pydbg.disasm.analysis import _resolve_direct_target
-        from pydbg.disasm.engine import Instruction
-
-        insn = Instruction(address=0x1000, size=6, mnemonic="call",
-                           op_str="[rax+0x10]", raw_bytes=b'')
-        self.assertIsNone(_resolve_direct_target(insn))
-
-
-class TestComputeSuccessors(unittest.TestCase):
-    """Tests for _compute_successors helper."""
-
-    def test_ret_no_successors(self):
-        from pydbg.disasm.analysis import _compute_successors
-        from pydbg.disasm.engine import Instruction
-
-        insn = Instruction(address=0x1000, size=1, mnemonic="ret",
-                           op_str="", raw_bytes=b'\xc3', is_ret=True)
-        self.assertEqual(_compute_successors(insn), [])
-
-    def test_conditional_branch(self):
-        from pydbg.disasm.analysis import _compute_successors
-        from pydbg.disasm.engine import Instruction
-
-        insn = Instruction(address=0x1000, size=2, mnemonic="jne",
-                           op_str="0x1010", raw_bytes=b'\x75\x0e',
-                           is_jmp=True, is_cond=True)
-        succs = _compute_successors(insn)
-        self.assertIn(0x1010, succs)  # branch target
-        self.assertIn(0x1002, succs)  # fallthrough
-        self.assertEqual(len(succs), 2)
-
-    def test_unconditional_jmp(self):
-        from pydbg.disasm.analysis import _compute_successors
-        from pydbg.disasm.engine import Instruction
-
-        insn = Instruction(address=0x1000, size=5, mnemonic="jmp",
-                           op_str="0x2000", raw_bytes=b'\xe9',
-                           is_jmp=True, is_cond=False)
-        succs = _compute_successors(insn)
-        self.assertEqual(succs, [0x2000])
-
-    def test_call_returns_both(self):
-        from pydbg.disasm.analysis import _compute_successors
-        from pydbg.disasm.engine import Instruction
-
-        insn = Instruction(address=0x1000, size=5, mnemonic="call",
-                           op_str="0x3000", raw_bytes=b'\xe8',
-                           is_call=True)
-        succs = _compute_successors(insn)
-        self.assertIn(0x3000, succs)  # call target
-        self.assertIn(0x1005, succs)  # return address
-        self.assertEqual(len(succs), 2)
-
-    def test_regular_fallthrough(self):
-        from pydbg.disasm.analysis import _compute_successors
-        from pydbg.disasm.engine import Instruction
-
-        insn = Instruction(address=0x1000, size=3, mnemonic="mov",
-                           op_str="eax, 1", raw_bytes=b'\xb8\x01\x00')
-        succs = _compute_successors(insn)
-        self.assertEqual(succs, [0x1003])
-
-    def test_none_instruction(self):
-        from pydbg.disasm.analysis import _compute_successors
-        self.assertEqual(_compute_successors(None), [])
-
-
-@unittest.skipUnless(_has_capstone, "requires capstone")
-class TestBuildBlocksEdgeCases(unittest.TestCase):
-    """Tests for build_blocks edge cases."""
-
-    def test_empty_instructions(self):
-        from pydbg.disasm.analysis import build_blocks
-        self.assertEqual(build_blocks([]), [])
-
-    def test_single_nop(self):
-        from pydbg.disasm.analysis import build_blocks
-        from pydbg.disasm.engine import Instruction
-
-        insns = [Instruction(address=0x1000, size=1, mnemonic="nop",
-                             op_str="", raw_bytes=b'\x90')]
-        blocks = build_blocks(insns)
-        self.assertEqual(len(blocks), 1)
-        self.assertEqual(blocks[0].start_addr, 0x1000)
-
-    def test_unconditional_jmp_creates_two_blocks(self):
-        from pydbg.disasm.engine import DisasmEngine
-        from pydbg.disasm.analysis import build_blocks
-
-        # jmp +2; nop; nop; ret
-        code = bytes([0xEB, 0x02, 0x90, 0x90, 0xC3])
-        engine = DisasmEngine(mode="x64")
-        insns = engine.disasm(0x1000, code)
-        blocks = build_blocks(insns)
-        self.assertGreaterEqual(len(blocks), 2)
-
-
-@unittest.skipUnless(_has_capstone, "requires capstone")
-class TestBuildCFGEdgeCases(unittest.TestCase):
-    """Tests for build_cfg edge cases."""
-
-    def test_empty_cfg(self):
-        from pydbg.disasm.analysis import build_cfg
-        cfg = build_cfg([])
-        self.assertEqual(cfg.entry, 0)
-        self.assertEqual(cfg.blocks, {})
-        self.assertEqual(cfg.edges, [])
-
-    def test_custom_entry_addr(self):
-        from pydbg.disasm.engine import DisasmEngine
-        from pydbg.disasm.analysis import build_blocks, build_cfg
-
-        code = bytes([0xC3])  # ret
-        engine = DisasmEngine(mode="x64")
-        insns = engine.disasm(0x2000, code)
-        blocks = build_blocks(insns)
-        cfg = build_cfg(blocks, entry_addr=0x2000)
-        self.assertEqual(cfg.entry, 0x2000)
-
-    def test_cfg_edge_types(self):
-        from pydbg.disasm.engine import DisasmEngine
-        from pydbg.disasm.analysis import build_blocks, build_cfg
-
-        # xor eax,eax; test eax,eax; jne +2; inc eax; ret
-        code = bytes([0x31, 0xC0, 0x85, 0xC0, 0x75, 0x02, 0xFF, 0xC0, 0xC3])
-        engine = DisasmEngine(mode="x64")
-        insns = engine.disasm(0x1000, code)
-        blocks = build_blocks(insns)
-        cfg = build_cfg(blocks)
-        edge_types = {e.type for e in cfg.edges}
-        self.assertTrue(len(edge_types) > 0)
+        with self.assertRaises(ModuleNotFoundError):
+            importlib.import_module("pydbg.disasm.analysis")
 
 
 # ═══════════════════════════════════════════════════════════════════

@@ -12,7 +12,6 @@ from ._pydbg import (
     STATUS_WX86_SINGLE_STEP,
 )
 from .core.debugger import Debugger
-from .disasm.analysis import BasicBlock, CFGEdge, ControlFlowGraph, build_blocks, build_cfg
 from .disasm.engine import DisasmEngine, Instruction
 from .dump.minidump import MinidumpReader
 from .dump.stackwalk import StackWalker
@@ -66,11 +65,6 @@ __all__ = [
     "STATUS_WX86_SINGLE_STEP",
     "DisasmEngine",
     "Instruction",
-    "BasicBlock",
-    "ControlFlowGraph",
-    "CFGEdge",
-    "build_blocks",
-    "build_cfg",
     "Assembler",
     "SymbolResolver",
     "IATHook",
