@@ -69,6 +69,7 @@ class StaticAnalyzer:
         """Seed, sweep to a fixpoint, and return the result."""
         seeds = SeedProvider(self.image).collect(self.config.seed_classes)
         self.stats.seed_functions = len(seeds.confident)
+        self._record_pointer_refs(seeds)
 
         # Which class produced each seed, so a sweep can be attributed to its
         # cause. Seeded addresses win over follow-ons: the same address reached
@@ -103,12 +104,14 @@ class StaticAnalyzer:
         # traversal is still discovering them.
         self.stats.pruned_starts = self.functions.prune_starts_inside_functions()
         self.functions.invalidate()
-        self._finish_stats()
+        xrefs = self._freeze_xrefs()
+        self._finish_stats(xrefs)
         return AnalysisResult(
             image=self.image,
             functions=self.functions,
-            xrefs=self._freeze_xrefs(),
+            xrefs=xrefs,
             stats=self.stats,
+            xref_gaps=self._xref_gaps(seeds),
             coverage=self._coverage(),
             undecodable=tuple(sorted(self.undecodable)),
             indirect_sites=tuple(self.indirect_sites[rva]
@@ -120,6 +123,60 @@ class StaticAnalyzer:
         )
 
     # ── seeding ────────────────────────────────────────────────
+
+    def _record_pointer_refs(self, seeds):
+        """Turn pointer-class seeds into DATA cross-references.
+
+        The index used to be built from decoded instructions only, which is a
+        definition rather than a bug and is why the empty answer looked right:
+        a vtable entry is not an instruction, so no amount of decoding finds
+        it. The readers that do find it were already there and threw the
+        positions away after using them as decode seeds.
+
+        Only the index gains an entry. Confidence is untouched on purpose — a
+        pointer is evidence that something *names* an address, never that
+        anything calls it, and the two sets are kept apart for exactly this
+        reason. A tentative start stays tentative.
+        """
+        for target, slot in seeds.pointers:
+            self._add_data_ref(target, slot)
+
+    def _add_data_ref(self, target, slot):
+        """Record that the image holds a pointer to 'target' at 'slot'."""
+        if not self.config.collect_xrefs:
+            return
+        self.xrefs.setdefault(target, []).append(Xref(slot, int(RefKind.DATA)))
+        self._xref_targets.add(target)
+
+    def _xref_gaps(self, seeds):
+        """Why this run's reference index may be missing whole classes.
+
+        Both halves of an honest 'nothing references this' belong together:
+        the index itself, and the statement of what went into it. Every entry
+        here is a case where the index is short by construction rather than by
+        what is in the image, so a caller can assert the absence of them
+        before treating an empty `callers_of` as a fact.
+
+        Unresolved indirect branches are deliberately not listed — they are
+        per-site holes rather than missing classes, and `indirect_call_sites`
+        already reports them.
+        """
+        if not self.config.collect_xrefs:
+            return ("xref collection is off (SeedConfig.collect_xrefs=False): "
+                    "the index is empty",)
+        gaps = []
+        enabled = self.config.seed_classes
+        for name in ("data_pointers", "relocation_pointers"):
+            if enabled is not None and name not in enabled:
+                gaps.append(f"seed class '{name}' was not run: no DATA "
+                            f"references from it")
+        for name in sorted(seeds.truncated):
+            gaps.append(f"seed class '{name}' stopped at its ceiling: its "
+                        f"references are truncated")
+        if self.stats.budget_exhausted:
+            gaps.append("the instruction ceiling stopped the sweep: the index "
+                        "is truncated")
+        return tuple(gaps)
 
     def _enqueue(self, rva, confident=False, origin=None):
         if rva is None or not self.image.is_mapped(rva):
@@ -363,20 +420,27 @@ class StaticAnalyzer:
                 return
 
     def _absorb_jump_table(self, table_rva, max_entries=512, origin=None):
-        """Read a switch table's entries as code seeds.
+        """Read a switch table's entries as code seeds, and as references.
 
         They are case bodies, not function entries — so they are decoded and
         named as code seeds only. Recording them as starts would cut every
         function that contains a switch into pieces at each case.
+
+        Each entry is also a data slot holding a code address, so it is
+        recorded as a DATA reference like any other pointer. It is the same
+        statement the reading of the table makes, and a case body reached only
+        through the table otherwise has no reference to show.
         """
         stride = self.image.slot_size
         for index in range(max_entries):
-            value = self.image.read_pointer(table_rva + index * stride)
+            slot_rva = table_rva + index * stride
+            value = self.image.read_pointer(slot_rva)
             if value is None:
                 break
             rva = self.image.va_to_rva(value)
             if rva is None or not self.image.is_exec(rva):
                 break                  # tables are packed; the run has ended
+            self._add_data_ref(rva, slot_rva)
             self._enqueue_code_seed(rva, origin=origin)
 
     # ── results ────────────────────────────────────────────────
@@ -399,13 +463,18 @@ class StaticAnalyzer:
             )
         return report
 
-    def _finish_stats(self):
+    def _finish_stats(self, xrefs):
         stats = self.stats
         stats.insns = self.decoder.instructions
         stats.func_starts = len(self.functions.starts)
         stats.func_starts_confident = len(self.functions.confident)
         stats.xref_targets = len(self._xref_targets)
         stats.xrefs = sum(len(v) for v in self.xrefs.values())
+        # Counted from the frozen index, not from what was recorded: the
+        # relocation and data-pointer readers overlap, and the number worth
+        # reporting is how many DATA entries the index actually carries.
+        stats.data_refs = sum(1 for refs in xrefs.values() for ref in refs
+                              if ref.kind == int(RefKind.DATA))
         stats.overlap_bytes = self.decoder.overlap_bytes
         stats.overlap_conflicts = self.decoder.overlap_conflicts
         stats.indirect_unknown = len(self.indirect_sites)

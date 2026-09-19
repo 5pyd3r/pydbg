@@ -10,6 +10,7 @@ incompleteness is visible rather than implied.
 import struct
 import unittest
 
+from pydbg.analysis import RefKind
 from tests.pe_builder import PEBuilder
 
 TEXT_RVA = 0x1000
@@ -66,8 +67,12 @@ class TestConstantPropagation(unittest.TestCase):
 
         self.assertEqual(result.stats.indirect_resolved, 1)
         self.assertIn(FUNCTION_RVA, result.xrefs)
-        # The call is the second instruction, after the 5-byte mov.
-        sources = [x.source for x in result.xrefs[FUNCTION_RVA]]
+        # The call is the second instruction, after the 5-byte mov. Filtered
+        # to BRANCH: the slot the pointer was read out of is a DATA reference
+        # to the same target, and it is a reference for the same reason — but
+        # it is not the edge this test is about.
+        sources = [x.source for x in result.xrefs[FUNCTION_RVA]
+                   if x.kind == RefKind.BRANCH]
         self.assertEqual(sources, [TEXT_RVA + 5])
         # A resolved indirect call is a call target, so it is a function.
         self.assertIn(FUNCTION_RVA, result.functions.confident)

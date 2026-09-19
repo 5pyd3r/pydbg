@@ -17,7 +17,7 @@ _KIND_NAMES = {
 }
 
 
-def _kind_name(kind):
+def kind_name(kind):
     try:
         return _KIND_NAMES[RefKind(kind)]
     except (ValueError, KeyError):
@@ -113,12 +113,31 @@ def render_functions(result, limit=None, workspace=None, names=True):
     return "\n".join(lines)
 
 
+def render_xref_gaps(result):
+    """Why the reference index is not the whole story.
+
+    Printed beside the summary, for the same reason the unresolved-indirect
+    count is: an answer of "nothing references this" is worth exactly as much
+    as the list of reference classes that went into the index, and without
+    this that list is a comment in the source rather than something a reader
+    of the output can see.
+    """
+    if not result.xref_gaps:
+        return "reference index complete for every class this run collected"
+    return "\n".join(result.xref_gaps)
+
+
 def render_xrefs(result, target=None, limit=8):
     """Cross-references, grouped by target.
 
     Kinds are kept apart in the output for the same reason they are kept apart
     in the index: a branch is exact and a data pointer is a guess, and a reader
     deciding whether to trust a reference needs to see which it is.
+
+    A `data` line's addresses are slots, not instructions — the place the
+    pointer is stored rather than a place that runs. They are printed with the
+    others rather than separately because they answer the same question, but
+    they cannot be fed back into `render_listing` the way a `branch` site can.
     """
     lines = []
     targets = [target] if target is not None else sorted(result.xrefs)
@@ -129,7 +148,7 @@ def render_xrefs(result, target=None, limit=8):
         lines.append(f"{rva:#010x}")
         by_kind = {}
         for ref in refs:
-            by_kind.setdefault(_kind_name(ref.kind), []).append(ref.source)
+            by_kind.setdefault(kind_name(ref.kind), []).append(ref.source)
         for kind in sorted(by_kind):
             sources = sorted(set(by_kind[kind]))
             shown = ", ".join(f"{s:#x}" for s in sources[:limit])
@@ -171,7 +190,7 @@ def render_listing(image, rva, size, engine=None, names=None, comments=None):
         annotation = ""
         if refs:
             annotation = "  ; " + ", ".join(
-                f"{_kind_name(kind)}->{describe(target)}"
+                f"{kind_name(kind)}->{describe(target)}"
                 for target, kind in refs)
         if comments and insn_rva in comments:
             annotation += f"   ; {comments[insn_rva]}"
@@ -265,12 +284,18 @@ def render_indirect_sites(result, limit=40, calls_only=True):
 def render_summary(result):
     """The one-screen overview: what was found and how much to trust it."""
     stats = result.stats
+    kinds = ", ".join(kind_name(kind) for kind in result.ref_kinds())
     lines = [
         f"image            {result.image.mode} base {result.image.image_base:#x}",
         f"instructions     {stats.insns}",
         f"functions        {stats.func_starts} "
         f"({stats.func_starts_confident} confident)",
-        f"cross-references {stats.xrefs} over {stats.xref_targets} targets",
+        f"cross-references {stats.xrefs} over {stats.xref_targets} targets "
+        f"({stats.data_refs} from data slots)",
+        # Which kinds exist at all, not just how many there are. A kind that
+        # is declared and never produced reads as a clean zero everywhere else.
+        f"reference kinds  {kinds or '(none)'}"
+        f"{'' if result.xrefs_are_complete() else '  <- classes not collected'}",
         f"undecodable      {len(result.undecodable)}",
         # Both halves of the indirect story on one line. The resolved count
         # alone reads as progress even while most sites stay unknown.
