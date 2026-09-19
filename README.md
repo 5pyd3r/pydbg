@@ -90,6 +90,53 @@ dbg.step(h_thread)                    # 单步执行
 # 枚举模块
 for mod in dbg.enum_modules():
     print(f"  {mod['base_address']:016X}  {dbg.get_module_filename(mod['handle'])}")
+
+# 需要命令行参数的目标：直接在这里启动，而不是退回 attach()
+# （attach 会丢失全部启动期断点）。cmdline 原样传给 Win32，argv[0] 由调用方自备。
+dbg.create_process("scanner.exe", cmdline='"scanner.exe" scan "C:\\"')
+
+# 跑到某个地址：到达返回事件（目标停在该处），超预算抛 TimeoutError 而不是空转
+try:
+    event = dbg.run_until(0x00401000, max_wait_ms=5000)
+    print("已到达 0x401000，停在该处；用 continue_event() 继续")
+except TimeoutError:
+    print("预算内没跑到这条地址")
+```
+
+### 容错读取与内存区域
+
+`read_memory()` 遇到第一个不可读页就抛 `MemError`，并且**丢弃已经读到的部分**。
+重建镜像（dump / PE 还原）时这不可用，于是调用方各自手写逐页兜底。`read_memory_safe()`
+按区域步进，保留全部可读字节，不可读区间记进 `gaps`：
+
+```python
+r = dbg.read_memory_safe(module_base, 0x20000)
+if not r.complete:
+    for addr, size, err in r.gaps:
+        print(f"  读不到 {addr:#x}..{addr+size:#x} (win32 err {err})")
+data = r.data          # 长度恒为 size，空洞以 0 填充
+
+for region in dbg.enum_regions():
+    print(f"{region['base_address']:016X} {region['region_size']:>10} "
+          f"state={region['state']:#x} protect={region['protect']:#x}")
+```
+
+### 静默失效的两类状态
+
+这两件事都不会抛异常，也不会产生事件，所以库改为**可以问**：
+
+```python
+# 自解压 / 自修改目标会覆写自己的入口点，把 INT3 抹掉，断点从此不再触发
+for lost in dbg.verify_breakpoints():
+    print(f"断点 {lost['bp_id']} @ {lost['addr']:#x} 已被覆写，"
+          f"当前字节 {lost['found']!r}")
+
+# run() 的 max_idle_timeouts 把「目标空闲/被模态框挡住」与「目标在跑」区分开；
+# 超限抛 pydbg.exceptions.TimeoutError，不再无限空转。
+try:
+    dbg.run(on_event, max_idle_timeouts=3)
+except TimeoutError:
+    print("目标长时间没有任何调试事件")
 ```
 
 ### 插桩（Instrumentation）
@@ -163,7 +210,7 @@ while True:
 
 | 方法 | 说明 |
 |------|------|
-| `create_process(path)` | 以调试模式创建进程，返回 `(pid, tid)` |
+| `create_process(path, cmdline=None)` | 以调试模式创建进程，返回 `(pid, tid)` |
 | `attach(pid)` | 附加到运行中的进程 |
 | `detach(pid=None)` | 分离调试器（可指定子进程 pid） |
 | `terminate_process(exit_code=1, pid=None)` | 终止被调试进程（可指定子进程） |
@@ -171,7 +218,8 @@ while True:
 | `close_handle(h)` | 关闭 Win32 句柄 |
 | `wait_event(timeout_ms)` | 等待下一个调试事件，返回 `DebugEvent` 或 `None` |
 | `continue_event(pid, tid)` | 继续已暂停的调试事件 |
-| `run(callback, timeout_ms)` | 事件驱动调试循环，直到进程退出或回调返回 `False` |
+| `run(callback, timeout_ms, max_idle_timeouts=None)` | 事件驱动调试循环，直到进程退出或回调返回 `False`；`max_idle_timeouts` 超限抛 `TimeoutError` |
+| `run_until(addr, timeout_ms, max_wait_ms, max_idle_timeouts)` | 运行到指定地址；到达返回事件（目标停在该处），超预算抛 `TimeoutError` |
 | `set_debug_children(enabled=True)` | 开启/关闭子进程调试（必须在 create_process 前调用） |
 | `get_child_processes()` | 返回所有子进程信息 `dict[pid, ChildProcessInfo]` |
 | `get_child_process(pid)` | 返回指定子进程信息，或 `None` |
@@ -180,9 +228,11 @@ while True:
 
 | 方法 | 说明 |
 |------|------|
-| `read_memory(addr, size, pid=None)` | 读取进程内存（可指定子进程） |
+| `read_memory(addr, size, pid=None)` | 读取进程内存（可指定子进程）；任意不可读页即抛 `MemError` |
+| `read_memory_safe(addr, size, pid=None)` | 容错读取，返回 `MemoryRead`；保留可读部分，不可读区间记入 `gaps` |
 | `write_memory(addr, data, pid=None)` | 写入进程内存（可指定子进程） |
 | `query_memory(addr, pid=None)` | 查询内存区域信息（可指定子进程） |
+| `enum_regions(pid=None, start=0, max_addr=0)` | 按地址升序列举全部内存区域（含 free/reserve） |
 | `protect_memory(addr, size, protect, pid=None)` | 修改页面保护（可指定子进程） |
 
 **线程**
@@ -206,12 +256,14 @@ while True:
 | `set_hw_breakpoint(addr, condition, length, slot, tid=None)` | 设置硬件断点（默认进程级：作用于全部线程并复制到新线程；指定 tid 仅该线程） |
 | `remove_breakpoint(bp_id)` | 移除断点 |
 | `find_breakpoint(addr)` | 查找地址上的断点 |
+| `verify_breakpoints()` | 报告被目标覆写而失效的软件断点（返回 `[{bp_id, addr, found}]`） |
 
 **模块 / 异常**
 
 | 方法 | 说明 |
 |------|------|
-| `enum_modules(pid=None)` | 枚举已加载模块（可指定子进程） |
+| `enum_modules(pid=None)` | 枚举已加载模块（可指定子进程）；PSAPI 失败时回退到调试事件记录的镜像 |
+| `module_at(addr, pid=None)` | 返回包含该地址的模块，或 `None`；加载器断点期同样可用 |
 | `get_module_filename(h_module)` | 获取模块文件名 |
 | `exception_code_to_str(code)` | 异常码 → 名称 |
 | `get_exception_info(code, addr, ...)` | 解析异常详情 |

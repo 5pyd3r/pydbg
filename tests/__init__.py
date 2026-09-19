@@ -5,6 +5,10 @@ _TEST_DIR = os.path.dirname(os.path.abspath(__file__))
 _DEFAULT_TARGET = os.path.join(_TEST_DIR, 'target', 'simple_target.exe')
 TEST_TARGET_PATH = os.environ.get('TEST_TARGET_PATH', _DEFAULT_TARGET)
 
+# Target that records its own argv to a file, for create_process(cmdline=...).
+_DEFAULT_ARGV_TARGET = os.path.join(_TEST_DIR, 'target', 'argv_target.exe')
+TEST_ARGV_TARGET_PATH = os.environ.get('TEST_ARGV_TARGET_PATH', _DEFAULT_ARGV_TARGET)
+
 # Architecture-aware register name helpers
 HOST_ARCH = struct.calcsize("P") * 8  # 32 or 64
 IP_REG = "rip" if HOST_ARCH == 64 else "eip"

@@ -348,14 +348,22 @@ class TestFailureIsVisible(unittest.TestCase):
     """
 
     def test_run_raises_on_prolonged_idle(self):
-        """run() must give up when WaitForDebugEvent keeps timing out."""
+        """run() must give up when WaitForDebugEvent keeps timing out.
+
+        The exception is pydbg's own TimeoutError, not the builtin. This test
+        used to name the builtin because core.debugger raised it without ever
+        importing pydbg's — so the documented class (README, KNOWN_ISSUES, and
+        the pydbg __all__ export) was not the class callers actually got, and
+        `except pydbg.exceptions.TimeoutError` never fired.
+        """
         from unittest import mock
 
         from pydbg import Debugger
+        from pydbg.exceptions import TimeoutError as PydbgTimeoutError
 
         dbg = Debugger()
         with mock.patch.object(Debugger, "wait_event", return_value=None):
-            with self.assertRaises(TimeoutError):
+            with self.assertRaises(PydbgTimeoutError):
                 dbg.run(lambda e: None, timeout_ms=10, max_idle_timeouts=3)
 
     def test_run_idle_cap_is_optional(self):
