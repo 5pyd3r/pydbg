@@ -584,6 +584,29 @@ class TestRvaConversion(unittest.TestCase):
         offset = pe.rva_to_offset(0x99999)
         self.assertIsNone(offset)
 
+    def test_section_characteristics_survive_a_full_round_trip(self):
+        """The whole dword, not just its high half.
+
+        Characteristics used to be unpacked with one dword too many and a word
+        too few, so only the high 16 bits survived: 0x60000020 came back as
+        0x6000 and IMAGE_SCN_MEM_EXECUTE never matched. The fixtures construct
+        SectionHeader directly, which is why nothing caught it — this goes
+        through the parser from raw bytes.
+        """
+        from tests.pe_builder import PEBuilder
+
+        builder = PEBuilder(magic=0x10B, image_base=0x400000, entry_rva=0x1000)
+        builder.add_section(".text", b"\xc3", 0x1000,
+                            characteristics=0x60000020)
+        builder.add_section(".data", b"\x00" * 4, 0x2000,
+                            characteristics=0xC0000040)
+
+        from pydbg.pe import PE as PEFacade
+        pe = PEFacade(builder.build())
+        by_name = {section.name: section.characteristics for section in pe.sections}
+        self.assertEqual(by_name[".text"], 0x60000020)
+        self.assertEqual(by_name[".data"], 0xC0000040)
+
 
 class TestFileViewRawSizeGuard(unittest.TestCase):
     """A section's in-memory extent can exceed what the file stores.

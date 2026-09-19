@@ -135,8 +135,16 @@ class PEParser:
             sec_data = self._src.read(sec_offset, 40)
             raw_name = struct.unpack_from('<8s', sec_data, 0)[0]
             name = raw_name.split(b'\x00', 1)[0].decode('ascii', errors='replace')
+            # IMAGE_SECTION_HEADER after the name: six dwords, two words
+            # (NumberOfRelocations, NumberOfLinenumbers), then the
+            # Characteristics DWORD. The format used to be '<IIIIIIIHH' — one
+            # dword too many and a word too few — which left Characteristics
+            # holding only its high 16 bits: 0x60000020 came back as 0x6000, so
+            # IMAGE_SCN_MEM_EXECUTE never matched and every section looked
+            # non-executable. docs/KNOWN_ISSUES.md records this being fixed in
+            # #9; it was fixed in the test fixtures, not here.
             vs, va, rs, rp, _, _, _, _, chars = struct.unpack_from(
-                '<IIIIIIIHH', sec_data, 8)
+                '<IIIIIIHHI', sec_data, 8)
             sections.append(SectionHeader(
                 name=name, virtual_size=vs, virtual_address=va,
                 size_of_raw_data=rs, pointer_to_raw_data=rp,
