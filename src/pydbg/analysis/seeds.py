@@ -27,16 +27,28 @@ _ADDRESS_RELOCS = frozenset((REL_BASED_HIGHLOW, REL_BASED_DIR64))
 _PAD_BYTES = frozenset((0x90, 0xCC, 0xC3, 0xC2, 0x00))
 
 
-def looks_like_entry(image, rva, is_call_target=False):
+def looks_like_entry(image, rva, is_call_target=False, decoder=None):
     """Whether 'rva' plausibly begins a function.
 
-    Deliberately weak, and named so: a call target is taken on trust (something
-    calls it), and otherwise the byte before has to be padding, a return, or an
-    int3. It admits a great deal that is not a function entry, which is why the
-    seeds it filters are recorded as tentative rather than confident.
+    Two kinds of evidence, and the second is much stronger than the first:
+
+      - a call target is taken on trust, since something calls it;
+      - otherwise the byte before has to be padding, a return or an int3.
+
+    The byte test is weak on purpose and named so. Its real error surface was
+    the addresses it admitted *inside* an instruction the analysis had already
+    decoded — a pointer landing two bytes into a `mov` is not a function
+    entry, and nothing about the preceding byte says so. Passing 'decoder'
+    settles that outright: an address strictly inside a decoded instruction is
+    rejected regardless of what precedes it.
+
+    Without a decoder the answer is the old, weaker one. Callers that have one
+    should pass it, which is all of the analysis.
     """
     if is_call_target:
         return True
+    if decoder is not None and decoder.enclosing_instruction(rva) not in (None, rva):
+        return False
     section = image.section_of(rva)
     if section is None:
         return False
@@ -78,18 +90,36 @@ class SeedSet:
 class SeedProvider:
     """Collects every seed class an image can offer."""
 
+    # Every class, so a caller can ask for all or name an exclusion.
+    CLASSES = ("entry_point", "exports", "tls_callbacks", "exception_table",
+               "relocation_pointers", "data_pointers")
+
     def __init__(self, image, max_data_pointers=200_000):
         self.image = image
         self.max_data_pointers = max_data_pointers
 
-    def collect(self):
+    def collect(self, enabled=None):
+        """Collect seeds, optionally from a subset of the classes.
+
+        'enabled' defaults to all of them. Naming a subset is how one class's
+        contribution gets measured — which is otherwise only answerable by
+        editing the code, and that is how the question "is this class earning
+        its keep" goes unasked.
+        """
+        classes = self.CLASSES if enabled is None else tuple(enabled)
         seeds = SeedSet()
-        self._entry_point(seeds)
-        self._exports(seeds)
-        self._tls_callbacks(seeds)
-        self._exception_table(seeds)
-        self._relocation_pointers(seeds)
-        self._data_pointers(seeds)
+        if "entry_point" in classes:
+            self._entry_point(seeds)
+        if "exports" in classes:
+            self._exports(seeds)
+        if "tls_callbacks" in classes:
+            self._tls_callbacks(seeds)
+        if "exception_table" in classes:
+            self._exception_table(seeds)
+        if "relocation_pointers" in classes:
+            self._relocation_pointers(seeds)
+        if "data_pointers" in classes:
+            self._data_pointers(seeds)
         return seeds
 
     # ── exact classes ──────────────────────────────────────────

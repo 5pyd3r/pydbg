@@ -52,6 +52,9 @@ class StaticAnalyzer:
         self._stack_ids = frozenset()
 
         self.stats = AnalysisStats()
+        # Set here as well as in run(), so a caller driving sweeps directly
+        # (tests do) is not depending on run() having gone first.
+        self._budget_left = self.config.max_total_instructions
         self._pending = []
         self._queued = set()
         self._xref_targets = set()
@@ -64,7 +67,7 @@ class StaticAnalyzer:
 
     def run(self):
         """Seed, sweep to a fixpoint, and return the result."""
-        seeds = SeedProvider(self.image).collect()
+        seeds = SeedProvider(self.image).collect(self.config.seed_classes)
         self.stats.seed_functions = len(seeds.confident)
 
         # Which class produced each seed, so a sweep can be attributed to its
@@ -89,8 +92,16 @@ class StaticAnalyzer:
             self.stats.sweep_rounds += 1
             batch, self._pending = self._pending, []
             for rva, origin in batch:
+                if self._budget_left <= 0:
+                    self.stats.budget_exhausted = True
+                    self._pending = []
+                    break
                 self._sweep_from(rva, origin)
 
+        # Only once every trusted start is known: the check is about one
+        # start falling inside another, which cannot be answered while the
+        # traversal is still discovering them.
+        self.stats.pruned_starts = self.functions.prune_starts_inside_functions()
         self.functions.invalidate()
         self._finish_stats()
         return AnalysisResult(
@@ -160,7 +171,7 @@ class StaticAnalyzer:
         """
         if insn.is_call:
             self._enqueue(target, confident=True, origin=origin)
-        elif looks_like_entry(self.image, target):
+        elif looks_like_entry(self.image, target, decoder=self.decoder):
             self._enqueue(target, confident=False, origin=origin)
         else:
             self._enqueue_code_seed(target, origin=origin)
@@ -201,7 +212,11 @@ class StaticAnalyzer:
         bytes and inflate the overlap count — the very number that is supposed
         to measure how much of the decode is untrustworthy.
         """
-        budget = budget or self.config.max_instructions
+        # Bounded by both the per-sweep limit and what is left of the
+        # whole-run ceiling.
+        budget = min(budget or self.config.max_instructions,
+                     self._budget_left)
+        granted = budget
         tracker = ConstantTracker(self.image)
         addr = start
 
@@ -254,6 +269,13 @@ class StaticAnalyzer:
 
             addr += insn.size
 
+        self._budget_left -= granted - max(budget, 0)
+        if budget <= 0:
+            # The sweep ran out rather than finishing: whatever it was
+            # following is now half-traversed, and saying so is the whole point
+            # of the ceiling. A run that stopped early and reported nothing
+            # would read as a complete analysis of a small binary.
+            self.stats.budget_exhausted = True
         return budget
 
     def _note_access(self, rva, insn):

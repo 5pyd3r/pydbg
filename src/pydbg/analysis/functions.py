@@ -55,6 +55,60 @@ class FunctionTable:
         self._sorted = None
         self._extents = None
 
+    def prune_starts_inside_functions(self):
+        """Demote tentative starts that fall inside a trusted function.
+
+        This is the error surface `looks_like_entry` cannot close by itself.
+        That filter reads the byte before an address, and for a pointer that
+        lands in the middle of a function it is often padding by coincidence —
+        an alignment gap the linker left between two real functions the pointer
+        happens to point past.
+
+        A start inside a function the analysis already has *evidence* for is
+        not a second function, whatever precedes it. The address stays decoded
+        (it is moved to code seeds), because something did point at it; what it
+        loses is the claim to be a function entry.
+
+        Returns the number demoted.
+        """
+        from bisect import bisect_right
+
+        trusted = sorted(self.confident)
+        if not trusted:
+            return 0
+
+        # Where each trusted function ends: the next trusted start, or the
+        # furthest byte its own instructions claim, whichever comes first.
+        claimed = {}
+        for rva, size in self._claimed.items():
+            owner_index = bisect_right(trusted, rva) - 1
+            if owner_index < 0:
+                continue
+            owner = trusted[owner_index]
+            claimed[owner] = max(claimed.get(owner, 0), rva + size)
+
+        demoted = 0
+        for rva in sorted(self.starts):
+            if rva in self.confident:
+                continue
+            index = bisect_right(trusted, rva) - 1
+            if index < 0:
+                continue
+            owner = trusted[index]
+            next_start = (trusted[index + 1] if index + 1 < len(trusted)
+                          else None)
+            end = claimed.get(owner, owner)
+            if next_start is not None:
+                end = min(end, next_start)
+            if rva < end:
+                self.starts.discard(rva)
+                self.code_seeds.add(rva)
+                demoted += 1
+
+        if demoted:
+            self.invalidate()
+        return demoted
+
     # ── queries ────────────────────────────────────────────────
 
     @property

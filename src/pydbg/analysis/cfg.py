@@ -52,6 +52,10 @@ class FunctionCFG:
     # into the successors.
     indirect_calls: tuple = ()
     truncated: bool = False      # hit the block limit before finishing
+    # Why it stopped, when it did. A function that genuinely has thousands
+    # of blocks and one that walked into a data region look identical from
+    # the block count alone, and they call for opposite responses.
+    truncated_reason: str = None
 
     def __len__(self):
         return len(self.blocks)
@@ -102,6 +106,7 @@ def build_function_cfg(decoder, image, functions, entry, max_blocks=4096):
         if len(cfg.blocks) >= max_blocks:
             cfg.truncated = True
             cfg.complete = False
+            cfg.truncated_reason = 'block_limit'
             break
         visited.add(start)
 
@@ -115,6 +120,7 @@ def build_function_cfg(decoder, image, functions, entry, max_blocks=4096):
                 # ending the block as though that were the end of the function.
                 successors.append((FALL, None))
                 cfg.complete = False
+                cfg.truncated_reason = cfg.truncated_reason or 'undecoded'
                 break
 
             instructions.append(addr)

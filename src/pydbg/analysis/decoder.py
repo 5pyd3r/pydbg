@@ -151,6 +151,25 @@ class InstructionDecoder:
             else:
                 self._covered[offset] = 1
 
+    def enclosing_instruction(self, rva):
+        """The RVA of the decoded instruction covering 'rva', or None.
+
+        Returns 'rva' itself when an instruction starts there. The distinction
+        is what makes this useful as a filter: an address strictly inside
+        another instruction cannot begin a function, and no property of the
+        bytes around it reveals that — only the decode does.
+        """
+        if self.is_decoded(rva):
+            return rva
+        for back in range(1, 16):        # the longest x86 instruction
+            start = rva - back
+            if start < 0:
+                break
+            size = self._size_at[start]
+            if size and start + size > rva:
+                return start
+        return None
+
     def origin_of_byte(self, offset):
         """Which seed class decoded the instruction covering 'offset'."""
         for back in range(1, 16):        # the longest x86 instruction

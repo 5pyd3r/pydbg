@@ -75,7 +75,10 @@ class TestTraversalRules(unittest.TestCase):
         code = b"\x75\x02" + RET + NOP + RET
         result = self.analyze(code)
 
-        self.assertIn(0x1004, result.functions.starts, "branch target missed")
+        # "Reached", not "a function starts here": a branch target inside
+        # its own function is decoded as a code seed, not an entry.
+        self.assertTrue(result.decoder.is_decoded(0x1004),
+                        "branch target was never decoded")
         self.assertEqual(result.coverage[".text"].covered, 4)
 
     def test_call_does_not_inline_the_callee(self):
@@ -110,7 +113,9 @@ class TestTraversalRules(unittest.TestCase):
         # 0x1000: jmp 0x1004 (eb 02)  0x1002: nop (skipped)  0x1004: ret
         code = b"\xeb\x02" + NOP + NOP + RET
         result = self.analyze(code)
-        self.assertIn(0x1004, result.functions.starts)
+        # Reached, not "a function starts here": the target is inside the
+        # function it belongs to, so it is decoded as a code seed.
+        self.assertTrue(result.decoder.is_decoded(0x1004))
         self.assertEqual(result.coverage[".text"].covered, 3)
 
     def test_the_traversal_terminates(self):
