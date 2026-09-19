@@ -122,6 +122,16 @@ pushed every caller into hand-rolling a workaround. Recorded in
   "reached and quiet". Both now exist; `run_until` raises `TimeoutError`
   carrying the last instruction pointer.
 
+One coupling this broke, worth remembering: `tests/test_wow64.py::_launch` used
+`enum_modules()` **raising** `ERROR_PARTIAL_COPY` as its signal that the loader
+had not yet mapped the 32-bit image — it was reading the bug as a feature, and
+so the sequencing of the WOW64 tests depended on it. The event-table fallback
+removed the raise and the helper broke out of its loop one loader breakpoint
+too early. It now asks PSAPI explicitly — `enumerate_handle()` without
+`allow_event_fallback` — instead of inferring from a failure. Note that "the
+image's PE header is readable" is *not* a substitute: that becomes true long
+before PSAPI will report the module.
+
 Two bugs were found in the same code while fixing these:
 
 - `create_process()` passed the path to `CreateProcessA` as UTF-8 into an ANSI
