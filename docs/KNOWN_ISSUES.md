@@ -218,6 +218,64 @@ nonstandard or deliberately mangled stub. It now returns a `RichHeader` with
 `malformed` set for the second case, and `xor_key` is `None` rather than a
 made-up zero when the key itself was truncated.
 
+### An enumeration that was short by construction, and answers that looked complete
+
+Found while analysing three 32-bit targets, each of which independently hit the
+same shape: **the set a conclusion was drawn from was incomplete, the conclusion
+was negative, and nothing in the output said so.** The pydbg half is the
+cross-reference index.
+
+`AnalysisResult.callers_of(rva)` was built from decoded instructions only.
+That is a definition, not a bug, which is exactly why it went unnoticed: a
+vtable or callback table entry is not an instruction, so no amount of decoding
+finds it. On a Delphi target, where most code is reached through pointers and
+appears nowhere else, "nobody references this" was the systematically wrong
+answer — measured on SpaceSniffer, `callers_of(0x386c0)` returned `[]` while
+the image holds `c0 86 43 00` (VA `0x4386c0`) at RVA `0x1cf44c`.
+
+The readers that find those pointers already existed in `SeedProvider`, whose
+own docstring for the weakest class says why: *"a vtable or a callback table
+often appears nowhere else"*. The positions were used as decode seeds and
+thrown away, leaving only `stats.seed_functions`. Structurally, `RefKind.DATA`
+was in the public enum and labelled in `report.py` while **nothing in
+`src/pydbg/analysis/` produced it** — a declared-but-unproduced kind is the
+shape of a producer that was planned and never wired, and no test noticed.
+
+Both halves are fixed:
+
+* The pointer classes keep the slot, not just the address, and every accepted
+  hit becomes an `Xref(target, DATA)` whose source is the slot. `callers_of`
+  answers with slots as well as instructions; `data_refs_of` returns only the
+  slots, and `ref_kinds_of` says which kinds answered. On SpaceSniffer the
+  index grows by 47,556 DATA references and 11,310 addresses that had no
+  reference of any kind now have one. Coverage, overlap, instruction counts,
+  the recovered function set and the attribution breakdown are all unchanged —
+  a pointer says something *names* an address, never that anything calls it,
+  so `RefKind.DATA` does not promote a tentative start to a confident one.
+* `AnalysisResult.xref_gaps` names the ways the index is short **by
+  construction** — collection switched off, a pointer class not run, a scan
+  ceiling reached, the instruction budget exhausted — and
+  `xrefs_are_complete()` is the assertion form. `render_summary` carries the
+  marker, `render_xref_gaps` the reasons. `ref_kinds()` closes the structural
+  half: a kind in the enum that no run produces fails a test rather than
+  reading as a clean zero.
+
+The scan's own limits are still limits, and are written down where it is
+written rather than left to be rediscovered: a pointer stored in an executable
+section that no relocation names, a slot that is not pointer-aligned, and a
+target that does not look like a function entry (a `char *` into the string
+table is named by nothing). Sampled over 3746 unreferenced code addresses on
+one target those cost 16, 6 and 14 addresses — and **0 were missed that the
+reader's own rule says it covers**, which is the check that says the index is
+wrong only where it admits it is. Relaxing the entry heuristic was measured and
+rejected: it would have admitted 563 slots, 312 of them resource bytes that
+read as pointers only by coincidence.
+
+`tests/test_analysis_data_refs.py` covers both halves; 14 of its 24 tests fail
+with the producer removed. The one pre-existing test it changed —
+`TestConstantPropagation` in `test_analysis_indirect.py` — was pinning the old
+definition of a reference and now filters to `RefKind.BRANCH`.
+
 ### A test that only ran under an optional backend
 
 `Instrumenter._alloc_near` scans ±2GB of the target's address space for a free

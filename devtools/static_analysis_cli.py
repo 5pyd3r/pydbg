@@ -12,6 +12,8 @@ how those numbers get compared by hand:
     python devtools/static_analysis_cli.py list    target.exe --at 0x401000 --size 64
     python devtools/static_analysis_cli.py dot     target.exe --at 0x401000
     python devtools/static_analysis_cli.py seeds   target.exe
+    python devtools/static_analysis_cli.py callers target.exe --target 0x401000
+    python devtools/static_analysis_cli.py gaps    target.exe
 
 Everything is printed in a stable order so two runs can be diffed.
 """
@@ -57,14 +59,30 @@ def cmd_xref(args):
 
 
 def cmd_callers(args):
-    """Who calls a function, by name of the function that contains the site."""
+    """Who calls a function, by name of the function that contains the site.
+
+    The kinds are printed with the count because a reference from a data slot
+    is not a call and there is no function containing it. A number that mixes
+    the two without saying so invites the reading that a vtable entry is a
+    call site.
+    """
     result = analyze_file(args.image)
     callers = result.callers_of(args.target)
-    print(f"{args.target:#x} called from {len(callers)} site(s)")
+    kinds = ", ".join(report.kind_name(kind)
+                      for kind in result.ref_kinds_of(args.target))
+    print(f"{args.target:#x} referenced from {len(callers)} site(s) "
+          f"[{kinds or 'nothing'}]")
     for site in callers:
         owner = result.functions.containing(site)
         where = f" (in {owner:#x})" if owner is not None else ""
         print(f"    {site:#010x}{where}")
+    return 0
+
+
+def cmd_gaps(args):
+    """What the reference index is known to be missing."""
+    result = analyze_file(args.image)
+    print(result.render_xref_gaps())
     return 0
 
 
@@ -217,6 +235,7 @@ def build_parser():
     indirect.add_argument("--limit", type=int, default=40)
     indirect.add_argument("--all", action="store_true",
                           help="include unresolved jumps, not just calls")
+    add("gaps", cmd_gaps)
     add("cfg", cmd_cfg, target_dest="at")
     add("dot", cmd_dot, target_dest="at")
 
