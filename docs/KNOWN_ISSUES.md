@@ -88,21 +88,42 @@ Two things to know about the current setup:
   it the error is `re-building the pydbg meson-python editable wheel package
   failed`, which points away from the actual cause.
 
-Two traps that bite when rebuilding in a checkout that has been built before,
-both of which surface as misleading errors:
+**The shadow is gone.** A `.pyd` sitting next to the package sources wins over
+the editable loader, so a copy at `src/pydbg/_pydbg*.pyd` silently replaced the
+compiled module the loader would have mapped. Two things put it there:
+`scripts/build_venv.py`, which copied the built extension into `src/pydbg/` so
+the package was importable without installing it, and `rebuild-install.ps1`,
+which refreshed that copy in place.
 
-- **`src/pydbg/_pydbg.cp314-win_amd64.pyd` shadows the editable build.** It is
-  placed there by `scripts/build_venv.py` and gitignored, so it is easy to forget.
-  An out-of-date copy makes the import fail with
-  `cannot import name 'STATUS_WX86_BREAKPOINT'` — which reads like a broken build,
-  when the fresh build is fine and merely hidden. Copy the newly built extension
-  from `build/cp314/src/pydbg/cython/` over it.
+Both are now removed, because the copy was never needed. With it deleted,
+`_pydbg` resolves to `build/cp314/src/pydbg/cython/_pydbg.cp314-win_amd64.pyd`
+— the editable build's own output — and `import pydbg` works with every symbol
+present. The editable loader maps the compiled module exactly as it maps the
+Python one; the copy only ever hid the real extension, and went stale after any
+Cython change. `scripts/build_venv.py` is deleted and `rebuild-install.ps1`
+deletes any stray it finds rather than refreshing it, then asserts the resolved
+path is under `build/`.
+
+That last distinction matters: the old verify asserted the loaded extension was
+**byte-identical to a copy the script had just written**, which is a check that
+cannot fail while the script keeps making the copy. The new one asserts
+**where the module came from**, which is the property that was actually wrong.
+
+It is also enforced by `tests/test_comprehensive.py::TestNoBuildOutputInThePackage`,
+because this coupling was recorded as fixed three separate times while a copy
+survived somewhere. The invariant is worth stating plainly: **nothing under
+version control may hold a build output** — the editable loader turns that from
+a style rule into a correctness one. (`*.pyd` is gitignored, which is exactly
+why the stray never showed up in `git status`.)
+
+One trap remains, and it surfaces as a misleading error:
+
 - **A stale `build/cp314/` from a 32-bit build** fails the link with
   `LNK1112: module machine type 'x64' conflicts with target machine type 'x86'`.
   Remove `build/cp314` and reconfigure.
 
-Neither is visible from the source tree. Both are caught by importing the
-*installed* package with a bare interpreter, which is what the verify step in
+It is not visible from the source tree; importing the *installed* package with a
+bare interpreter is what catches it, which is what the verify step in
 `devtools/rebuild-install.ps1` does.
 
 ### Dynamic-analysis gaps (found by the same three analysis sessions)
