@@ -10,11 +10,57 @@ class SoftwareBreakpointManager:
     # Memory protection constants
     _PAGE_EXECUTE_READWRITE = 0x40
 
+    _INT3 = b"\xcc"
+
     def __init__(self, session):
         self._s = session
         # Diagnostics for hits we could not complete (see handle_breakpoint_hit).
         self.last_error = None
         self.degraded_hits = 0
+        # bp_ids whose INT3 is no longer in the target (see verify()).
+        self.lost = set()
+
+    def verify(self, bp_id):
+        """Check that the INT3 byte is still in the target. True if intact.
+
+        A software breakpoint is one byte the target can overwrite. Self-
+        unpacking code does exactly that by design — one analysis session had
+        the OEP overwritten by the unpacker's own output, and the breakpoint
+        simply stopped firing with nothing said. There is no event to hang
+        detection on, so the state is answerable on request instead of silent.
+        """
+        bp_info = self._s.breakpoints.get(bp_id)
+        if bp_info is None or bp_info[0] != "int3":
+            raise BreakpointError(f"No software breakpoint {bp_id} to verify")
+
+        addr = bp_info[1]
+        h_process = bp_info[3] if len(bp_info) > 3 else self._s.process_handle
+        try:
+            found = _pydbg.read_process_memory(h_process, addr, 1)
+        except OSError as e:
+            self.last_error = e
+            self.lost.add(bp_id)
+            return False
+
+        if found == self._INT3:
+            self.lost.discard(bp_id)
+            return True
+        self.lost.add(bp_id)
+        return False
+
+    def verify_all(self):
+        """Verify every software breakpoint; return the lost bp_ids.
+
+        Result is ascending by bp_id so it reads the same as the breakpoints
+        were created.
+        """
+        lost = []
+        for bp_id, bp_info in list(self._s.breakpoints.items()):
+            if bp_info[0] != "int3":
+                continue
+            if not self.verify(bp_id):
+                lost.append(bp_id)
+        return sorted(lost)
 
     def remove(self, bp_id):
         if bp_id not in self._s.breakpoints:
@@ -26,10 +72,14 @@ class SoftwareBreakpointManager:
                 f"Breakpoint {bp_id} is not a software breakpoint (type={bp_info[0]})"
             )
         del self._s.breakpoints[bp_id]
+        self.lost.discard(bp_id)
 
         addr = bp_info[1]
         original = bp_info[2]
         h_process = bp_info[3] if len(bp_info) > 3 else self._s.process_handle
+        # Restoring the original byte is right even if the target overwrote it
+        # in the meantime: the caller asked for the breakpoint to be gone, and
+        # the byte we put back is the one we displaced.
         self._restore_byte_handle(h_process, addr, original)
 
     def set_handle(self, h_process, addr):

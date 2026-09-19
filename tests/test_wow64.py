@@ -37,8 +37,7 @@ def _launch(dbg, target=None, run=False):
     (EXCEPTION_BREAKPOINT=0x80000003) fires in the 64-bit bootstrap BEFORE the
     32-bit image is mapped, the second (STATUS_WX86_BREAKPOINT=0x4000001F)
     fires in 32-bit ntdll AFTER the image is loaded — until the target's main()
-    is running, so a software breakpoint set afterwards actually fires. The
-    target's own module becomes enumerable after the first breakpoint.
+    is running, so a software breakpoint set afterwards actually fires.
     """
     from pydbg.exceptions import MemError
 
@@ -72,18 +71,34 @@ def _launch(dbg, target=None, run=False):
                 break
             continue
         try:
-            if _module_by_name(dbg, basename):
-                saw_image = True
+            mod = _module_by_name(dbg, basename, psapi_only=True)
         except MemError:
-            # Enumeration transiently fails (ERROR_PARTIAL_COPY=299) during
-            # the earliest bootstrap events; just keep consuming.
-            pass
+            # EnumProcessModulesEx fails with ERROR_PARTIAL_COPY (299) until
+            # the loader has mapped the 32-bit image; that transient failure
+            # is the signal this loop is built on, so keep consuming.
+            continue
+        if mod is not None:
+            saw_image = True
     return pid, tid
 
 
-def _module_by_name(dbg, basename):
-    """Return module dict by basename (case-insensitive) or None."""
-    for m in dbg.enum_modules():
+def _module_by_name(dbg, basename, psapi_only=False):
+    """Return module dict by basename (case-insensitive) or None.
+
+    psapi_only drops the debug-event fallback, so the answer reflects only
+    what EnumProcessModulesEx can see. _launch(run=True) needs that: it uses
+    "PSAPI can now see the 32-bit image" as its cue that the 64-bit bootstrap
+    phase is over, and the event table knows the image base from CREATE_PROCESS
+    long before that, which would break out of the loop far too early.
+
+    Note the image's PE header is readable well before PSAPI reports it, so
+    "mapped" is not a substitute for this signal.
+    """
+    if psapi_only:
+        modules = dbg.modules.enumerate_handle(dbg._session.process_handle)
+    else:
+        modules = dbg.enum_modules()
+    for m in modules:
         if m.get("name", "").split("\\")[-1].lower() == basename.lower():
             return m
     return None

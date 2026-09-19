@@ -39,6 +39,45 @@ class DebugSession:
     pid_arch: dict = field(default_factory=dict)   # pid -> target_arch (32/64)
     tid_arch: dict = field(default_factory=dict)   # tid -> target_arch
 
+    # Modules observed through debug events: pid -> {base_address: record}.
+    # CREATE_PROCESS and LOAD_DLL name every image the loader maps, with no
+    # syscall and no dependence on the process being far enough along for
+    # EnumProcessModulesEx — which is the whole point, because that call fails
+    # with ERROR_PARTIAL_COPY while the target sits on the loader breakpoint.
+    loaded_modules: dict = field(default_factory=dict)
+
+    def record_module(self, pid, base_address, handle=0):
+        """Record an image seen in a debug event. Idempotent per (pid, base).
+
+        Only the base address (and its HMODULE alias) is known here; arch, size
+        and name are resolved lazily by ModuleResolver, which owns the PE
+        reads. Returns the record, or None if no base address was given.
+        """
+        if not base_address or pid is None:
+            return None
+        mods = self.loaded_modules.setdefault(pid, {})
+        rec = mods.get(base_address)
+        if rec is None:
+            rec = {
+                'handle': handle or base_address,
+                'base_address': base_address,
+                'name': '',
+                'size': 0,
+                'arch': 'unknown',
+                'source': 'events',
+            }
+            mods[base_address] = rec
+        return rec
+
+    def modules_for(self, pid):
+        """Event-observed modules for 'pid', ascending by base address."""
+        if pid is None:
+            return []
+        mods = self.loaded_modules.get(pid)
+        if not mods:
+            return []
+        return [mods[base] for base in sorted(mods)]
+
     def register_pid_arch(self, pid, arch):
         """Record the architecture (32/64) of a process by pid."""
         self.pid_arch[pid] = arch

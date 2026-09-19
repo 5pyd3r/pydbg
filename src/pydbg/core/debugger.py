@@ -1,5 +1,7 @@
 """Debugger — high-level debugging API with composition pattern."""
 
+import time
+
 from .. import _pydbg
 from ..breakpoint.hardware import HardwareBreakpointManager
 from ..disasm.engine import DisasmEngine
@@ -13,6 +15,7 @@ from ..exceptions import (
     BreakpointError,
     ProcessError,
     ThreadError,
+    TimeoutError,
 )
 from ..memory.manager import MemoryManager
 from ..module.resolver import ModuleResolver
@@ -59,10 +62,21 @@ class Debugger:
             )
         self._session.debug_children = enabled
 
-    def create_process(self, path):
+    def create_process(self, path, cmdline=None):
+        """Start 'path' under debug control. Returns (pid, tid).
+
+        Args:
+            path: Executable to start.
+            cmdline: Optional command line. Without it the process is started
+                with 'path' as its command line. With it, 'path' names the
+                image and 'cmdline' is passed verbatim — argv[0] included, so
+                the caller owns that convention. Targets configured by argument
+                can then be started here instead of forcing attach(), which
+                loses every startup-time breakpoint.
+        """
         try:
             pid, tid, h_proc, h_thr = _pydbg.create_process(
-                path, self._session.debug_children
+                path, self._session.debug_children, cmdline
             )
         except OSError as e:
             raise ProcessError(f"Failed to create process: {e}")
@@ -211,6 +225,17 @@ class Debugger:
         if (event.type == "EXIT_PROCESS"
                 and event.pid in self._session.child_processes):
             self._unregister_child(event)
+
+        # Record image bases as the loader reports them. An HMODULE is the
+        # module's base address, so the base doubles as the handle. This table
+        # is what module_at() reads; it is the only module information
+        # available before the loader finishes, when PSAPI refuses to answer.
+        if event.type == "CREATE_PROCESS":
+            self._session.record_module(
+                event.pid, event.raw.get("base_of_image", 0))
+        elif event.type == "LOAD_DLL":
+            self._session.record_module(
+                event.pid, event.raw.get("dll_base", 0))
 
         # Track per-thread architecture so cross-arch children resolve the
         # correct register context.
@@ -391,6 +416,121 @@ class Debugger:
 
         return exit_code
 
+    def _current_ip(self):
+        """Best-effort instruction pointer of the session's default thread."""
+        if not self._session.tid:
+            return None
+        try:
+            regs = self.get_registers(self._session.tid)
+        except Exception:
+            return None
+        return regs.get("rip") or regs.get("eip")
+
+    def _unreached(self, addr, reason):
+        """TimeoutError saying the target never got to 'addr', and where it is."""
+        ip = self._current_ip()
+        where = f"last instruction pointer 0x{ip:X}" if ip else "no instruction pointer available"
+        return TimeoutError(f"did not reach 0x{addr:X}: {reason} ({where})")
+
+    def run_until(self, addr, timeout_ms=10000, max_wait_ms=60000,
+                  max_idle_timeouts=None):
+        """Run until execution reaches 'addr', or give up after a budget.
+
+        Answers "did the target get there?" with a definite yes or no. The
+        previous answer was a wall-clock guess: a run that printed nothing for
+        210s could not be told apart from one that had reached the address and
+        was merely quiet.
+
+        A temporary breakpoint is placed at 'addr' and removed on the way out;
+        if the caller already has one there, theirs is reused and left alone.
+        The caller's other software breakpoints met along the way are stepped
+        over transparently — the same treatment run() gives a callback that
+        returns None.
+
+        On success the target is left PAUSED at 'addr', with the original
+        instruction in place (the INT3 has been removed and the instruction
+        pointer rewound), so registers can be inspected. Resume it with
+        continue_event().
+
+        Args:
+            addr: Address to run to.
+            timeout_ms: WaitForDebugEvent timeout for each individual wait.
+            max_wait_ms: Total wall-clock budget for the whole run.
+            max_idle_timeouts: As for run() — how many consecutive empty waits
+                to tolerate before calling it wedged. None disables the check.
+
+        Returns:
+            The DebugEvent delivered at 'addr'.
+
+        Raises:
+            TimeoutError: the target did not reach 'addr' within the budget, or
+                exited first. The message carries the last instruction pointer.
+            BreakpointError: a breakpoint hit could not be completed.
+        """
+        own_bp = None
+        if self.find_breakpoint(addr) is None:
+            own_bp = self.set_breakpoint(addr)
+
+        deadline = time.monotonic() + max_wait_ms / 1000.0
+        idle = 0
+        try:
+            while True:
+                remaining_ms = int((deadline - time.monotonic()) * 1000)
+                if remaining_ms <= 0:
+                    raise self._unreached(
+                        addr, f"{max_wait_ms} ms budget elapsed")
+
+                event = self.wait_event(min(timeout_ms, remaining_ms))
+                if event is None:
+                    idle += 1
+                    if max_idle_timeouts is not None and idle >= max_idle_timeouts:
+                        raise self._unreached(
+                            addr,
+                            f"no debug event for {idle} consecutive waits")
+                    continue
+                idle = 0
+
+                if event.type == "EXCEPTION":
+                    code = event.exception_code
+                    hit_addr = event.exception_addr
+
+                    if code in (_pydbg.EXCEPTION_BREAKPOINT,
+                                _pydbg.STATUS_WX86_BREAKPOINT):
+                        degraded = self.brk_sw.degraded_hits
+                        handled = self.brk_sw.handle_breakpoint_hit(
+                            event.tid, hit_addr)
+                        if self.brk_sw.degraded_hits != degraded:
+                            raise BreakpointError(
+                                f"breakpoint at 0x{hit_addr:X} (tid {event.tid}) "
+                                f"could not be completed: "
+                                f"{self.brk_sw.last_error}. The instruction "
+                                f"pointer was not rewound, so resuming would "
+                                f"execute from the middle of an instruction.")
+                        if handled:
+                            if hit_addr == addr:
+                                return event
+                            self.continue_event(event.pid, event.tid)
+                            continue
+                    elif code in (_pydbg.EXCEPTION_SINGLE_STEP,
+                                  _pydbg.STATUS_WX86_SINGLE_STEP):
+                        if self.brk_sw.handle_single_step(event.tid):
+                            self.continue_event(event.pid, event.tid)
+                            continue
+
+                if event.type == "EXIT_PROCESS":
+                    code = event.raw.get("exit_code", 1)
+                    self.continue_event(event.pid, event.tid)
+                    raise self._unreached(
+                        addr, f"the process exited first with code {code}")
+
+                self.continue_event(event.pid, event.tid)
+        finally:
+            if own_bp is not None:
+                try:
+                    self.remove_breakpoint(own_bp)
+                except BreakpointError:
+                    pass  # already gone (target overwrote it, or user removed it)
+
     def handle_bp_manual(self, tid, addr):
         """Manually handle breakpoint hit when using wait_event()/continue_event().
 
@@ -446,11 +586,49 @@ class Debugger:
         h = self._get_process_handle(pid)
         return self.memory.protect_handle(h, addr, size, protect)
 
+    def read_memory_safe(self, addr, size, pid=None):
+        """Read memory without losing the readable parts of the range.
+
+        read_memory() raises on the first unreadable page and discards what it
+        already copied, so dumping memory or rebuilding an image around an
+        uncommitted page used to need a hand-rolled page-by-page fallback.
+
+        Returns a MemoryRead: 'data' is always 'size' bytes (unreadable spans
+        zero-filled), 'gaps' lists what could not be read, 'complete' is True
+        when nothing was missing. Never raises for unreadable memory.
+        """
+        h = self._get_process_handle(pid)
+        return self.memory.read_safe_handle(h, addr, size)
+
+    def enum_regions(self, pid=None, start=0, max_addr=0):
+        """Enumerate the target's memory regions, ascending by address.
+
+        Each dict: base_address, allocation_base, allocation_protect,
+        region_size, state, protect, type. Covers free and reserved regions
+        too, so a caller can tell "not committed" from "not there". Unlike
+        query_memory this walks the whole chain; reaching the end of the
+        address space ends the walk rather than raising.
+        """
+        h = self._get_process_handle(pid)
+        return self.memory.regions_handle(h, start, max_addr)
+
     # ── delegated: modules ─────────────────────────────────────
 
     def enum_modules(self, pid=None):
+        """List loaded modules. Falls back to event-observed images.
+
+        EnumProcessModulesEx fails with ERROR_PARTIAL_COPY while the target
+        sits on the loader breakpoint, and on WOW64 cannot see the 32-bit
+        image until the loader has mapped it. Rather than fail exactly when
+        module information is first wanted, this falls back to the bases
+        reported by CREATE_PROCESS / LOAD_DLL ('source': 'events' marks those).
+        """
         h = self._get_process_handle(pid)
-        return self.modules.enumerate_handle(h)
+        return self.modules.enumerate_handle(h, allow_event_fallback=True)
+
+    def module_at(self, addr, pid=None):
+        """Module containing 'addr', or None. See ModuleResolver.module_at."""
+        return self.modules.module_at(addr, pid)
 
     def get_module_filename(self, h_module):
         return self.modules.get_filename(h_module)
@@ -582,6 +760,32 @@ class Debugger:
 
     def find_breakpoint(self, addr):
         return self.brk_sw.find(addr) or self.brk_hw.find(addr)
+
+    def verify_breakpoints(self):
+        """Report software breakpoints the target has overwritten.
+
+        A software breakpoint can be silently erased by the code it sits in —
+        self-unpacking targets overwrite their own entry point by design, and
+        the breakpoint then just stops firing. Nothing raises when that
+        happens, so this is how the state gets asked for rather than assumed.
+
+        Returns [{'bp_id', 'addr', 'found'}] for each breakpoint whose INT3 is
+        gone; 'found' is the byte actually at the address. Empty means every
+        software breakpoint is intact.
+        """
+        report = []
+        for bp_id in self.brk_sw.verify_all():
+            bp_info = self._session.breakpoints.get(bp_id)
+            if bp_info is None:
+                continue
+            addr = bp_info[1]
+            h_process = bp_info[3] if len(bp_info) > 3 else self._session.process_handle
+            try:
+                found = self.memory.read_handle(h_process, addr, 1)
+            except Exception:
+                found = None
+            report.append({'bp_id': bp_id, 'addr': addr, 'found': found})
+        return report
 
     # ── delegated: disasm ───────────────────────────────────────
 

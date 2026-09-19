@@ -25,6 +25,7 @@ from .trace.calltree import CallTree, CallNode
 from .patch.assembler import Assembler
 from .core.session import ChildProcessInfo
 from .core.event import DebugEvent
+from .memory.manager import MemoryRead
 from .exceptions import (
     BreakpointError,
     MemError,
@@ -42,6 +43,7 @@ __all__ = [
     "HOST_ARCH",
     "ChildProcessInfo",
     "DebugEvent",
+    "MemoryRead",
     "PydbgError",
     "ProcessError",
     "MemError",

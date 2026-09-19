@@ -91,20 +91,57 @@ Neither is visible from the source tree. Both are caught by importing the
 *installed* package with a bare interpreter, which is what the verify step in
 `devtools/rebuild-install.ps1` does.
 
-Still open, recorded rather than fixed:
+### Dynamic-analysis gaps (found by the same three analysis sessions)
 
-- `enum_modules()` raises `ERROR_PARTIAL_COPY` (299) while a target sits on the
-  loader breakpoint — precisely when module info is first wanted. The
-  `CREATE_PROCESS` event already carries `lpBaseOfImage`; a `module_at(addr)`
-  accessor built on that would avoid the enumeration entirely.
-- `create_process()` cannot pass a command line, which forces callers onto the
-  `attach()` path (and so loses all startup-time breakpoints) for any target
-  configured by argv.
-- Software breakpoints are silently lost when the target overwrites them
-  (self-unpacking code does this by design); `find_breakpoint()` cannot report
-  that state.
-- `read_memory()` discards partial results across uncommitted pages
-  (`ERROR_PARTIAL_COPY`) rather than returning what it did read.
+The same three targets surfaced a second family: capabilities whose absence
+pushed every caller into hand-rolling a workaround. Recorded in
+`targets/pydbg-gaps.md` §C and fixed here.
+
+- **`enum_modules()` raised `ERROR_PARTIAL_COPY` (299) on the loader
+  breakpoint** — precisely when module info is first wanted. `CREATE_PROCESS`
+  and `LOAD_DLL` name every image the loader maps, so those bases are now
+  recorded from the events and `module_at(addr)` answers from that table with
+  no syscall. `enum_modules()` falls back to it too, and merges in images PSAPI
+  cannot see (on WOW64 the 32-bit image is not mapped at the first breakpoint).
+- **`create_process()` could not pass a command line**, forcing callers onto
+  the `attach()` path — and so losing every startup-time breakpoint — for any
+  target configured by argv. It now takes `cmdline=`, passed verbatim with
+  `lpApplicationName` naming the image.
+- **Software breakpoints went silent when the target overwrote them.**
+  Self-unpacking code does this by design; one session had the OEP overwritten
+  by the unpacker's own output and the breakpoint simply stopped firing. There
+  is no event to hang detection on, so `verify_breakpoints()` answers on
+  request instead of the state being unknowable.
+- **`read_memory()` discarded partial results** across uncommitted pages
+  (`ERROR_PARTIAL_COPY`), losing the bytes it had already read.
+  `read_memory_safe()` walks regions, keeps everything readable, and reports
+  the rest as `gaps`.
+- **No memory region enumeration** (`VirtualQueryEx` chain) and **no
+  `run_until(addr, timeout)`** — "did it get there?" was a wall-clock guess,
+  with a 90s and a 210s run both unable to distinguish "never reached" from
+  "reached and quiet". Both now exist; `run_until` raises `TimeoutError`
+  carrying the last instruction pointer.
+
+One coupling this broke, worth remembering: `tests/test_wow64.py::_launch` used
+`enum_modules()` **raising** `ERROR_PARTIAL_COPY` as its signal that the loader
+had not yet mapped the 32-bit image — it was reading the bug as a feature, and
+so the sequencing of the WOW64 tests depended on it. The event-table fallback
+removed the raise and the helper broke out of its loop one loader breakpoint
+too early. It now asks PSAPI explicitly — `enumerate_handle()` without
+`allow_event_fallback` — instead of inferring from a failure. Note that "the
+image's PE header is readable" is *not* a substitute: that becomes true long
+before PSAPI will report the module.
+
+Two bugs were found in the same code while fixing these:
+
+- `create_process()` passed the path to `CreateProcessA` as UTF-8 into an ANSI
+  API, and handed it a Python `bytes` object's buffer as `lpCommandLine` —
+  which Win32 may modify in place. Both fixed (ANSI code page, heap buffer).
+- `run()` raised `TimeoutError` without `core/debugger.py` ever importing it,
+  so the class callers actually got was the **builtin**, not the
+  `pydbg.exceptions.TimeoutError` documented in the README and exported from
+  `__all__`. `except pydbg.exceptions.TimeoutError` never fired. It now raises
+  the documented class.
 
 ## WOW64 (32 位目标) 调试平台特性
 

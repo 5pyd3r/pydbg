@@ -19,7 +19,8 @@ from _win32types cimport (
     WAIT_OBJECT_0, WAIT_TIMEOUT,
 )
 
-from libc.string cimport memset
+from libc.string cimport memcpy, memset
+from libc.stdlib cimport free, malloc
 
 # Event code string mapping
 _EVENT_NAMES = {
@@ -34,50 +35,102 @@ _EVENT_NAMES = {
     # RIP_INFO: "RIP_INFO",
 }
 
-cpdef tuple create_process(str path, bint debug_children=False):
-    """Create a process under debug control.
+cdef tuple _spawn(str path, str cmdline, DWORD flags, str label):
+    """CreateProcessA with an explicitly managed, writable command line.
 
-    Args:
-        path: Path to executable.
-        debug_children: If True, also debug child processes.
+    Two things the previous inline call got wrong:
 
-    Returns (pid, tid, h_process, h_thread).
-    Raises OSError on failure.
+    * Encoding. CreateProcessA takes ANSI strings, so the text must go through
+      the ANSI code page ('mbcs'), not UTF-8 — a non-ASCII path would otherwise
+      hand the loader a string that does not name the file it points at.
+    * Buffer ownership. Win32 is permitted to modify lpCommandLine in place.
+      Passing a Python bytes object's buffer is a write into an immutable
+      object; the command line goes into heap memory instead.
+
+    'cmdline' of None keeps the historical shape (lpApplicationName NULL, path
+    as the command line); given a command line, the executable is named
+    explicitly so the two cannot disagree. The caller owns argv[0] convention
+    in that case — nothing is prepended.
     """
     cdef PROCESS_INFORMATION pi
     cdef STARTUPINFOA si
-    cdef bytes path_bytes
+    cdef bytes app_bytes
+    cdef bytes cl_bytes
+    cdef char* app_buf = NULL
+    cdef char* cl_buf = NULL
+    cdef LPCSTR lp_app = NULL
+    cdef BOOL result = 0
+    cdef DWORD err = 0
 
     memset(&si, 0, sizeof(si))
     si.cb = sizeof(si)
     memset(&pi, 0, sizeof(pi))
 
-    path_bytes = path.encode('utf-8')
+    if cmdline is None:
+        cl_bytes = path.encode('mbcs')
+    else:
+        app_bytes = path.encode('mbcs')
+        cl_bytes = cmdline.encode('mbcs')
 
-    cdef DWORD flags = DEBUG_PROCESS
-    if not debug_children:
-        flags |= DEBUG_ONLY_THIS_PROCESS
+    cl_buf = <char*>malloc(len(cl_bytes) + 1)
+    if cl_buf == NULL:
+        raise MemoryError("Failed to allocate command line buffer")
+    memcpy(cl_buf, <char*>cl_bytes, len(cl_bytes) + 1)
 
-    cdef BOOL result = CreateProcessA(
-        <LPCSTR>NULL,
-        <char*>path_bytes,
+    if cmdline is not None:
+        app_buf = <char*>malloc(len(app_bytes) + 1)
+        if app_buf == NULL:
+            free(cl_buf)
+            raise MemoryError("Failed to allocate application name buffer")
+        memcpy(app_buf, <char*>app_bytes, len(app_bytes) + 1)
+        lp_app = <LPCSTR>app_buf
+
+    result = CreateProcessA(
+        lp_app,
+        cl_buf,
         NULL, NULL, 0,
         flags,
         NULL, <LPCSTR>NULL,
         &si, &pi)
 
     if result == 0:
-        raise OSError(GetLastError(), "CreateProcessA failed")
+        err = GetLastError()
+    free(cl_buf)
+    if app_buf != NULL:
+        free(app_buf)
 
-    cdef DWORD pid = pi.dwProcessId
-    cdef DWORD tid = pi.dwThreadId
-    cdef unsigned long long h_proc = <unsigned long long>pi.hProcess
-    cdef unsigned long long h_thr = <unsigned long long>pi.hThread
+    if result == 0:
+        raise OSError(err, label + " failed")
 
-    return (pid, tid, h_proc, h_thr)
+    return (pi.dwProcessId, pi.dwThreadId,
+            <unsigned long long>pi.hProcess,
+            <unsigned long long>pi.hThread)
 
 
-cpdef tuple create_process_suspended(str path):
+cpdef tuple create_process(str path, bint debug_children=False,
+                           str cmdline=None):
+    """Create a process under debug control.
+
+    Args:
+        path: Path to executable.
+        debug_children: If True, also debug child processes.
+        cmdline: Command line to pass. Without it the process is started with
+            'path' as its command line (the historical behaviour). With it,
+            'path' names the image explicitly and 'cmdline' is handed over
+            verbatim — including argv[0] — so targets configured by argument
+            can be started under debug control instead of forcing callers onto
+            attach() (which loses every startup-time breakpoint).
+
+    Returns (pid, tid, h_process, h_thread).
+    Raises OSError on failure.
+    """
+    cdef DWORD flags = DEBUG_PROCESS
+    if not debug_children:
+        flags |= DEBUG_ONLY_THIS_PROCESS
+    return _spawn(path, cmdline, flags, "CreateProcessA")
+
+
+cpdef tuple create_process_suspended(str path, str cmdline=None):
     """Create a process in suspended state (no debug control).
 
     The main thread is created but does not execute. Caller is
@@ -86,33 +139,8 @@ cpdef tuple create_process_suspended(str path):
     Returns (pid, tid, h_process, h_thread).
     Raises OSError on failure.
     """
-    cdef PROCESS_INFORMATION pi
-    cdef STARTUPINFOA si
-    cdef bytes path_bytes
-
-    memset(&si, 0, sizeof(si))
-    si.cb = sizeof(si)
-    memset(&pi, 0, sizeof(pi))
-
-    path_bytes = path.encode('utf-8')
-
-    cdef BOOL result = CreateProcessA(
-        <LPCSTR>NULL,
-        <char*>path_bytes,
-        NULL, NULL, 0,
-        CREATE_SUSPENDED,
-        NULL, <LPCSTR>NULL,
-        &si, &pi)
-
-    if result == 0:
-        raise OSError(GetLastError(), "CreateProcessA failed (suspended)")
-
-    cdef DWORD pid = pi.dwProcessId
-    cdef DWORD tid = pi.dwThreadId
-    cdef unsigned long long h_proc = <unsigned long long>pi.hProcess
-    cdef unsigned long long h_thr = <unsigned long long>pi.hThread
-
-    return (pid, tid, h_proc, h_thr)
+    return _spawn(path, cmdline, CREATE_SUSPENDED,
+                  "CreateProcessA (suspended)")
 
 
 cpdef int debug_active_process(int pid) except? -1:

@@ -10,6 +10,12 @@ instrument_target = executable(
   'target/instrument_target.c',
 )
 
+# 记录自身 argv 的测试目标（用于 create_process(cmdline=...) 验证）
+argv_target = executable(
+  'argv_target',
+  'target/argv_target.c',
+)
+
 # Common environment: PYTHONPATH includes project root (for tests).
 # The editable install (pip install -e .) handles pydbg package discovery,
 # including the compiled Cython extension at the correct import path.
@@ -23,6 +29,7 @@ test_env.set('TEST_WOW64_TARGET_PATH',
 test_env.set('TEST_INSTRUMENT_TARGET_PATH', instrument_target.full_path())
 test_env.set('TEST_INSTRUMENT_TARGET32_PATH',
   meson.project_source_root() / 'tests' / 'target' / 'instrument_target32.exe')
+test_env.set('TEST_ARGV_TARGET_PATH', argv_target.full_path())
 
 # Test runner: use Python unittest via meson test
 test(
@@ -159,4 +166,15 @@ test(
   args: ['-m', 'unittest', 'tests.test_instrument'],
   env: test_env,
   workdir: meson.project_build_root(),
+)
+
+# These spawn several debugged processes and wait on real 1s target sleeps,
+# which does not fit meson's 30s default.
+test(
+  'dynamic_gaps',
+  py,
+  args: ['-m', 'unittest', 'tests.test_dynamic_gaps'],
+  env: test_env,
+  workdir: meson.project_build_root(),
+  timeout: 180,
 )
