@@ -586,7 +586,7 @@ class Debugger:
         h = self._get_process_handle(pid)
         return self.memory.protect_handle(h, addr, size, protect)
 
-    def read_memory_safe(self, addr, size, pid=None):
+    def read_memory_safe(self, addr, size, pid=None, max_bytes=None):
         """Read memory without losing the readable parts of the range.
 
         read_memory() raises on the first unreadable page and discards what it
@@ -595,10 +595,14 @@ class Debugger:
 
         Returns a MemoryRead: 'data' is always 'size' bytes (unreadable spans
         zero-filled), 'gaps' lists what could not be read, 'complete' is True
-        when nothing was missing. Never raises for unreadable memory.
+        when nothing was missing. Never raises for unreadable memory — but
+        ValueError for a 'size' over max_bytes, which defaults to
+        pydbg.memory.manager.DEFAULT_MAX_READ, so a length field that lies
+        cannot start a multi-gigabyte read.
         """
         h = self._get_process_handle(pid)
-        return self.memory.read_safe_handle(h, addr, size)
+        kwargs = {} if max_bytes is None else {'max_bytes': max_bytes}
+        return self.memory.read_safe_handle(h, addr, size, **kwargs)
 
     def enum_regions(self, pid=None, start=0, max_addr=0):
         """Enumerate the target's memory regions, ascending by address.

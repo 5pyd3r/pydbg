@@ -1,4 +1,4 @@
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 try:
     import capstone
@@ -112,7 +112,10 @@ class Instruction:
     is_jmp: bool = False
     is_ret: bool = False
     is_cond: bool = False
-    groups: list = field(default_factory=list)
+    # A tuple, and shared between every instruction with the same capstone
+    # group set — see DisasmEngine._group_names. Immutable so that sharing
+    # it is safe.
+    groups: tuple = ()
     # Additive: every field below has a default, so existing constructions
     # (tests and callers build Instruction positionally and by keyword) keep
     # working unchanged.
@@ -130,6 +133,9 @@ class DisasmEngine:
         self._requested_mode = mode
         self._cs = None
         self._arch_mode = None
+        # tuple(group ids) -> tuple(names), shared by every Instruction with
+        # that set of groups; see _group_names.
+        self._group_cache = {}
 
     def _init_capstone(self):
         if self._cs is not None:
@@ -203,8 +209,26 @@ class DisasmEngine:
         self._init_capstone()
         return self._cs.reg_name(reg_id) or ""
 
+    def _group_names(self, ids):
+        """Capstone's names for a group-id set, computed once per distinct set.
+
+        Naming them per instruction is a list allocation and a capstone call
+        per group, repeated for every one of what is easily 670k instructions
+        in an image — and all of them land on a handful of distinct sets.
+        Caching by the id tuple collapses that to one lookup.
+
+        The result is a tuple so the shared value cannot be edited out from
+        under the next instruction that gets it.
+        """
+        key = tuple(ids)
+        names = self._group_cache.get(key)
+        if names is None:
+            names = tuple(self._cs.group_name(g) for g in key)
+            self._group_cache[key] = names
+        return names
+
     def _make_instruction(self, insn):
-        groups = [insn.group_name(g) for g in insn.groups]
+        groups = self._group_names(insn.groups)
         is_jmp = 'jump' in groups
         is_call = 'call' in groups
         is_ret = 'ret' in groups

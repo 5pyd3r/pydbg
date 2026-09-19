@@ -151,6 +151,23 @@ class TestSafeReadAndRegions(DynamicGapTestCase):
         self.assertTrue(result.gaps)
         self.assertEqual(result.gaps[0][0], 0)
 
+    def test_an_unreasonable_size_is_refused_not_attempted(self):
+        """'size' usually comes from a header field, and header fields lie.
+
+        Before the cap, a corrupt length meant a multi-gigabyte bytearray and
+        a read per region across the address space. It has to fail where the
+        number entered, not halfway through the address space.
+        """
+        with self.assertRaises(ValueError) as caught:
+            self.dbg.read_memory_safe(0, 0x40000000)          # 1 GiB
+        self.assertIn("max_bytes", str(caught.exception))
+
+    def test_the_cap_can_be_raised_by_the_caller(self):
+        """A caller that really means it must not be blocked by the default."""
+        base = self.dbg.enum_modules()[0]["base_address"]
+        result = self.dbg.read_memory_safe(base, 0x1000, max_bytes=0x2000)
+        self.assertTrue(result.complete)
+
     def test_regions_cover_the_main_image(self):
         from tests.helpers import module_base
         base = module_base(self.dbg)
@@ -208,6 +225,34 @@ class TestModuleAt(DynamicGapTestCase):
                         side_effect=OSError(299, "ERROR_PARTIAL_COPY")):
             with self.assertRaises(MemError):
                 self.dbg.modules.enumerate_handle(0)
+
+    def test_the_same_chain_with_a_real_failure_and_no_mock(self):
+        """The two tests above with mock.patch taken out of the middle.
+
+        A mock replaces the syscall, so it proves the merge logic and nothing
+        about whether a real OSError from EnumProcessModulesEx reaches the
+        same except clause — nor whether the surviving path copes with entries
+        whose PE headers it cannot then read.
+
+        Handle 0 fails for real, and unlike the loader-breakpoint version that
+        failure is certain rather than a race (pydbg-gaps.md §D): PSAPI
+        answers ERROR_INVALID_HANDLE instead of sometimes answering fine, so
+        this cannot pass for the wrong reason on a machine where the timing
+        differs.
+        """
+        recorded = self.dbg._session.modules_for(self.pid)
+        self.assertTrue(recorded, "no modules recorded from debug events")
+
+        modules = self.dbg.modules.enumerate_handle(0, allow_event_fallback=True)
+
+        # Exactly the event table: an invalid handle contributes nothing of
+        # its own, so anything present came through the fallback.
+        self.assertEqual({m["base_address"] for m in modules},
+                         {r["base_address"] for r in recorded})
+        self.assertTrue(all(m.get("source") == "events" for m in modules))
+        # ...and the decoration degraded instead of raising on every one of
+        # them, since handle 0 describes no image.
+        self.assertTrue(all(m["arch"] == "unknown" for m in modules))
 
 
 @unittest.skipUnless(_has_cython, "requires Cython extension")
