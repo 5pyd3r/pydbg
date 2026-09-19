@@ -76,6 +76,13 @@ def cmd_indirect(args):
     return 0
 
 
+def cmd_attribution(args):
+    """Why the coverage and overlap numbers are what they are."""
+    result = analyze_file(args.image)
+    print(result.render_attribution(limit=args.limit))
+    return 0
+
+
 def cmd_cfg(args):
     result = analyze_file(args.image)
     cfg = result.cfg_of(args.at)
@@ -128,6 +135,9 @@ def build_parser():
     xref.add_argument("--limit", type=int, default=8)
 
     add("callers", cmd_callers, target_dest="target")
+
+    attribution = add("attribution", cmd_attribution)
+    attribution.add_argument("--limit", type=int, default=10)
 
     indirect = add("indirect", cmd_indirect)
     indirect.add_argument("--limit", type=int, default=40)

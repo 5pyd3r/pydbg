@@ -14,6 +14,10 @@ honest form: the count of decoded bytes alone reads high whenever the decode
 has drifted out of alignment, which is exactly when it should read low.
 """
 
+from .attribution import (
+    CoverageAttribution, UncoveredBreakdown, attribute_coverage, deltas,
+    span_summary,
+)
 from .cfg import CFGBlock, FunctionCFG, build_function_cfg, cfg_to_dot
 from .consts import ConstantTracker
 from .engine import (
@@ -38,5 +42,7 @@ __all__ = [
     'IndirectSite', 'RefKind', 'SeedConfig', 'Xref',
     'FunctionCFG', 'CFGBlock', 'build_function_cfg', 'cfg_to_dot',
     'ConstantTracker',
+    'CoverageAttribution', 'UncoveredBreakdown', 'attribute_coverage',
+    'deltas', 'span_summary',
     'branch_target', 'classify_refs', 'is_indirect_branch', 'memory_address',
 ]
