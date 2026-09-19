@@ -1,5 +1,6 @@
 """StaticAnalyzer — recursive descent to a fixpoint, without a live process."""
 
+from .access import STACK_REGISTERS, base_relative_access, stack_register_ids
 from .consts import ConstantTracker
 from .decoder import InstructionDecoder
 from .functions import FunctionTable
@@ -47,6 +48,9 @@ class StaticAnalyzer:
         self.indirect_sites = {}
         # thunk rva -> the IAT slot it jumps through
         self.import_thunks = {}
+        self._accesses = []
+        self._stack_ids = frozenset()
+
         self.stats = AnalysisStats()
         self._pending = []
         self._queued = set()
@@ -99,6 +103,8 @@ class StaticAnalyzer:
             indirect_sites=tuple(self.indirect_sites[rva]
                                  for rva in sorted(self.indirect_sites)),
             import_thunks=dict(self.import_thunks),
+            access_records=(tuple(self._accesses)
+                            if self.config.collect_accesses else None),
             decoder=self.decoder,
         )
 
@@ -209,6 +215,8 @@ class StaticAnalyzer:
                 break
 
             budget -= 1
+            if self.config.collect_accesses:
+                self._note_access(addr, insn)
             self.decoder.mark_covered(addr, insn.size, origin)
             self.functions.note_instruction(addr, insn.size)
             self._record_refs(insn, addr)
@@ -247,6 +255,28 @@ class StaticAnalyzer:
             addr += insn.size
 
         return budget
+
+    def _note_access(self, rva, insn):
+        """Record a base-relative access, if this instruction makes one.
+
+        Done here rather than in a second pass afterwards: the sweep is
+        already holding the instruction, and re-deriving it later means
+        decoding the whole image again — half a minute on a system DLL for
+        data that was in hand.
+        """
+        if not self._stack_ids:
+            self._stack_ids = stack_register_ids(self.image.mode,
+                                                 STACK_REGISTERS)
+        resolved = base_relative_access(insn, stack_ids=self._stack_ids)
+        if resolved is None:
+            return
+        # A displacement at or beyond the image base is not a field offset —
+        # it is an absolute address formed through a register, which
+        # position-independent code does constantly. `[eax + 0x400000]` is the
+        # image's own base; no structure is four megabytes wide.
+        if abs(resolved[1]) >= self.image.image_base:
+            return
+        self._accesses.append((rva,) + resolved)
 
     def _record_refs(self, insn, rva):
         """Record 'insn' references. 'rva' is passed explicitly because the

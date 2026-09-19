@@ -179,6 +179,15 @@ class InstructionDecoder:
         end = min(end, len(self._covered))
         return sum(self._covered[start:end]) if end > start else 0
 
+    def decoded_rvas(self):
+        """Every RVA an instruction starts at, ascending.
+
+        The decoded set is the size bytearray itself, so this is a scan rather
+        than a set to maintain. Callers that want to walk the whole decode
+        again (access tracing, say) get it without the run having kept one.
+        """
+        return [rva for rva, size in enumerate(self._size_at) if size]
+
     def is_covered(self, rva):
         """Whether any instruction claimed this byte.
 

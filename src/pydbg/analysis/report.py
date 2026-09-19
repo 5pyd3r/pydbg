@@ -45,6 +45,37 @@ def render_coverage(result):
     return "\n".join(lines)
 
 
+def render_structures(result, workspace=None, limit=None, function=None,
+                      min_offsets=None):
+    """Base-register access profiles, per function.
+
+    Headed by the function and the register rather than by a class name,
+    because that is all the evidence supports: which register holds an object
+    cannot be decided statically, and a report that named a class would look
+    exactly like one that had proved it.
+    """
+    table = result.names(workspace) if workspace is not None else None
+    found = result.structures(min_offsets=min_offsets)
+
+    lines = []
+    shown = 0
+    for (func_rva, base_reg), profile in sorted(found.items()):
+        if function is not None and func_rva != function:
+            continue
+        if limit is not None and shown >= limit:
+            break
+        shown += 1
+        label = table.label(func_rva) if table is not None else f"{func_rva:#x}"
+        lines.append(f"{label} ({func_rva:#010x})  base {base_reg}  "
+                     f"{len(profile.fields)} offsets, span {profile.span:#x}")
+        for offset, kind, size, reads, writes in profile.rows():
+            lines.append(f"    +{offset:#06x}  {size:>2}B  {kind:16s} "
+                         f"r{reads} w{writes}")
+    if not lines:
+        return "(no base register is used at enough offsets to look structural)"
+    return "\n".join(lines)
+
+
 def render_names(result, workspace=None, limit=None, source=None):
     """The name table, with provenance.
 

@@ -132,6 +132,16 @@ test(
   workdir: meson.project_build_root(),
 )
 
+# Traces a real system DLL, which does not fit the 30s default.
+test(
+  'analysis_access',
+  py,
+  args: ['-m', 'unittest', 'tests.test_analysis_access'],
+  env: test_env,
+  workdir: meson.project_build_root(),
+  timeout: 180,
+)
+
 test(
   'debugger',
   py,

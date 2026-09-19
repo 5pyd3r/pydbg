@@ -14,6 +14,10 @@ honest form: the count of decoded bytes alone reads high whenever the decode
 has drifted out of alignment, which is exactly when it should read low.
 """
 
+from .access import (
+    STACK_REGISTERS, Access, FieldUse, StructureProfile,
+    collect_accesses, profiles,
+)
 from .attribution import (
     CoverageAttribution, UncoveredBreakdown, attribute_coverage, deltas,
     span_summary,
@@ -47,6 +51,8 @@ __all__ = [
     'CoverageAttribution', 'UncoveredBreakdown', 'attribute_coverage',
     'deltas', 'span_summary',
     'Name', 'NameTable', 'auto_names', 'import_names',
+    'Access', 'FieldUse', 'StructureProfile', 'collect_accesses',
+    'profiles', 'STACK_REGISTERS',
     'Workspace', 'WorkspaceError', 'image_fingerprint',
     'branch_target', 'classify_refs', 'is_indirect_branch', 'memory_address',
 ]

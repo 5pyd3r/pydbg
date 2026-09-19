@@ -117,6 +117,16 @@ def cmd_label(args):
     return 0
 
 
+def cmd_structures(args):
+    """Base-register access profiles — the raw material for struct layouts."""
+    result = analyze_file(args.image)
+    workspace = _load_workspace(args.image, args.workspace)
+    print(result.render_structures(workspace=workspace, limit=args.limit,
+                                   function=args.function,
+                                   min_offsets=args.min_offsets))
+    return 0
+
+
 def cmd_attribution(args):
     """Why the coverage and overlap numbers are what they are."""
     result = analyze_file(args.image)
@@ -179,6 +189,14 @@ def build_parser():
     xref.add_argument("--limit", type=int, default=8)
 
     add("callers", cmd_callers, target_dest="target")
+
+    structures = add("structures", cmd_structures)
+    structures.add_argument("--limit", type=int, default=10)
+    structures.add_argument("--min-offsets", dest="min_offsets", type=int,
+                            default=None)
+    structures.add_argument("--function", type=_parse_int, default=None,
+                            help="only profiles inside this function")
+    structures.add_argument("--workspace", default=None)
 
     attribution = add("attribution", cmd_attribution)
     attribution.add_argument("--limit", type=int, default=10)
