@@ -125,6 +125,14 @@ test(
 )
 
 test(
+  'analysis_names',
+  py,
+  args: ['-m', 'unittest', 'tests.test_analysis_names'],
+  env: test_env,
+  workdir: meson.project_build_root(),
+)
+
+test(
   'debugger',
   py,
   args: ['-m', 'unittest', 'tests.test_debugger'],

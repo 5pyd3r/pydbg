@@ -45,6 +45,8 @@ class StaticAnalyzer:
         self.xrefs = {}
         self.undecodable = set()
         self.indirect_sites = {}
+        # thunk rva -> the IAT slot it jumps through
+        self.import_thunks = {}
         self.stats = AnalysisStats()
         self._pending = []
         self._queued = set()
@@ -96,6 +98,7 @@ class StaticAnalyzer:
             undecodable=tuple(sorted(self.undecodable)),
             indirect_sites=tuple(self.indirect_sites[rva]
                                  for rva in sorted(self.indirect_sites)),
+            import_thunks=dict(self.import_thunks),
             decoder=self.decoder,
         )
 
@@ -299,8 +302,12 @@ class StaticAnalyzer:
         if not insn.is_jmp or insn.is_call or not self._iat_slots:
             return
         for op in insn.operands:
-            if memory_address(insn, op, self.image) in self._iat_slots:
+            slot = memory_address(insn, op, self.image)
+            if slot in self._iat_slots:
                 self.functions.add_start(rva, confident=True)
+                # Which import it reaches is what turns `sub_401234` into
+                # `CreateFileW`, so the slot is kept, not just the fact.
+                self.import_thunks[rva] = slot
                 return
 
     def _absorb_jump_table(self, table_rva, max_entries=512, origin=None):

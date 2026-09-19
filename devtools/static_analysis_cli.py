@@ -76,6 +76,47 @@ def cmd_indirect(args):
     return 0
 
 
+def _load_workspace(image, path, create=False):
+    """Open a workspace for 'image', creating it if asked and absent."""
+    import os
+
+    from pydbg.analysis import Workspace
+    if path and os.path.exists(path):
+        return Workspace.load(path, image)
+    if create:
+        workspace = Workspace.for_image(image)
+        workspace.path = path
+        return workspace
+    return None
+
+
+def cmd_names(args):
+    result = analyze_file(args.image)
+    workspace = _load_workspace(args.image, args.workspace)
+    print(result.render_names(workspace=workspace, limit=args.limit,
+                              source=args.source))
+    return 0
+
+
+def cmd_label(args):
+    """Name an address and save it.
+
+    The write half of the loop: an analysis takes half a minute and produces
+    thousands of addresses, and the naming is done afterwards over hours.
+    Without a way to save that, the hours are spent again every run.
+    """
+    if not args.workspace:
+        print("--workspace is required: a name has to be saved somewhere")
+        return 2
+    workspace = _load_workspace(args.image, args.workspace, create=True)
+    workspace.name(args.at, args.name)
+    if args.comment:
+        workspace.comment(args.at, args.comment)
+    workspace.save()
+    print(f"{args.at:#x} = {args.name}  (saved to {args.workspace})")
+    return 0
+
+
 def cmd_attribution(args):
     """Why the coverage and overlap numbers are what they are."""
     result = analyze_file(args.image)
@@ -120,8 +161,11 @@ def build_parser():
         child.add_argument("image")
         child.set_defaults(handler=handler)
         if target_dest:
-            child.add_argument("--target", dest=target_dest, type=_parse_int,
-                               required=True, help="RVA, e.g. 0x401000")
+            # The flag matches what it means: --target for a lookup subject,
+            # --at for a position to examine.
+            child.add_argument(f"--{target_dest}", dest=target_dest,
+                               type=_parse_int, required=True,
+                               help="RVA, e.g. 0x401000")
         return child
 
     add("stats", cmd_stats)
@@ -139,6 +183,18 @@ def build_parser():
     attribution = add("attribution", cmd_attribution)
     attribution.add_argument("--limit", type=int, default=10)
 
+    names = add("names", cmd_names)
+    names.add_argument("--limit", type=int, default=None)
+    names.add_argument("--source", default=None,
+                       help="only names from this source (export/import/auto)")
+    names.add_argument("--workspace", default=None,
+                       help="a saved workspace whose names win")
+
+    label = add("label", cmd_label, target_dest="at")
+    label.add_argument("--name", required=True)
+    label.add_argument("--comment", default=None)
+    label.add_argument("--workspace", required=True)
+
     indirect = add("indirect", cmd_indirect)
     indirect.add_argument("--limit", type=int, default=40)
     indirect.add_argument("--all", action="store_true",
@@ -155,7 +211,14 @@ def build_parser():
 def main(argv=None):
     parser = build_parser()
     args = parser.parse_args(argv)
-    return args.handler(args)
+    # A workspace that belongs to another binary is a refusal, not a crash:
+    # the message is the useful part and a traceback buries it.
+    from pydbg.analysis import WorkspaceError
+    try:
+        return args.handler(args)
+    except WorkspaceError as error:
+        print(f"workspace error: {error}", file=sys.stderr)
+        return 3
 
 
 if __name__ == "__main__":
