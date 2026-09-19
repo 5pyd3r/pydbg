@@ -5,7 +5,7 @@ from .functions import FunctionTable
 from .image import AnalyzedImage
 from .model import AnalysisResult, AnalysisStats, CoverageReport, RefKind, SeedConfig, Xref
 from .refs import branch_target, classify_refs, memory_address
-from .seeds import SeedProvider
+from .seeds import SeedProvider, looks_like_entry
 
 
 class StaticAnalyzer:
@@ -68,6 +68,7 @@ class StaticAnalyzer:
             stats=self.stats,
             coverage=self._coverage(),
             undecodable=tuple(sorted(self.undecodable)),
+            decoder=self.decoder,
         )
 
     # ── seeding ────────────────────────────────────────────────
@@ -83,6 +84,28 @@ class StaticAnalyzer:
             self._pending.append(rva)
             return True
         return False
+
+    def _seed_branch_target(self, insn, target):
+        """Decide what a branch target is, and register it as that.
+
+        A call target is a function entry, full stop. A jump target is not:
+        most of them are blocks *inside* the current function — the target of
+        an `if`, a loop head — and registering those as entries cuts the
+        function into pieces at every branch, which is what makes an extent
+        stop in the middle of a function and a CFG run off its own end.
+
+        A jump target that does look like an entry is kept as a tentative one:
+        a tail call (`jmp other_function`) lands on a function start, and the
+        byte before it is typically padding. Everything else is decoded as a
+        code seed, which finds the code without claiming to have found a
+        function.
+        """
+        if insn.is_call:
+            self._enqueue(target, confident=True)
+        elif looks_like_entry(self.image, target):
+            self._enqueue(target, confident=False)
+        else:
+            self._enqueue_code_seed(target)
 
     def _enqueue_code_seed(self, rva):
         """Queue an address for decoding without claiming it starts a function.
@@ -140,11 +163,7 @@ class StaticAnalyzer:
             target = branch_target(insn, self.image)
             if target is not None and self.image.is_exec(target):
                 self.functions.add_call_target(target)
-                # A call target is a function entry. A jump target is where
-                # control goes, which may be a tail call or may be a block in
-                # this same function — so it is queued for decoding but not
-                # claimed as an entry.
-                self._enqueue(target, confident=insn.is_call)
+                self._seed_branch_target(insn, target)
 
             if insn.is_ret:
                 break
@@ -274,3 +293,20 @@ def analyze_bytes(data, **kwargs):
 def analyze_pe(pe, **kwargs):
     """Analyze an already-parsed PE."""
     return StaticAnalyzer(AnalyzedImage.from_pe(pe), **kwargs).run()
+
+
+def analyze_process(session, base_address, mode=None, module_size=None, **kwargs):
+    """Analyze a module inside a live process.
+
+    The bytes come from the target rather than a file, so the image base is the
+    module's RUNTIME base — which is the whole point of passing it here. An
+    ASLR'd module sits away from its preferred ImageBase, and testing its
+    addresses against the preferred one puts every operand outside the window,
+    giving an empty result that reports success.
+
+    'module_size' bounds the reads; without it a read past the end of the
+    module walks into whatever is mapped next.
+    """
+    image = AnalyzedImage.from_process(session, base_address, mode=mode,
+                                       module_size=module_size)
+    return StaticAnalyzer(image, **kwargs).run()

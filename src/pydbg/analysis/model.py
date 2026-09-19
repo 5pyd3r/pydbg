@@ -99,11 +99,56 @@ class AnalysisResult:
     stats: AnalysisStats = field(default_factory=AnalysisStats)
     coverage: dict = field(default_factory=dict)  # section name -> CoverageReport
     undecodable: tuple = ()      # RVAs a branch targeted that would not decode
+    # Kept so a CFG can be built after the fact without re-decoding. The
+    # decoder's bookkeeping is small (bytearrays, not Instruction objects), so
+    # holding it costs little and re-running the analysis would cost a lot.
+    decoder: object = None
 
     def callers_of(self, rva):
-        """RVAs of the instructions that reference 'rva'."""
-        return tuple(xref.source for xref in self.xrefs.get(rva, ()))
+        """RVAs of the instructions that reference 'rva', ascending."""
+        return tuple(sorted({xref.source for xref in self.xrefs.get(rva, ())}))
 
     def function_of(self, rva):
         """The function containing 'rva', or None."""
         return self.functions.containing(rva)
+
+    def references_of(self, rva):
+        """Xrefs made *by* the instruction at 'rva'."""
+        return tuple(xref for refs in self.xrefs.values() for xref in refs
+                     if xref.source == rva)
+
+    # ── rendering (delegated to report.py) ─────────────────────
+
+    def render_summary(self):
+        from .report import render_summary
+        return render_summary(self)
+
+    def render_functions(self, limit=None):
+        from .report import render_functions
+        return render_functions(self, limit=limit)
+
+    def render_xrefs(self, target=None, limit=8):
+        from .report import render_xrefs
+        return render_xrefs(self, target=target, limit=limit)
+
+    def render_coverage(self):
+        from .report import render_coverage
+        return render_coverage(self)
+
+    def render_stats(self):
+        from .report import render_stats
+        return render_stats(self)
+
+    def render_listing(self, rva, size):
+        from .report import render_listing
+        return render_listing(self.image, rva, size)
+
+    def cfg_of(self, rva, max_blocks=4096):
+        """The CFG of the function containing 'rva', or None if there is none."""
+        from .cfg import build_function_cfg
+
+        entry = self.functions.containing(rva)
+        if entry is None:
+            return None
+        return build_function_cfg(self.decoder, self.image, self.functions,
+                                  entry, max_blocks=max_blocks)
