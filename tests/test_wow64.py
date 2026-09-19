@@ -412,7 +412,9 @@ class TestWow64Attach(unittest.TestCase):
                         break
                     continue
                 try:
-                    if _module_by_name(dbg, os.path.basename(TEST_WOW64_TARGET)):
+                    mod = _module_by_name(
+                        dbg, os.path.basename(TEST_WOW64_TARGET), psapi_only=True)
+                    if mod is not None:
                         saw_image = True
                 except Exception:
                     pass
@@ -549,7 +551,12 @@ class TestWow64ProcessWideHardwareBreakpoint(unittest.TestCase):
             event = dbg.wait_event(2000)
             if event is None or event.type == "EXIT_PROCESS":
                 break
-            if event.type == "EXCEPTION" and _module_by_name(dbg, basename) is not None:
+            # psapi_only: the stop being waited for is the one where PSAPI can
+            # finally see the 32-bit image. The debug-event fallback knows the
+            # base from CREATE_PROCESS, which would match at the very first
+            # breakpoint and stop the drain far too early.
+            if event.type == "EXCEPTION" and _module_by_name(
+                    dbg, basename, psapi_only=True) is not None:
                 break  # loader bp with image mapped; do NOT continue
             dbg.continue_event(event.pid, event.tid)
         return pid, tid
