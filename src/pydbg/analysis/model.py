@@ -189,6 +189,20 @@ class AnalysisResult:
         from .report import render_indirect_sites
         return render_indirect_sites(self, limit=limit, calls_only=calls_only)
 
+    def attribution(self, min_run=4):
+        """Break the coverage and overlap numbers down by cause.
+
+        Computed on request rather than during the run: it re-decodes the
+        uncovered regions to classify them, and most callers only want the
+        totals.
+        """
+        from .attribution import attribute_coverage
+        return attribute_coverage(self, min_run=min_run)
+
+    def render_attribution(self, limit=10):
+        from .report import render_attribution
+        return render_attribution(self.attribution(), limit=limit)
+
     def cfg_of(self, rva, max_blocks=4096):
         """The CFG of the function containing 'rva', or None if there is none."""
         from .cfg import build_function_cfg

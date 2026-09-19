@@ -13,6 +13,16 @@ from .refs import (
 )
 from .seeds import SeedProvider, looks_like_entry
 
+# Names for the causes a decode can be charged to. Seed classes come from
+# SeedProvider; these are the roots discovered *during* a sweep, which are
+# charged to themselves so that a conflict between two admitted callers reads
+# differently from one between two seed sources.
+CALL_TARGET = "call_target"
+JUMP_TARGET = "jump_target"
+JUMP_TABLE = "jump_table"
+IMMEDIATE = "immediate"
+DISCOVERED = "discovered"
+
 
 class StaticAnalyzer:
     """Recover function boundaries and cross-references from an image alone.
@@ -50,21 +60,30 @@ class StaticAnalyzer:
         """Seed, sweep to a fixpoint, and return the result."""
         seeds = SeedProvider(self.image).collect()
         self.stats.seed_functions = len(seeds.confident)
+
+        # Which class produced each seed, so a sweep can be attributed to its
+        # cause. Seeded addresses win over follow-ons: the same address reached
+        # both ways is the seed class's doing.
+        origin_of = {}
+        for kind, rvas in seeds.found.items():
+            for rva in rvas:
+                origin_of.setdefault(rva, kind)
+
         for rva in sorted(seeds.confident):
             # Something calls, exports, or registers these — evidence, so a
             # branch into them is a function entry.
-            self._enqueue(rva, confident=True)
+            self._enqueue(rva, confident=True, origin=origin_of.get(rva))
         for rva in sorted(seeds.tentative):
             # Pointer-shaped evidence only. Decoded, but not claimed as an
             # entry: that is the whole reason the two sets are separate.
-            self._enqueue_code_seed(rva)
+            self._enqueue_code_seed(rva, origin=origin_of.get(rva))
 
         self.stats.sweep_rounds = 0
         while self._pending:
             self.stats.sweep_rounds += 1
             batch, self._pending = self._pending, []
-            for rva in batch:
-                self._sweep_from(rva)
+            for rva, origin in batch:
+                self._sweep_from(rva, origin)
 
         self.functions.invalidate()
         self._finish_stats()
@@ -82,7 +101,7 @@ class StaticAnalyzer:
 
     # ── seeding ────────────────────────────────────────────────
 
-    def _enqueue(self, rva, confident=False):
+    def _enqueue(self, rva, confident=False, origin=None):
         if rva is None or not self.image.is_mapped(rva):
             return False
         if not self.image.is_exec(rva):
@@ -90,7 +109,7 @@ class StaticAnalyzer:
         self.functions.add_start(rva, confident=confident)
         if rva not in self._queued:
             self._queued.add(rva)
-            self._pending.append(rva)
+            self._pending.append((rva, origin or DISCOVERED))
             return True
         return False
 
@@ -115,7 +134,7 @@ class StaticAnalyzer:
         self.stats.indirect_resolved += 1
         return target
 
-    def _seed_branch_target(self, insn, target):
+    def _seed_branch_target(self, insn, target, origin=None):
         """Decide what a branch target is, and register it as that.
 
         A call target is a function entry, full stop. A jump target is not:
@@ -131,13 +150,13 @@ class StaticAnalyzer:
         function.
         """
         if insn.is_call:
-            self._enqueue(target, confident=True)
+            self._enqueue(target, confident=True, origin=origin)
         elif looks_like_entry(self.image, target):
-            self._enqueue(target, confident=False)
+            self._enqueue(target, confident=False, origin=origin)
         else:
-            self._enqueue_code_seed(target)
+            self._enqueue_code_seed(target, origin=origin)
 
-    def _enqueue_code_seed(self, rva):
+    def _enqueue_code_seed(self, rva, origin=None):
         """Queue an address for decoding without claiming it starts a function.
 
         This is where pointer-derived seeds go. A switch-table case body and a
@@ -152,13 +171,13 @@ class StaticAnalyzer:
         self.functions.add_code_seed(rva)
         if rva not in self._queued:
             self._queued.add(rva)
-            self._pending.append(rva)
+            self._pending.append((rva, origin or DISCOVERED))
             return True
         return False
 
     # ── traversal ──────────────────────────────────────────────
 
-    def _sweep_from(self, start, budget=None):
+    def _sweep_from(self, start, origin=None, budget=None):
         """Follow control flow forward from 'start' until it stops.
 
         A conditional jump continues to its fallthrough as well as queueing its
@@ -187,7 +206,7 @@ class StaticAnalyzer:
                 break
 
             budget -= 1
-            self.decoder.mark_covered(addr, insn.size)
+            self.decoder.mark_covered(addr, insn.size, origin)
             self.functions.note_instruction(addr, insn.size)
             self._record_refs(insn, addr)
 
@@ -198,6 +217,10 @@ class StaticAnalyzer:
 
             if target is not None and self.image.is_exec(target):
                 self.functions.add_call_target(target)
+                # Follow-on roots carry their own cause, not the sweep they
+                # were found in: a conflict between two admitted callers is a
+                # different problem from one between two seed sources.
+                cause = CALL_TARGET if insn.is_call else JUMP_TARGET
                 if indirect and not insn.is_call:
                     # A resolved indirect jump goes wherever the data says, and
                     # the data cannot say whether that is a switch case body or
@@ -205,9 +228,9 @@ class StaticAnalyzer:
                     # same treatment a jump-table entry gets, and for the same
                     # reason: claiming one cuts the function containing the
                     # switch apart at every case.
-                    self._enqueue_code_seed(target)
+                    self._enqueue_code_seed(target, origin=cause)
                 else:
-                    self._seed_branch_target(insn, target)
+                    self._seed_branch_target(insn, target, origin=cause)
 
             # After the branch has been resolved: observe() forgets everything
             # on an instruction it does not recognise, and every branch is one.
@@ -233,9 +256,9 @@ class StaticAnalyzer:
             if kind == RefKind.IMM and self.image.is_exec(target):
                 # An immediate landing in code is a candidate entry the call
                 # graph did not reveal; queued so the fixpoint can decide.
-                self._enqueue(target)
+                self._enqueue(target, origin=IMMEDIATE)
             elif kind == RefKind.TABLE:
-                self._absorb_jump_table(target)
+                self._absorb_jump_table(target, origin=JUMP_TABLE)
 
         self._absorb_indirect_jump(insn)
         self._note_if_thunk(insn, rva)
@@ -259,7 +282,7 @@ class StaticAnalyzer:
         for op in insn.operands:
             address = memory_address(insn, op, self.image)
             if address is not None:
-                self._absorb_jump_table(address)
+                self._absorb_jump_table(address, origin=JUMP_TABLE)
 
     def _note_if_thunk(self, insn, rva):
         """Register `jmp [IAT slot]` stubs as the function entries they are.
@@ -280,7 +303,7 @@ class StaticAnalyzer:
                 self.functions.add_start(rva, confident=True)
                 return
 
-    def _absorb_jump_table(self, table_rva, max_entries=512):
+    def _absorb_jump_table(self, table_rva, max_entries=512, origin=None):
         """Read a switch table's entries as code seeds.
 
         They are case bodies, not function entries — so they are decoded and
@@ -295,7 +318,7 @@ class StaticAnalyzer:
             rva = self.image.va_to_rva(value)
             if rva is None or not self.image.is_exec(rva):
                 break                  # tables are packed; the run has ended
-            self._enqueue_code_seed(rva)
+            self._enqueue_code_seed(rva, origin=origin)
 
     # ── results ────────────────────────────────────────────────
 

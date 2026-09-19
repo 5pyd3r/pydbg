@@ -129,6 +129,42 @@ def render_cfg(cfg):
     return "\n".join(lines)
 
 
+def render_attribution(attribution, limit=10):
+    """What the uncovered and overlapping bytes actually are.
+
+    Printed beside the coverage it explains: a percentage without this is not
+    actionable, because padding nobody can decode, a jump table, and code no
+    seed reached call for three different pieces of work and look identical in
+    the total.
+    """
+    lines = ["uncovered bytes by cause"]
+    for name in sorted(attribution.sections):
+        breakdown = attribution.sections[name]
+        total = breakdown.total
+        if not total:
+            continue
+        lines.append(
+            f"  {name:10s} {total:7d}  padding {breakdown.padding:7d} "
+            f"({100 * breakdown.padding / total:4.1f}%)  "
+            f"data {breakdown.data:6d} ({100 * breakdown.data / total:4.1f}%)  "
+            f"code {breakdown.code:6d} ({100 * breakdown.code / total:4.1f}%)  "
+            f"unknown {breakdown.unknown:6d} ({100 * breakdown.unknown / total:4.1f}%)")
+
+    biggest = attribution.worst_unknown(limit)
+    if biggest:
+        lines.append("")
+        lines.append("largest unattributed runs (the part worth looking at)")
+        for name, start, end in biggest:
+            lines.append(f"  {name:10s} {start:#010x}-{end:#010x}  {end - start} bytes")
+
+    if attribution.overlap_by_origin:
+        lines.append("")
+        lines.append("overlap bytes by cause (existing <- new)")
+        for (existing, new), count in list(attribution.overlap_by_origin.items())[:limit]:
+            lines.append(f"  {existing:24s} <- {new:24s} {count}")
+    return "\n".join(lines)
+
+
 def render_indirect_sites(result, limit=40, calls_only=True):
     """Branches whose target was not resolved.
 

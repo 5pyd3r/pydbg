@@ -114,6 +114,16 @@ test(
   timeout: 180,
 )
 
+# Analyses and attributes a real system DLL end to end.
+test(
+  'analysis_attribution',
+  py,
+  args: ['-m', 'unittest', 'tests.test_analysis_attribution'],
+  env: test_env,
+  workdir: meson.project_build_root(),
+  timeout: 180,
+)
+
 test(
   'debugger',
   py,
