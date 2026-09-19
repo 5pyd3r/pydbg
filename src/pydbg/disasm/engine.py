@@ -13,6 +13,11 @@ OP_REG = 1
 OP_IMM = 2
 OP_MEM = 3
 
+# Register id for RIP, so callers can recognise RIP-relative operands without
+# importing capstone. 0 (the invalid id) when capstone is unavailable, which
+# matches no real operand.
+REG_RIP = capstone.x86.X86_REG_RIP if capstone is not None else 0
+
 
 @dataclass(frozen=True, slots=True)
 class Operand:
@@ -62,6 +67,18 @@ class Operand:
         """
         return (self.kind == OP_MEM and self.mem_segment == 0
                 and self.mem_base == 0 and self.mem_index != 0)
+
+    @property
+    def is_rip_relative(self):
+        """True for [rip + disp] — the displacement is relative, not an address.
+
+        This is how x64 addresses data most of the time, so a cross-reference
+        pass that only looks at is_absolute_mem finds almost nothing. The
+        target is `next_instruction + mem_disp`; resolving it needs the
+        instruction's address and size, which is why it cannot be done here.
+        """
+        return (self.kind == OP_MEM and self.mem_segment == 0
+                and self.mem_base == REG_RIP and self.mem_index == 0)
 
 
 @dataclass

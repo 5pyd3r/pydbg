@@ -7,6 +7,20 @@
 ### PE Parser (6 tests)
 **Fixed in #9.** PE32+ optional header had incorrect `NumberOfRvaAndSizes` offset (read from 92 instead of 108), wrong section header struct format (`<IIIIIIIHH` → `<IIIIIIHHI`), and test data used PE32 layout (96 bytes) instead of PE32+ (112 bytes). All 20 PE tests pass.
 
+> **Correction (2026-09-19): the section header format was NOT fixed by #9.**
+> `parser.py` still read `<IIIIIIIHH` — one dword too many and a word too few —
+> so `SectionHeader.characteristics` held only its high 16 bits. A section
+> declared `0x60000020` came back as `0x6000`, which meant
+> `IMAGE_SCN_MEM_EXECUTE` (0x20000000) never matched and **no section was ever
+> executable** to any consumer. It went unnoticed because the fixtures build
+> `SectionHeader` objects directly and none of them asserted on the field;
+> only reading a real image through the parser shows it. Fixed in #47, with
+> the round-trip now covered by a test.
+>
+> The general lesson is worth more than the fix: a "fixed in #N" note is a
+> claim about the *parser*, and #9's evidence was a set of tests that bypass
+> the parser for this field. The note was read as settled for months.
+
 ### ContinueDebugEvent Error 87 (5 tests)
 **Fixed in #9.** Cross-test event pollution: `terminate_process` and `run()` left unconsumed `EXIT_PROCESS` debug events, poisoning subsequent tests' `wait_event` calls. Fixed by draining debug events after process termination and consuming events until initial breakpoint before interacting with target process.
 
