@@ -703,6 +703,15 @@ class TestSourceTryRead(unittest.TestCase):
                 self.assertEqual(src.try_read(0, 4), b"0123")
                 self.assertIsNone(src.try_read(8, 4))
                 self.assertIsNone(src.try_read(20, 1))
+                # ...and read() raises, exactly as BytesSource does. A short
+                # slice used to come back here, which is the one wrong answer:
+                # it is indistinguishable from real data at the call site, so
+                # a caller that forgot to check len() parsed a truncated
+                # structure and had nothing to notice.
+                with self.assertRaises(ValueError):
+                    src.read(20, 1)
+                with self.assertRaises(ValueError):
+                    src.read(8, 4)          # straddles the end
             finally:
                 src.close()
         finally:

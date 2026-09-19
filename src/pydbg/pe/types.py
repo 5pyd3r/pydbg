@@ -121,6 +121,26 @@ class DebugEntry:
 
 
 @dataclass
+class CodeViewInfo:
+    """Decoded type-2 debug payload — where this build's PDB came from.
+
+    Two signatures share this slot and they are not interchangeable. RSDS
+    ("PDB 7.0") is what every current MSVC and clang emit, and the GUID+age
+    pair in it is an identity: the path alone is a build-machine path that may
+    not exist on this machine, but the pair is what a symbol server indexes by
+    (the PDB's own name is the GUID in uppercase hex with the age appended).
+    NB10 ("PDB 2.0") predates it and carries a timestamp instead — no GUID, so
+    nothing in it identifies the build beyond a path that has usually moved.
+    """
+
+    signature: str             # 'RSDS' or 'NB10'
+    pdb_path: str              # as stored; typically a full build-machine path
+    age: int
+    guid: str | None = None    # 'xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx', RSDS only
+    timestamp: int | None = None   # NB10 only
+
+
+@dataclass
 class ExceptionEntry:
     """One RUNTIME_FUNCTION from the exception directory (data directory 3).
 
@@ -143,7 +163,17 @@ class RichHeaderEntry:
 
 @dataclass
 class RichHeader:
-    """Decoded Rich header — the toolchain fingerprint MSVC leaves behind."""
+    """Decoded Rich header — the toolchain fingerprint MSVC leaves behind.
 
-    xor_key: int
+    'malformed' is what keeps two different findings apart that used to look
+    identical: an image with no Rich header at all (PE.rich_header is None, so
+    it was not built by MSVC's linker) and an image that has the marker but
+    whose body does not decode (this is set, so the scan found something and
+    could not finish reading it — a nonstandard or deliberately mangled stub).
+    Reporting both as "no Rich header" turns the second, interesting case into
+    the first, uninteresting one.
+    """
+
+    xor_key: int | None  # None when the marker was found but the key was cut off
     entries: list        # list[RichHeaderEntry]
+    malformed: str | None = None   # None when the header decoded fully

@@ -6,7 +6,7 @@ from .types import (
     DosHeader, FileHeader, OptionalHeader, DataDirectory,
     SectionHeader, ExportEntry, ImportEntry,
     RelocationEntry, RelocationBlock, TLSDirectory, DebugEntry,
-    ExceptionEntry, RichHeader, RichHeaderEntry,
+    CodeViewInfo, ExceptionEntry, RichHeader, RichHeaderEntry,
 )
 from .view import View
 
@@ -14,15 +14,75 @@ from .view import View
 # eagerly at construction; the rest are lazy (see PE).
 DIR_EXPORT = 0
 DIR_IMPORT = 1
-DIR_RESOURCE = 2          # parsed on a separate branch (feat/pe-resource-parser)
+DIR_RESOURCE = 2          # parsed in pe/resource.py
 DIR_EXCEPTION = 3
 DIR_SECURITY = 4
 DIR_BASERELOC = 5
 DIR_DEBUG = 6
 DIR_TLS = 9
 
+# IMAGE_DEBUG_TYPE_CODEVIEW: the one debug entry type that carries the PDB.
+DEBUG_TYPE_CODEVIEW = 2
+
 # All 16 slots fit; the cap is what keeps a lying NumberOfRvaAndSizes bounded.
 MAX_DATA_DIRECTORIES = 16
+
+# A CodeView payload is a 24-byte header plus a path. Both bounds are what stop
+# a debug entry whose SizeOfData lies from turning into a huge read.
+MAX_CODEVIEW_PAYLOAD = 0x1000
+
+
+def _format_guid(raw: bytes) -> str:
+    """16 raw GUID bytes -> the 8-4-4-4-12 form a symbol server is indexed by."""
+    a, b, c = struct.unpack_from('<IHH', raw, 0)
+    tail = raw[8:]
+    return f'{a:08X}-{b:04X}-{c:04X}-{tail[:2].hex().upper()}-{tail[2:].hex().upper()}'
+
+
+def _decode_path(raw: bytes) -> str:
+    """The NUL-terminated path at the start of 'raw'.
+
+    Decoded with replacement rather than strictly: the path was written by
+    whichever machine built the image, and one non-UTF-8 byte in it is not a
+    reason to call the whole payload undecodable.
+    """
+    end = raw.find(b'\x00')
+    if end != -1:
+        raw = raw[:end]
+    return raw.decode('utf-8', errors='replace')
+
+
+def decode_codeview(raw: bytes):
+    """Decode a CodeView debug payload, or None when it is not one pydbg knows.
+
+    Two layouts share this slot and neither stores a path length, so the path
+    runs to the end of the payload:
+
+      RSDS  'RSDS' + GUID(16) + age(4)      + path   — PDB 7.0, everything current
+      NB10  'NB10' + offset(4) + timestamp(4) + age(4) + path   — PDB 2.0
+
+    A truncated header returns None; the caller still has the DebugEntry.
+    """
+    if len(raw) < 8:
+        return None
+
+    if raw[:4] == b'RSDS':
+        if len(raw) < 24:
+            return None
+        return CodeViewInfo(
+            signature='RSDS',
+            pdb_path=_decode_path(raw[24:]),
+            age=struct.unpack_from('<I', raw, 20)[0],
+            guid=_format_guid(raw[4:20]))
+
+    if raw[:4] == b'NB10':
+        if len(raw) < 16:
+            return None
+        _offset, timestamp, age = struct.unpack_from('<III', raw, 4)
+        return CodeViewInfo(signature='NB10', pdb_path=_decode_path(raw[16:]),
+                            age=age, timestamp=timestamp)
+
+    return None
 
 
 class PEParser:
@@ -349,8 +409,9 @@ class PEParser:
     def parse_debug(self, data_dirs: dict, max_entries: int = 64) -> list:
         """Debug directory records (data directory 6).
 
-        Entry type 2 (IMAGE_DEBUG_TYPE_CODEVIEW) is the one that carries the
-        PDB path and GUID for a build.
+        Structure only — the payload each record points at is decoded by
+        parse_codeview, because most entry types have no defined payload and
+        the record itself is what tells you which ones do.
         """
         entries = []
         dd = data_dirs.get(DIR_DEBUG)
@@ -370,6 +431,49 @@ class PEParser:
                 size_of_data=size, address_of_raw_data=addr,
                 pointer_to_raw_data=ptr))
         return entries
+
+    def _read_debug_payload(self, entry, max_size: int):
+        """The bytes a debug entry points at, or None.
+
+        AddressOfRawData is an RVA and is what the loader uses; a few linkers
+        and most dumpers leave it zero and set only the file offset, so that is
+        the fallback rather than a separate code path at every call site.
+        """
+        size = min(entry.size_of_data, max_size)
+        if size <= 0:
+            return None
+        if entry.address_of_raw_data:
+            raw = self._read_rva(entry.address_of_raw_data, size)
+            if raw is not None:
+                return raw
+        if entry.pointer_to_raw_data:
+            return self._src.try_read(entry.pointer_to_raw_data, size)
+        return None
+
+    def parse_codeview(self, data_dirs: dict, max_entries: int = 64,
+                       max_payload: int = MAX_CODEVIEW_PAYLOAD) -> list:
+        """Decode every CodeView payload in the debug directory.
+
+        A list rather than "the" PDB: the directory is a list, and a merged or
+        re-linked image can carry more than one type-2 record. Returning the
+        first would make the others unobservable.
+
+        An entry whose payload is missing, truncated, or in a signature pydbg
+        does not know is skipped — the DebugEntry is still in debug_entries, so
+        comparing the two counts is how a caller sees that something was left
+        on the table.
+        """
+        infos = []
+        for entry in self.parse_debug(data_dirs, max_entries):
+            if entry.type != DEBUG_TYPE_CODEVIEW:
+                continue
+            raw = self._read_debug_payload(entry, max_payload)
+            if raw is None:
+                continue
+            info = decode_codeview(raw)
+            if info is not None:
+                infos.append(info)
+        return infos
 
     def parse_exception(self, data_dirs: dict, max_entries: int = 65536) -> list:
         """RUNTIME_FUNCTION table (data directory 3).
@@ -396,27 +500,41 @@ class PEParser:
         return entries
 
     def parse_rich_header(self, e_lfanew: int):
-        """Decode the Rich header from the DOS stub, or None.
+        """Decode the Rich header from the DOS stub.
 
-        The header is XOR-obfuscated with a key stored after the "Rich" marker
-        and is located by XOR-searching for the "DanS" marker, so the scan is
+        Returns None only when the image has no Rich header: no room for one
+        before the PE signature, an unreadable stub, or no "Rich" marker in it.
+        Once the marker is there the image was built by MSVC's linker (or
+        something imitating it), so a body that will not decode is a different
+        finding and comes back as a RichHeader with 'malformed' set rather than
+        as None — see RichHeader for why that distinction is worth keeping.
+
+        The header is XOR-obfuscated with the key stored after the marker and
+        is located by XOR-searching for the "DanS" marker, so the scan is
         bounded by the PE header rather than the whole file.
         """
         if e_lfanew <= 0x40:
-            return None
+            return None                     # no room for a header, so no header
         region = self._src.try_read(0x40, e_lfanew - 0x40)
-        if not region or len(region) < 8:
+        if not region:
             return None
 
         rich = region.rfind(b"Rich")
-        if rich == -1 or rich + 8 > len(region):
-            return None
+        if rich == -1:
+            return None                     # not built by a linker that emits one
+        if rich + 8 > len(region):
+            return RichHeader(xor_key=None, entries=[],
+                              malformed=f'"Rich" marker at stub offset '
+                                        f'{rich:#x} is cut off before its key')
         key = struct.unpack_from('<I', region, rich + 4)[0]
 
         encoded_dans = struct.pack('<I', 0x536E6144 ^ key)
         dans = region.rfind(encoded_dans, 0, rich)
         if dans == -1:
-            return None
+            return RichHeader(
+                xor_key=key, entries=[],
+                malformed=f'key {key:#010x} does not decode a "DanS" marker '
+                          f'before the "Rich" marker')
 
         # Entries follow the marker and three encoded zero dwords.
         entries = []
@@ -424,6 +542,11 @@ class PEParser:
             comp_id = struct.unpack_from('<I', region, off)[0] ^ key
             count = struct.unpack_from('<I', region, off + 4)[0] ^ key
             entries.append(RichHeaderEntry(comp_id=comp_id, count=count))
+        if not entries:
+            return RichHeader(
+                xor_key=key, entries=[],
+                malformed=f'"DanS" marker at stub offset {dans:#x} leaves no '
+                          f'room for an entry before the "Rich" marker')
         return RichHeader(xor_key=key, entries=entries)
 
     def _read_rva_table(self, table_rva: int, count: int,

@@ -4,11 +4,14 @@ from .types import (
     DosHeader, FileHeader, OptionalHeader, DataDirectory,
     SectionHeader, ExportEntry, ImportEntry,
     RelocationEntry, RelocationBlock, TLSDirectory, DebugEntry,
-    ExceptionEntry, RichHeader, RichHeaderEntry,
+    CodeViewInfo, ExceptionEntry, RichHeader, RichHeaderEntry,
 )
 from .source import Source, FileSource, BytesSource
 from .view import View, FileView, LoadedView
 from .parser import PEParser
+from .resource import (
+    PEResourceParser, ResourceEntry, RESOURCE_TYPES,
+)
 
 
 class PE:
@@ -121,6 +124,33 @@ class PE:
             'debug_entries',
             lambda: self._parser.parse_debug(self.optional_header.data_directories))
 
+    def resource_parser(self):
+        """A PEResourceParser over this image — filtering and extraction.
+
+        Separate from the list below because only some callers want the parser,
+        and building it walks the tree.
+        """
+        return self._cached('resource_parser', lambda: PEResourceParser(self))
+
+    @property
+    def resources(self):
+        """Every entry in the resource tree (data directory 2)."""
+        return self.resource_parser().parse()
+
+    @property
+    def codeview_entries(self):
+        """Decoded CodeView payloads: the PDB path, GUID and age per record.
+
+        Structure only on its own says little — the type-2 payload is the part
+        that names a PDB, and it was the caller's job to decode it out of the
+        raw bytes until now. Fewer entries here than type-2 records in
+        debug_entries means some payload did not decode (see parse_codeview).
+        """
+        return self._cached(
+            'codeview_entries',
+            lambda: self._parser.parse_codeview(
+                self.optional_header.data_directories))
+
     @property
     def exception_entries(self):
         """RUNTIME_FUNCTION table (data directory 3) — x64 function boundaries."""
@@ -131,7 +161,11 @@ class PE:
 
     @property
     def rich_header(self):
-        """Decoded Rich header, or None when the image has none."""
+        """Decoded Rich header; None only when the image has no Rich marker.
+
+        A header that is present but does not decode comes back with
+        'malformed' set instead — see RichHeader.
+        """
         return self._cached(
             'rich_header',
             lambda: self._parser.parse_rich_header(self.dos_header.e_lfanew))
@@ -181,8 +215,9 @@ __all__ = [
     'DosHeader', 'FileHeader', 'OptionalHeader', 'DataDirectory',
     'SectionHeader', 'ExportEntry', 'ImportEntry',
     'RelocationEntry', 'RelocationBlock', 'TLSDirectory', 'DebugEntry',
-    'ExceptionEntry', 'RichHeader', 'RichHeaderEntry',
+    'CodeViewInfo', 'ExceptionEntry', 'RichHeader', 'RichHeaderEntry',
     'Source', 'FileSource', 'BytesSource',
     'View', 'FileView', 'LoadedView',
     'PEParser',
+    'PEResourceParser', 'ResourceEntry', 'RESOURCE_TYPES',
 ]
