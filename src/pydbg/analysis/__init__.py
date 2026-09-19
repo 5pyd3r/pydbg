@@ -14,20 +14,27 @@ honest form: the count of decoded bytes alone reads high whenever the decode
 has drifted out of alignment, which is exactly when it should read low.
 """
 
-from .engine import StaticAnalyzer, analyze_bytes, analyze_file, analyze_pe
+from .cfg import CFGBlock, FunctionCFG, build_function_cfg, cfg_to_dot
+from .engine import (
+    StaticAnalyzer, analyze_bytes, analyze_file, analyze_pe, analyze_process,
+)
 from .functions import FunctionTable
 from .image import AnalyzedImage, SectionInfo
 from .model import (
     AnalysisResult, AnalysisStats, CoverageReport, Function, RefKind,
     SeedConfig, Xref,
 )
-from .refs import branch_target, classify_refs, is_indirect_branch
+from .process_source import ProcessSource
+from .refs import branch_target, classify_refs, is_indirect_branch, memory_address
+from .seeds import SeedProvider, SeedSet, looks_like_entry
 
 __all__ = [
     'StaticAnalyzer', 'analyze_file', 'analyze_bytes', 'analyze_pe',
-    'AnalyzedImage', 'SectionInfo',
-    'FunctionTable',
+    'analyze_process',
+    'AnalyzedImage', 'SectionInfo', 'ProcessSource',
+    'FunctionTable', 'SeedProvider', 'SeedSet', 'looks_like_entry',
     'AnalysisResult', 'AnalysisStats', 'CoverageReport', 'Function',
     'RefKind', 'SeedConfig', 'Xref',
-    'branch_target', 'classify_refs', 'is_indirect_branch',
+    'FunctionCFG', 'CFGBlock', 'build_function_cfg', 'cfg_to_dot',
+    'branch_target', 'classify_refs', 'is_indirect_branch', 'memory_address',
 ]
