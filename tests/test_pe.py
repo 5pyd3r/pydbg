@@ -2,7 +2,15 @@
 
 import os
 import struct
+import tempfile
 import unittest
+
+
+def _write_temp(data, suffix=".bin"):
+    """Write bytes to a temp file and return its path (caller removes it)."""
+    with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as handle:
+        handle.write(data)
+        return handle.name
 
 
 def build_minimal_pe32plus():
@@ -640,6 +648,155 @@ class TestFileViewRawSizeGuard(unittest.TestCase):
         loaded = LoadedView()
         for rva in (0x1000, 0x23FF, 0x2400, 0x4000, 0x5FFF):
             self.assertEqual(loaded.rva_to_source_offset(rva), rva)
+
+
+class TestSourceTryRead(unittest.TestCase):
+    """try_read is the one place "cannot read" becomes None.
+
+    The sources disagree by default — BytesSource raises past the end,
+    FileSource returns a short slice — and every directory walk depends on
+    both meaning the same thing. Without this, a truncated directory aborts
+    the whole parse instead of ending one table.
+    """
+
+    def test_bytes_source_out_of_bounds_is_none(self):
+        from pydbg.pe.source import BytesSource
+
+        src = BytesSource(b"0123456789")
+        self.assertEqual(src.try_read(0, 4), b"0123")
+        self.assertIsNone(src.try_read(8, 4))     # straddles the end
+        self.assertIsNone(src.try_read(20, 1))    # starts past it
+        # read() is unchanged: try_read is additive, not a replacement.
+        with self.assertRaises(ValueError):
+            src.read(20, 1)
+
+    def test_file_source_short_read_is_none(self):
+        from pydbg.pe.source import FileSource
+
+        path = _write_temp(b"0123456789")
+        try:
+            src = FileSource(path)
+            try:
+                self.assertEqual(src.try_read(0, 4), b"0123")
+                self.assertIsNone(src.try_read(8, 4))
+                self.assertIsNone(src.try_read(20, 1))
+            finally:
+                src.close()
+        finally:
+            os.remove(path)
+
+    def test_raising_source_becomes_none(self):
+        """A live-process source signals an unreadable page with OSError."""
+        from pydbg.pe.source import Source
+
+        class Broken(Source):
+            def read(self, offset, size):
+                raise OSError(299, "ERROR_PARTIAL_COPY")
+
+        self.assertIsNone(Broken().try_read(0, 16))
+
+
+class TestPEConstructionIsUnified(unittest.TestCase):
+    """PE(data) and PE.from_file(path) must produce the same object.
+
+    They used to be two independent copies of the same parse sequence, so a
+    new directory had to be wired into both — and would eventually be wired
+    into only one.
+    """
+
+    def test_from_file_matches_from_bytes(self):
+        from pydbg.pe import PE
+
+        data = build_minimal_pe32plus()
+        path = _write_temp(data, ".exe")
+        try:
+            from_bytes = PE(data)
+            from_file = PE.from_file(path)
+        finally:
+            os.remove(path)
+
+        self.assertEqual(from_file.dos_header, from_bytes.dos_header)
+        self.assertEqual(from_file.file_header, from_bytes.file_header)
+        self.assertEqual(from_file.optional_header, from_bytes.optional_header)
+        self.assertEqual(from_file.sections, from_bytes.sections)
+        self.assertEqual(from_file.exports, from_bytes.exports)
+        self.assertEqual(from_file.imports, from_bytes.imports)
+        self.assertEqual(from_file.image_base, from_bytes.image_base)
+
+    def test_from_file_closes_its_handle(self):
+        """Reading the file in is what lets the handle close early.
+
+        Removing the file before asserting would fail on Windows if anything
+        still held it open.
+        """
+        from pydbg.pe import PE
+        from pydbg.pe.source import BytesSource
+
+        data = build_minimal_pe32plus()
+        path = _write_temp(data, ".exe")
+        try:
+            pe = PE.from_file(path)
+        finally:
+            os.remove(path)
+
+        self.assertIsInstance(pe.source, BytesSource)
+        # ...and the bytes are still there to parse, with the file gone.
+        self.assertEqual(pe.read_rva(0x1000, 2), data[0x400:0x402])
+
+    def test_lazy_keeps_the_file_open(self):
+        from pydbg.pe import PE
+        from pydbg.pe.source import FileSource
+
+        data = build_minimal_pe32plus()
+        path = _write_temp(data, ".exe")
+        pe = PE.from_file(path, lazy=True)
+        try:
+            self.assertIsInstance(pe.source, FileSource)
+            self.assertEqual(pe.read_rva(0x1000, 2), data[0x400:0x402])
+        finally:
+            pe.source.close()
+            os.remove(path)
+
+
+class TestReadRva(unittest.TestCase):
+    """read_rva is the accessor every directory parser will go through."""
+
+    def test_reads_a_file_backed_rva(self):
+        from pydbg.pe import PE
+
+        data = build_minimal_pe32plus()
+        pe = PE(data)
+        # .text holds RVA 0x1000 at file offset 0x400.
+        self.assertEqual(pe.read_rva(0x1000, 4), data[0x400:0x404])
+
+    def test_unmapped_rva_is_none(self):
+        from pydbg.pe import PE
+
+        pe = PE(build_minimal_pe32plus())
+        self.assertIsNone(pe.read_rva(0x99999, 4))
+
+    def test_size_that_overruns_the_file_is_none(self):
+        """A lying size field must end a walk, not raise."""
+        from pydbg.pe import PE
+
+        data = build_minimal_pe32plus()
+        pe = PE(data)
+        self.assertIsNone(pe.read_rva(0x1000, len(data) * 2))
+
+    def test_from_source_honours_an_explicit_view(self):
+        """The seam a live-process parse uses: with LoadedView the source
+        offset IS the RVA, so headers at RVA 0.. parse while the body is read
+        relative to the module base."""
+        from pydbg.pe import PE
+        from pydbg.pe.source import BytesSource
+        from pydbg.pe.view import LoadedView
+
+        data = build_minimal_pe32plus()
+        pe = PE.from_source(BytesSource(data), LoadedView())
+        self.assertEqual(pe.read_rva(0x50, 4), data[0x50:0x54])
+        self.assertIsNone(pe.read_rva(0x99999, 4))
+        # The headers really did parse through the loaded view.
+        self.assertEqual(pe.dos_header.e_lfanew, 0x80)
 
 
 class TestExportParsing(unittest.TestCase):
