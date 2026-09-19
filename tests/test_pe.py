@@ -577,6 +577,71 @@ class TestRvaConversion(unittest.TestCase):
         self.assertIsNone(offset)
 
 
+class TestFileViewRawSizeGuard(unittest.TestCase):
+    """A section's in-memory extent can exceed what the file stores.
+
+    FileView must refuse those RVAs instead of resolving them into the next
+    section's raw data. Packed images make this routine rather than exotic: a
+    UPX0-style section declares virtual_size with size_of_raw_data == 0, so
+    every RVA inside it used to return a plausible offset into whatever
+    followed — bytes from the wrong place, which is worse than no answer.
+    """
+
+    @staticmethod
+    def _sections():
+        from pydbg.pe.types import SectionHeader
+
+        def section(name, va, vsize, rawptr, rawsize):
+            return SectionHeader(
+                name=name, virtual_address=va, virtual_size=vsize,
+                pointer_to_raw_data=rawptr, size_of_raw_data=rawsize,
+                characteristics=0x60000020)
+
+        return [
+            section(".text", 0x1000, 0x1000, 0x400, 0x1000),   # fully backed
+            section(".data", 0x2000, 0x2000, 0x1400, 0x400),   # zero-fill tail
+            section("UPX0", 0x4000, 0x2000, 0x0000, 0x0000),   # mapped, not stored
+            section("UPX1", 0x6000, 0x1000, 0x1800, 0x600),
+        ]
+
+    def view(self):
+        from pydbg.pe.view import FileView
+        return FileView(self._sections())
+
+    def test_fully_backed_section_resolves(self):
+        self.assertEqual(self.view().rva_to_source_offset(0x1000), 0x400)
+        self.assertEqual(self.view().rva_to_source_offset(0x1FFF), 0x13FF)
+
+    def test_zero_raw_size_section_is_not_file_backed(self):
+        # Used to return 0 for the first RVA — i.e. the DOS header — and
+        # 0x1800 (UPX1's raw data) for the last.
+        self.assertIsNone(self.view().rva_to_source_offset(0x4000))
+        self.assertIsNone(self.view().rva_to_source_offset(0x5FFF))
+
+    def test_zero_fill_tail_is_not_file_backed(self):
+        # .data maps 0x2000..0x4000 but stores only the first 0x400 bytes.
+        self.assertEqual(self.view().rva_to_source_offset(0x2000), 0x1400)
+        self.assertEqual(self.view().rva_to_source_offset(0x23FF), 0x17FF)
+        # These used to resolve into UPX1's raw data at 0x1800.
+        self.assertIsNone(self.view().rva_to_source_offset(0x2400))
+        self.assertIsNone(self.view().rva_to_source_offset(0x3FFF))
+
+    def test_rva_outside_every_section_is_none(self):
+        self.assertIsNone(self.view().rva_to_source_offset(0x9000))
+
+    def test_loaded_view_does_not_inherit_the_guard(self):
+        """The zero-fill tail IS readable in a live process.
+
+        That asymmetry is the whole reason two views exist, so LoadedView must
+        keep mapping every RVA rather than inheriting FileView's filtering.
+        """
+        from pydbg.pe.view import LoadedView
+
+        loaded = LoadedView()
+        for rva in (0x1000, 0x23FF, 0x2400, 0x4000, 0x5FFF):
+            self.assertEqual(loaded.rva_to_source_offset(rva), rva)
+
+
 class TestExportParsing(unittest.TestCase):
     """Tests for export directory parsing."""
 
