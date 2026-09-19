@@ -126,6 +126,134 @@ class TestInstructionDataclass(unittest.TestCase):
         self.assertFalse(insn.is_ret)
         self.assertFalse(insn.is_cond)
         self.assertEqual(insn.groups, [])
+        # Additive fields: an Instruction built the old way still works, and
+        # reads as "operands not materialized" rather than as a missing field.
+        self.assertEqual(insn.operands, ())
+        self.assertEqual(insn.insn_id, 0)
+
+
+class TestOperandDetail(unittest.TestCase):
+    """Operand-level detail, which the engine used to decode and discard.
+
+    `cs.detail` was already True, so the data was always there; it just never
+    reached the caller, which is why no cross-referencing or structure
+    recovery was possible on top of this engine.
+    """
+
+    def decode(self, code, mode="x64", addr=0x140001000):
+        from pydbg.disasm.engine import DisasmEngine
+        return DisasmEngine(mode=mode).disasm(addr, code)[0]
+
+    def test_absolute_memory_operand(self):
+        from pydbg.disasm.engine import OP_MEM
+        # movabs rax, qword ptr [0x140001000]
+        insn = self.decode(b"\x48\xa1\x00\x10\x00\x40\x01\x00\x00\x00")
+        dest, src = insn.operands
+        self.assertEqual(src.kind, OP_MEM)
+        self.assertTrue(src.is_absolute_mem)
+        self.assertFalse(src.is_table_mem)
+        self.assertEqual(src.mem_disp, 0x140001000)
+        self.assertEqual(src.size, 8)
+
+    def test_base_relative_memory_is_not_an_address(self):
+        # mov rax, [rbx+8] — a displacement of 8 is an offset, not an address,
+        # and must not be mistaken for one.
+        insn = self.decode(b"\x48\x8b\x43\x08")
+        src = insn.operands[1]
+        self.assertFalse(src.is_absolute_mem)
+        self.assertFalse(src.is_table_mem)
+        self.assertNotEqual(src.mem_base, 0)
+        self.assertEqual(src.mem_disp, 8)
+
+    def test_indexed_memory_is_a_table_reference(self):
+        # jmp qword ptr [rcx*8 + 0x40002000] — switch-table shape.
+        insn = self.decode(b"\xff\x24\xcd\x00\x20\x00\x40")
+        src = insn.operands[0]
+        self.assertTrue(src.is_table_mem)
+        self.assertFalse(src.is_absolute_mem)
+        self.assertEqual(src.mem_scale, 8)
+        self.assertEqual(src.mem_disp, 0x40002000)
+
+    def test_segment_relative_memory_is_not_an_address(self):
+        """gs:[0x60] reads a TEB field; 0x60 is an offset, not an address.
+
+        This looked like absolute addressing by every other test — no base, no
+        index — and a cross-reference pass built on that would have recorded
+        references to address 0x60. Found by decoding real code: every
+        "absolute" operand in the first 128KB of kernel32.dll's .text was one
+        of these TEB accesses.
+        """
+        insn = self.decode(b"\x65\x48\x8b\x04\x25\x60\x00\x00\x00")
+        src = insn.operands[1]
+        self.assertNotEqual(src.mem_segment, 0, "expected the gs prefix")
+        self.assertEqual(src.mem_base, 0)
+        self.assertEqual(src.mem_index, 0)
+        self.assertFalse(src.is_absolute_mem)
+        self.assertFalse(src.is_table_mem)
+
+    def test_immediate_keeps_full_width(self):
+        """The port this comes from masked immediates to 32 bits.
+
+        On an x64 image that turns 0x140001000 into 0x40001000 — and every
+        such address then fails an image-window test, silently, so the seed
+        classes that depend on immediates just come back empty.
+        """
+        from pydbg.disasm.engine import OP_IMM
+        insn = self.decode(b"\x48\xb8\x00\x10\x00\x40\x01\x00\x00\x00")
+        src = insn.operands[1]
+        self.assertEqual(src.kind, OP_IMM)
+        self.assertEqual(src.imm, 0x140001000)
+        self.assertEqual(src.imm & 0xFFFFFFFF, 0x40001000,
+                         "sanity: masking really would have changed this")
+
+    def test_negative_displacement_is_not_masked(self):
+        """[rbx-8] must stay -8, not become 0xFFFFFFF8."""
+        insn = self.decode(b"\x48\x8b\x43\xf8")
+        src = insn.operands[1]
+        self.assertEqual(src.mem_disp, -8)
+
+    def test_indirect_call_has_a_register_operand(self):
+        """A call through a register is how indirect calls appear; the old
+        Instruction could only say is_call, not what it called."""
+        from pydbg.disasm.engine import OP_REG
+        insn = self.decode(b"\x48\xff\xd0")
+        self.assertTrue(insn.is_call)
+        self.assertEqual(len(insn.operands), 1)
+        self.assertEqual(insn.operands[0].kind, OP_REG)
+
+    def test_ret_has_no_operands(self):
+        insn = self.decode(b"\xc3")
+        self.assertTrue(insn.is_ret)
+        self.assertEqual(insn.operands, ())
+
+    def test_jump_target_is_an_immediate(self):
+        insn = self.decode(b"\x75\x05")
+        self.assertTrue(insn.is_cond)
+        self.assertEqual(insn.operands[0].imm, 0x140001007)
+
+    def test_operand_widths_follow_the_operand_size_prefix(self):
+        # mov rax, [rbx] is 8 bytes wide; mov eax, [rbx] is 4. Width matters to
+        # anything reconstructing a structure layout.
+        self.assertEqual(self.decode(b"\x48\x8b\x03").operands[1].size, 8)
+        self.assertEqual(self.decode(b"\x8b\x03").operands[1].size, 4)
+
+    def test_operands_are_detached_and_small(self):
+        """Capstone operand objects keep their CsInsn alive (~1KB each).
+
+        Holding those for a 670k-instruction image is ~1GB, so Operand is a
+        frozen slotted dataclass. Both properties are load-bearing and both
+        would be lost by a casual edit.
+        """
+        import sys
+
+        from pydbg.disasm.engine import Operand
+
+        operand = self.decode(b"\x48\x8b\x43\x08").operands[1]
+        self.assertIsInstance(operand, Operand)
+        self.assertFalse(hasattr(operand, "__dict__"), "slots=True was lost")
+        self.assertLess(sys.getsizeof(operand), 200)
+        with self.assertRaises(Exception):      # frozen=True was lost
+            operand.mem_disp = 1
 
 
 class TestBasicBlocks(unittest.TestCase):
