@@ -75,6 +75,20 @@ class Operand:
                 and self.mem_base == 0 and self.mem_index != 0)
 
     @property
+    def is_indexed_mem(self):
+        """True for [reg*scale + disp] or [base + reg*scale + disp].
+
+        The displacement of an indexed form is not a field offset: with no
+        base it is a table base, and with one it is a displacement from a
+        base the analysis cannot know. Neither is a target that can be
+        resolved statically, which is why `is_table_mem` keeps its stricter
+        definition — a switch reached as `jmp [rbx + rcx*4]` is recorded as
+        an unresolved indirect site, not as a table with a known base.
+        """
+        return (self.kind == OP_MEM and self.mem_segment == 0
+                and self.mem_index != 0)
+
+    @property
     def is_rip_relative(self):
         """True for [rip + disp] — the displacement is relative, not an address.
 

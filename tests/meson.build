@@ -132,6 +132,14 @@ test(
   workdir: meson.project_build_root(),
 )
 
+test(
+  'analysis_backlog',
+  py,
+  args: ['-m', 'unittest', 'tests.test_analysis_backlog'],
+  env: test_env,
+  workdir: meson.project_build_root(),
+)
+
 # Traces a real system DLL, which does not fit the 30s default.
 test(
   'analysis_access',

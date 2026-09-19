@@ -91,6 +91,11 @@ class AnalysisStats:
     # and without the second figure there is no way to tell.
     indirect_resolved: int = 0
     indirect_unknown: int = 0
+    # True when the whole-run instruction ceiling stopped the traversal.
+    # Silent truncation would read as a complete analysis.
+    budget_exhausted: bool = False
+    # Tentative starts demoted for falling inside a function with evidence.
+    pruned_starts: int = 0
 
     def as_dict(self):
         return dict(self.__dict__)
@@ -107,6 +112,13 @@ class SeedConfig:
     # saves decoding the whole image a second time to recover them. For a
     # system DLL that is tens of thousands of tuples against half a minute.
     collect_accesses: bool = True
+    # Which seed classes to run; None means all of them. Naming a subset is
+    # how one class's contribution gets measured without editing code.
+    seed_classes: tuple = None
+    # A ceiling on instructions decoded across the *whole* run, as opposed
+    # to max_instructions, which bounds one sweep. Without it a pathological
+    # image can be swept an unbounded number of times.
+    max_total_instructions: int = 20_000_000
     # What to do when a branch targets a byte that does not decode. Recording
     # them is cheap and they are the signal that a seed was wrong; silently
     # dropping them hides exactly that.
