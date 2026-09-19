@@ -4,7 +4,8 @@ from .decoder import InstructionDecoder
 from .functions import FunctionTable
 from .image import AnalyzedImage
 from .model import AnalysisResult, AnalysisStats, CoverageReport, RefKind, SeedConfig, Xref
-from .refs import branch_target, classify_refs
+from .refs import branch_target, classify_refs, memory_address
+from .seeds import SeedProvider
 
 
 class StaticAnalyzer:
@@ -31,13 +32,25 @@ class StaticAnalyzer:
         self._pending = []
         self._queued = set()
         self._xref_targets = set()
+        # RVAs of the import address table slots, so a branch through one can be
+        # recognised as a thunk rather than an ordinary indirect call.
+        self._iat_slots = {entry.rva for entry in self.image.pe.imports
+                           if entry.rva}
 
     # ── public entry point ─────────────────────────────────────
 
     def run(self):
         """Seed, sweep to a fixpoint, and return the result."""
-        self._seed_entry_point()
-        self._seed_exports()
+        seeds = SeedProvider(self.image).collect()
+        self.stats.seed_functions = len(seeds.confident)
+        for rva in sorted(seeds.confident):
+            # Something calls, exports, or registers these — evidence, so a
+            # branch into them is a function entry.
+            self._enqueue(rva, confident=True)
+        for rva in sorted(seeds.tentative):
+            # Pointer-shaped evidence only. Decoded, but not claimed as an
+            # entry: that is the whole reason the two sets are separate.
+            self._enqueue_code_seed(rva)
 
         self.stats.sweep_rounds = 0
         while self._pending:
@@ -71,18 +84,24 @@ class StaticAnalyzer:
             return True
         return False
 
-    def _seed_entry_point(self):
-        entry = self.image.pe.optional_header.entry_point_rva
-        self.stats.entry_point = entry
-        if entry:
-            self._enqueue(entry, confident=True)
+    def _enqueue_code_seed(self, rva):
+        """Queue an address for decoding without claiming it starts a function.
 
-    def _seed_exports(self):
-        for export in self.image.pe.exports:
-            if export.forwarder or not export.rva:
-                continue
-            if self._enqueue(export.rva, confident=True):
-                self.stats.seed_functions += 1
+        This is where pointer-derived seeds go. A switch-table case body and a
+        misread data value are both things worth decoding and neither is a
+        function entry; recording them as one corrupts every extent that spans
+        them.
+        """
+        if rva is None or not self.image.is_mapped(rva):
+            return False
+        if not self.image.is_exec(rva):
+            return False
+        self.functions.add_code_seed(rva)
+        if rva not in self._queued:
+            self._queued.add(rva)
+            self._pending.append(rva)
+            return True
+        return False
 
     # ── traversal ──────────────────────────────────────────────
 
@@ -148,6 +167,68 @@ class StaticAnalyzer:
                 # An immediate landing in code is a candidate entry the call
                 # graph did not reveal; queued so the fixpoint can decide.
                 self._enqueue(target)
+            elif kind == RefKind.TABLE:
+                self._absorb_jump_table(target)
+
+        self._absorb_indirect_jump(insn)
+        self._note_if_thunk(insn, rva)
+
+    def _absorb_indirect_jump(self, insn):
+        """Read a switch table that is reached through one memory operand.
+
+        On x86 a jump table appears as `jmp [reg*4 + table]`, whose
+        displacement is the table base — that arrives as a TABLE reference and
+        is handled above. On x64 the usual form is `jmp qword ptr [rip+disp]`,
+        where no index register is visible at all: the displacement names the
+        slot directly, so it is classified as an ordinary memory reference and
+        the table is invisible unless it is read here.
+
+        Reading it is safe for the other case it matches: an indirect jump
+        through a single function pointer yields that one target, which is a
+        code seed either way.
+        """
+        if not insn.is_jmp or insn.is_call:
+            return
+        for op in insn.operands:
+            address = memory_address(insn, op, self.image)
+            if address is not None:
+                self._absorb_jump_table(address)
+
+    def _note_if_thunk(self, insn, rva):
+        """Register `jmp [IAT slot]` stubs as the function entries they are.
+
+        An import thunk is a one-instruction function, and the compiler emits
+        one per imported API. Nothing calls it directly — callers go through
+        the thunk — so a call graph built without this knows the call sites but
+        not the functions they reach.
+
+        Only a jump counts: `call [IAT]` is an ordinary call through the import
+        table from inside a real function, and treating those as entries would
+        invent a function at every import call site.
+        """
+        if not insn.is_jmp or insn.is_call or not self._iat_slots:
+            return
+        for op in insn.operands:
+            if memory_address(insn, op, self.image) in self._iat_slots:
+                self.functions.add_start(rva, confident=True)
+                return
+
+    def _absorb_jump_table(self, table_rva, max_entries=512):
+        """Read a switch table's entries as code seeds.
+
+        They are case bodies, not function entries — so they are decoded and
+        named as code seeds only. Recording them as starts would cut every
+        function that contains a switch into pieces at each case.
+        """
+        stride = self.image.slot_size
+        for index in range(max_entries):
+            value = self.image.read_pointer(table_rva + index * stride)
+            if value is None:
+                break
+            rva = self.image.va_to_rva(value)
+            if rva is None or not self.image.is_exec(rva):
+                break                  # tables are packed; the run has ended
+            self._enqueue_code_seed(rva)
 
     # ── results ────────────────────────────────────────────────
 

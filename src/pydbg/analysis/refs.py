@@ -4,6 +4,25 @@ from ..disasm.engine import OP_IMM, OP_MEM
 from .model import RefKind
 
 
+def memory_address(insn, op, image):
+    """RVA a memory operand addresses, or None if it is not a fixed address.
+
+    Handles both forms that name a fixed location — [disp] and [rip + disp] —
+    which between them are how every direct memory reference appears. Anything
+    with a base or an index is a computed address and is not resolved here.
+    """
+    if op.kind != OP_MEM:
+        return None
+    if op.is_rip_relative:
+        # [rip + disp] is relative to the *next* instruction, and this is how
+        # x64 reaches data most of the time. Skipping it is why an x64 pass
+        # that only looks at absolute operands finds almost nothing.
+        return image.va_to_rva(insn.address + insn.size + op.mem_disp)
+    if op.is_absolute_mem and op.mem_disp:
+        return image.va_to_rva(op.mem_disp)
+    return None
+
+
 def classify_refs(insn, image):
     """References made by 'insn', as (target_rva, RefKind) pairs.
 
@@ -22,23 +41,14 @@ def classify_refs(insn, image):
                 found.append((rva, kind))
 
         elif op.kind == OP_MEM:
-            if op.is_rip_relative:
-                # [rip + disp] addresses relative to the *next* instruction,
-                # and this is how x64 reaches data most of the time. Skipping
-                # it is why an x64 pass that only looks at absolute operands
-                # finds almost nothing.
-                target = insn.address + insn.size + op.mem_disp
-                rva = image.va_to_rva(target)
-                if rva is not None:
-                    found.append((rva, RefKind.MEM))
-            elif op.is_table_mem:
+            if op.is_table_mem:
                 rva = image.va_to_rva(op.mem_disp)
                 if rva is not None:
                     found.append((rva, RefKind.TABLE))
-            elif op.is_absolute_mem and op.mem_disp:
-                rva = image.va_to_rva(op.mem_disp)
-                if rva is not None:
-                    found.append((rva, RefKind.MEM))
+                continue
+            rva = memory_address(insn, op, image)
+            if rva is not None:
+                found.append((rva, RefKind.MEM))
 
     return found
 
