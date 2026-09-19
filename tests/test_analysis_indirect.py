@@ -199,14 +199,21 @@ class TestIndirectSitesAreReported(unittest.TestCase):
 class TestRealImageIndirectSites(unittest.TestCase):
     """Both halves must be non-zero on a real image, and reported."""
 
-    def setUp(self):
+    @classmethod
+    def setUpClass(cls):
         import os
-        self.path = os.path.join(os.environ.get("SystemRoot", r"C:\Windows"),
-                                 "System32", "kernel32.dll")
-        if not os.path.exists(self.path):
-            self.skipTest(f"no system DLL at {self.path}")
+        path = os.path.join(os.environ.get("SystemRoot", r"C:\Windows"),
+                            "System32", "kernel32.dll")
+        if not os.path.exists(path):
+            raise unittest.SkipTest(f"no system DLL at {path}")
+        # Once for the class: a full sweep of a real binary is seconds, and
+        # doing it per test made this module the slowest in the suite.
         from pydbg.analysis import analyze_file
-        self.result = analyze_file(self.path)
+        cls.result = analyze_file(path)
+
+    def setUp(self):
+        if not hasattr(self.__class__, "result"):
+            self.skipTest("no system DLL to analyse")
 
     def test_some_indirect_branches_resolve(self):
         self.assertGreater(self.result.stats.indirect_resolved, 0)
