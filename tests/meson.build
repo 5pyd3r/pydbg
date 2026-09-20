@@ -16,6 +16,13 @@ argv_target = executable(
   'target/argv_target.c',
 )
 
+# 嵌套调试测试目标：一个会派出子进程的父进程（F19）。用 attach() 挂上去之后，
+# 子进程不会产生 CREATE_PROCESS 事件，但它的内存仍须可读。
+nested_target = executable(
+  'nested_parent',
+  'target/nested_parent.c',
+)
+
 # Common environment: PYTHONPATH includes project root (for tests).
 # The editable install (pip install -e .) handles pydbg package discovery,
 # including the compiled Cython extension at the correct import path.
@@ -30,6 +37,7 @@ test_env.set('TEST_INSTRUMENT_TARGET_PATH', instrument_target.full_path())
 test_env.set('TEST_INSTRUMENT_TARGET32_PATH',
   meson.project_source_root() / 'tests' / 'target' / 'instrument_target32.exe')
 test_env.set('TEST_ARGV_TARGET_PATH', argv_target.full_path())
+test_env.set('TEST_NESTED_TARGET_PATH', nested_target.full_path())
 
 # Test runner: use Python unittest via meson test
 test(
@@ -252,6 +260,17 @@ test(
   args: ['-m', 'unittest', 'tests.test_instrument'],
   env: test_env,
   workdir: meson.project_build_root(),
+)
+
+# Spawns debugged targets, a nested parent/child pair and a real child of the
+# test process, and waits on target sleeps; does not fit the 30s default.
+test(
+  'probe_visibility',
+  py,
+  args: ['-m', 'unittest', 'tests.test_probe_visibility'],
+  env: test_env,
+  workdir: meson.project_build_root(),
+  timeout: 300,
 )
 
 # These spawn several debugged processes and wait on real 1s target sleeps,

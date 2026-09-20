@@ -35,6 +35,15 @@ class DebugSession:
     debug_children: bool = False
     child_processes: dict = field(default_factory=dict)  # pid -> ChildProcessInfo
 
+    # Processes opened by pid that we are NOT debugging (see Debugger.open_process).
+    # The nested-debugging case: the memory wanted belongs to the debuggee of the
+    # process we attached to, which never arrives as a CREATE_PROCESS event and is
+    # therefore not in child_processes. pid -> HANDLE, and pid -> access mask it
+    # was opened with, so a later request for different rights reopens instead of
+    # silently handing back a handle that cannot do what was asked.
+    foreign_handles: dict = field(default_factory=dict)
+    foreign_access: dict = field(default_factory=dict)
+
     # Per-process/per-thread architecture for child-process dispatch.
     pid_arch: dict = field(default_factory=dict)   # pid -> target_arch (32/64)
     tid_arch: dict = field(default_factory=dict)   # tid -> target_arch

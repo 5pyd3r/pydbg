@@ -113,7 +113,7 @@ class ModuleResolver:
         return self.enumerate_handle(
             self._s.process_handle, allow_event_fallback=True)
 
-    def enumerate_handle(self, h_process, allow_event_fallback=False):
+    def enumerate_handle(self, h_process, allow_event_fallback=False, pid=None):
         """Same as enumerate() but with explicit process handle.
 
         With allow_event_fallback, a failing EnumProcessModulesEx falls back to
@@ -122,6 +122,13 @@ class ModuleResolver:
         which those are). Both matter around the loader breakpoint: PSAPI
         raises ERROR_PARTIAL_COPY there, and on WOW64 it cannot see the 32-bit
         image until the loader has mapped it.
+
+        'pid' names the process h_process belongs to, and is only used to pick
+        which event table the fallback merges from; it defaults to the session's
+        target, which is the historical behaviour. Passing it matters: the
+        event table is per pid, so without it a read of some *other* process
+        would merge the target's modules into that process's answer — a
+        plausible-looking list of the wrong DLLs at the wrong addresses.
         """
         try:
             modules = _pydbg.enum_process_modules(h_process)
@@ -133,12 +140,13 @@ class ModuleResolver:
         self._decorate(h_process, modules)
 
         if allow_event_fallback:
-            self._merge_event_modules(h_process, modules)
+            self._merge_event_modules(
+                h_process, modules, self._s.pid if pid is None else pid)
         return modules
 
-    def _merge_event_modules(self, h_process, modules):
-        """Add modules seen in debug events that PSAPI did not report."""
-        recorded = self._s.modules_for(self._s.pid)
+    def _merge_event_modules(self, h_process, modules, pid):
+        """Add modules seen in debug events for 'pid' that PSAPI did not report."""
+        recorded = self._s.modules_for(pid)
         known = {m["base_address"] for m in modules}
         for rec in recorded:
             base = rec["base_address"]
@@ -169,7 +177,8 @@ class ModuleResolver:
             return self._find_containing(recorded, addr)
 
         modules = self.enumerate_handle(
-            h_proc, allow_event_fallback=(target_pid == self._s.pid))
+            h_proc, allow_event_fallback=(target_pid == self._s.pid),
+            pid=target_pid)
         return self._find_containing(modules, addr)
 
     @staticmethod
@@ -182,13 +191,20 @@ class ModuleResolver:
         return None
 
     def _handle_for(self, pid):
-        """Process handle for 'pid', or None if it is not a known process."""
+        """Process handle for 'pid', or None if it is not a known process.
+
+        'Known' includes processes opened by pid that we are not debugging
+        (Debugger.open_process), so module_at() answers for a debugger's
+        debuggee as well as for our own target and its debug children.
+        """
         if pid is None:
             return None
         if pid == self._s.pid:
             return self._s.process_handle
         child = self._s.child_processes.get(pid)
-        return child.process_handle if child else None
+        if child:
+            return child.process_handle
+        return self._s.foreign_handles.get(pid)
 
     def get_filename(self, h_module):
         """Resolve a module handle to its filesystem path."""

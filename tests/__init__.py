@@ -9,6 +9,11 @@ TEST_TARGET_PATH = os.environ.get('TEST_TARGET_PATH', _DEFAULT_TARGET)
 _DEFAULT_ARGV_TARGET = os.path.join(_TEST_DIR, 'target', 'argv_target.exe')
 TEST_ARGV_TARGET_PATH = os.environ.get('TEST_ARGV_TARGET_PATH', _DEFAULT_ARGV_TARGET)
 
+# Parent that spawns a child of itself, for the attach() nested-debugging tests.
+_DEFAULT_NESTED_TARGET = os.path.join(_TEST_DIR, 'target', 'nested_parent.exe')
+TEST_NESTED_TARGET_PATH = os.environ.get('TEST_NESTED_TARGET_PATH',
+                                         _DEFAULT_NESTED_TARGET)
+
 # Architecture-aware register name helpers
 HOST_ARCH = struct.calcsize("P") * 8  # 32 or 64
 IP_REG = "rip" if HOST_ARCH == 64 else "eip"

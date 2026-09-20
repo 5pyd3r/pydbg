@@ -17,10 +17,14 @@ from _win32types cimport (
     UNLOAD_DLL_DEBUG_EVENT, EXCEPTION_ACCESS_VIOLATION,
     EXCEPTION_BREAKPOINT, EXCEPTION_SINGLE_STEP,
     WAIT_OBJECT_0, WAIT_TIMEOUT,
+    CreateToolhelp32Snapshot, Process32FirstW, Process32NextW,
+    PROCESSENTRY32W, TH32CS_SNAPPROCESS,
 )
 
 from libc.string cimport memcpy, memset
 from libc.stdlib cimport free, malloc
+from libc.stddef cimport wchar_t
+from cpython.unicode cimport PyUnicode_FromWideChar
 
 # Event code string mapping
 _EVENT_NAMES = {
@@ -158,6 +162,33 @@ cpdef object wait_for_debug_event(int timeout_ms=10000):
     """Wait for the next debug event.
 
     Returns a dict with event info, or None on timeout.
+
+    The blocking wait runs with the GIL RELEASED. It used to hold it for the
+    whole timeout, so any other Python thread in this process was starved for
+    that entire window. Only C values are in scope across the wait (a
+    stack-allocated DEBUG_EVENT and the ms timeout), so no reference count is
+    touched while the GIL is down; the dict is built after reacquiring it.
+
+    ── Correction (2026-09-20) ──────────────────────────────────────────
+    The zero-iterations-over-120-s measurement was correct, and the
+    conclusion drawn from it was not. Recorded in targets/pydbg-gaps.md §F19
+    (kept here verbatim because that file is not in this repository):
+
+        "同进程线程被饿死（实测 120 s 零次迭代）
+         ⇒ 对话框兜底必须是另一个进程"
+
+    The starvation was this function holding the GIL, not something inherent
+    to same-process threads. With the GIL released, a counter thread advanced
+    406-731 times across a ~1.0 s silent window inside run(), against 1-2
+    times before (tests/test_probe_visibility.py::TestGILIsReleasedWhileWaiting
+    records both figures and fails if it regresses). So in-process threads are
+    a usable place for a dialog watchdog again.
+
+    What is NOT retracted: the original evidence also included that a target
+    blocked on a modal dialog produces no debug events at all, which is why
+    the watchdog had to exist in the first place. Nothing here changes that,
+    and a separate process remains a valid choice on its own merits — the
+    point is only that "must" no longer follows from the GIL.
     """
     cdef DEBUG_EVENT de
     cdef BOOL result
@@ -165,7 +196,8 @@ cpdef object wait_for_debug_event(int timeout_ms=10000):
 
     memset(&de, 0, sizeof(de))
 
-    result = WaitForDebugEvent(&de, <DWORD>timeout_ms)
+    with nogil:
+        result = WaitForDebugEvent(&de, <DWORD>timeout_ms)
     if result == 0:
         err = GetLastError()
         if err == 1460 or err == 121:  # ERROR_TIMEOUT or ERROR_SEM_TIMEOUT
@@ -335,10 +367,56 @@ cpdef int wait_for_single_object(unsigned long long h_handle, int timeout_ms=100
 
     Returns WAIT_OBJECT_0 (0) if signaled, WAIT_TIMEOUT (258) on timeout.
     Raises OSError on failure.
+
+    Like wait_for_debug_event, the blocking wait runs without the GIL.
     """
-    cdef DWORD result = WaitForSingleObject(<HANDLE><LPVOID>h_handle, <DWORD>timeout_ms)
+    cdef DWORD result
+
+    with nogil:
+        result = WaitForSingleObject(<HANDLE><LPVOID>h_handle, <DWORD>timeout_ms)
 
     if result == <DWORD>0xFFFFFFFF:  # WAIT_FAILED
         raise OSError(GetLastError(), "WaitForSingleObject failed")
 
     return <int>result
+
+
+cpdef list enumerate_processes():
+    """Every process on the system, from a Toolhelp32 snapshot.
+
+    Deliberately not derived from debug events. A debugger only receives
+    CREATE_PROCESS for processes it is itself debugging, so an event-derived
+    list answers "what am I debugging" — and reads the same as "what children
+    does this process have" while being a different question with a different
+    (usually empty) answer. The snapshot answers the second one.
+
+    Returns dicts with: 'pid', 'parent_pid', 'exe_name', 'thread_count'.
+    Raises OSError if the snapshot cannot be taken.
+    """
+    cdef HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)
+    if snap == <HANDLE><unsigned long long>-1:
+        raise OSError(GetLastError(), "CreateToolhelp32Snapshot failed")
+
+    cdef PROCESSENTRY32W pe
+    pe.dwSize = sizeof(PROCESSENTRY32W)
+    cdef list procs = []
+    cdef str name
+    cdef wchar_t* pname
+
+    cdef BOOL ok = Process32FirstW(snap, &pe)
+    while ok:
+        # Take the address of the inline array: the field itself is a C array,
+        # not a pointer, and an empty name is a legitimate entry rather than an
+        # error (a process can exit mid-snapshot and leave its name blank).
+        pname = &pe.szExeFile[0]
+        name = PyUnicode_FromWideChar(pname, -1) if pname[0] != 0 else ""
+        procs.append({
+            'pid': pe.th32ProcessID,
+            'parent_pid': pe.th32ParentProcessID,
+            'exe_name': name,
+            'thread_count': pe.cntThreads,
+        })
+        ok = Process32NextW(snap, &pe)
+
+    CloseHandle(snap)
+    return procs
