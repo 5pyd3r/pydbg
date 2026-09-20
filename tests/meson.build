@@ -149,6 +149,14 @@ test(
 )
 
 test(
+  'disasm_branch_flags',
+  py,
+  args: ['-m', 'unittest', 'tests.test_disasm_branch_flags'],
+  env: test_env,
+  workdir: meson.project_build_root(),
+)
+
+test(
   'analysis_backlog',
   py,
   args: ['-m', 'unittest', 'tests.test_analysis_backlog'],
