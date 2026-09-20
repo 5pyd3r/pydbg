@@ -19,15 +19,22 @@ class SoftwareBreakpointManager:
         self.degraded_hits = 0
         # bp_ids whose INT3 is no longer in the target (see verify()).
         self.lost = set()
+        # bp_id -> times the breakpoint was delivered to us since it was set.
+        # A breakpoint at an address that never executes keeps its entry at 0,
+        # which is the fact that was previously unaskable: "armed and never
+        # hit" and "never armed at all" both produced nothing at all.
+        self.hits = {}
 
-    def verify(self, bp_id):
-        """Check that the INT3 byte is still in the target. True if intact.
+    def armed_state(self, bp_id):
+        """Is the INT3 still in the target? True, False, or None.
 
-        A software breakpoint is one byte the target can overwrite. Self-
-        unpacking code does exactly that by design — one analysis session had
-        the OEP overwritten by the unpacker's own output, and the breakpoint
-        simply stopped firing with nothing said. There is no event to hang
-        detection on, so the state is answerable on request instead of silent.
+        The three answers are genuinely different and verify() has to flatten
+        two of them: False means the byte is there and it is not 0xCC (the
+        target overwrote the breakpoint), None means the byte could not be
+        read at all. verify() answers "is it intact" and calls both of the
+        latter 'no'; read this one when the difference is the point.
+
+        Raises BreakpointError if bp_id is not a software breakpoint.
         """
         bp_info = self._s.breakpoints.get(bp_id)
         if bp_info is None or bp_info[0] != "int3":
@@ -39,10 +46,19 @@ class SoftwareBreakpointManager:
             found = _pydbg.read_process_memory(h_process, addr, 1)
         except OSError as e:
             self.last_error = e
-            self.lost.add(bp_id)
-            return False
+            return None
+        return found == self._INT3
 
-        if found == self._INT3:
+    def verify(self, bp_id):
+        """Check that the INT3 byte is still in the target. True if intact.
+
+        A software breakpoint is one byte the target can overwrite. Self-
+        unpacking code does exactly that by design — one analysis session had
+        the OEP overwritten by the unpacker's own output, and the breakpoint
+        simply stopped firing with nothing said. There is no event to hang
+        detection on, so the state is answerable on request instead of silent.
+        """
+        if self.armed_state(bp_id) is True:
             self.lost.discard(bp_id)
             return True
         self.lost.add(bp_id)
@@ -73,6 +89,7 @@ class SoftwareBreakpointManager:
             )
         del self._s.breakpoints[bp_id]
         self.lost.discard(bp_id)
+        self.hits.pop(bp_id, None)
 
         addr = bp_info[1]
         original = bp_info[2]
@@ -97,6 +114,9 @@ class SoftwareBreakpointManager:
         self._s.bp_counter += 1
         bp_id = self._s.bp_counter
         self._s.breakpoints[bp_id] = ("int3", addr, original, h_process)
+        # Armed now, zero hits so far. Entering at 0 rather than leaving the
+        # entry absent is what makes "armed and never hit" answerable.
+        self.hits[bp_id] = 0
         return bp_id
 
     def _restore_byte_handle(self, h_process, addr, original):
@@ -129,6 +149,12 @@ class SoftwareBreakpointManager:
         bp_id = self.find(addr)
         if bp_id is None:
             return False
+
+        # Count the hit here, before the rewind is attempted. The exception
+        # was delivered for one of our breakpoints, so the site DID run —
+        # that stays true on the degraded path below, where the rewind fails
+        # but the code still reached this address.
+        self.hits[bp_id] = self.hits.get(bp_id, 0) + 1
 
         bp_info = self._s.breakpoints[bp_id]
         bp_addr = bp_info[1]

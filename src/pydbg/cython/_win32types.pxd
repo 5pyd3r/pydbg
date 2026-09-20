@@ -1,6 +1,7 @@
 # _win32types.pxd — Shared Win32 type declarations for pydbg
 
 from libc.stdint cimport uint32_t, uint64_t
+from libc.stddef cimport wchar_t
 
 cdef extern from "windows.h":
     # Basic types
@@ -203,7 +204,11 @@ cdef extern from "windows.h":
         STARTUPINFOA* lpStartupInfo,
         PROCESS_INFORMATION* lpProcessInformation)
 
-    BOOL WaitForDebugEvent(DEBUG_EVENT* lpDebugEvent, DWORD dwMilliseconds)
+    # nogil: WaitForDebugEvent blocks until an event arrives or the timeout
+    # expires, and it is the call that dominates a debug loop's wall clock.
+    # Holding the GIL across it starves every other Python thread in the
+    # process — see wait_for_debug_event().
+    BOOL WaitForDebugEvent(DEBUG_EVENT* lpDebugEvent, DWORD dwMilliseconds) nogil
     BOOL ContinueDebugEvent(DWORD dwProcessId, DWORD dwThreadId, DWORD dwContinueStatus)
     BOOL DebugActiveProcess(DWORD dwProcessId)
     BOOL DebugActiveProcessStop(DWORD dwProcessId)
@@ -246,6 +251,7 @@ cdef extern from "psapi.h":
 
 cdef extern from "tlhelp32.h":
     DWORD TH32CS_SNAPTHREAD
+    DWORD TH32CS_SNAPPROCESS
 
     ctypedef struct THREADENTRY32:
         DWORD dwSize
@@ -256,9 +262,31 @@ cdef extern from "tlhelp32.h":
         LONG tpDeltaPri
         DWORD dwFlags
 
+    # szExeFile is an inline MAX_PATH (260) array: the name lives inside the
+    # struct, not behind a pointer.
+    #
+    # The ...W names are used deliberately. tlhelp32.h declares Process32First
+    # twice — an ANSI one and a Wide one — and then #defines the bare name onto
+    # the Wide variant under UNICODE. Naming the Wide entry point and the Wide
+    # struct explicitly removes the preprocessor from the question, so the
+    # layout the C compiler sees is the layout declared here.
+    ctypedef struct PROCESSENTRY32W:
+        DWORD dwSize
+        DWORD cntUsage
+        DWORD th32ProcessID
+        ULONG_PTR th32DefaultHeapID
+        DWORD th32ModuleID
+        DWORD cntThreads
+        DWORD th32ParentProcessID
+        LONG pcPriClassBase
+        DWORD dwFlags
+        wchar_t szExeFile[260]
+
     HANDLE CreateToolhelp32Snapshot(DWORD dwFlags, DWORD th32ProcessID)
     BOOL Thread32First(HANDLE hSnapshot, THREADENTRY32* lpte)
     BOOL Thread32Next(HANDLE hSnapshot, THREADENTRY32* lpte)
+    BOOL Process32FirstW(HANDLE hSnapshot, PROCESSENTRY32W* lppe)
+    BOOL Process32NextW(HANDLE hSnapshot, PROCESSENTRY32W* lppe)
 
 
 cdef extern from "windows.h":
@@ -278,8 +306,10 @@ cdef extern from "windows.h":
     void* GetProcAddress(HMODULE hModule, LPCSTR lpProcName)
     HMODULE GetModuleHandleA(LPCSTR lpModuleName)
 
-    # Synchronization
-    DWORD WaitForSingleObject(HANDLE hHandle, DWORD dwMilliseconds)
+    # Synchronization. nogil for the same reason as WaitForDebugEvent: this
+    # is a blocking wait and holding the GIL across it starves every other
+    # Python thread for as long as the object stays unsignaled.
+    DWORD WaitForSingleObject(HANDLE hHandle, DWORD dwMilliseconds) nogil
 
 
 cdef extern from "dbghelp.h":
