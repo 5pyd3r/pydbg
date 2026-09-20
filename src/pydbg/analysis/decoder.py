@@ -23,6 +23,11 @@ class InstructionDecoder:
         self._flags_at = bytearray(image.span)
         self._covered = bytearray(image.span)
         self._bad = set()
+        # rva -> why it would not decode. Kept alongside `_bad` so a scan that
+        # reports a gap can say what the gap was made of; "it did not decode"
+        # and "there was nothing there to read" are different findings and only
+        # one of them is about the encoder.
+        self._bad_reason = {}
         self._cache = OrderedDict()
         self._cache_size = cache_size
         self._min_read = min_read
@@ -79,7 +84,12 @@ class InstructionDecoder:
         decode is real information (the seed that led there was wrong), and
         retrying the same address on every sweep would be wasted work.
         """
-        if rva in self._bad or not self.image.is_mapped(rva):
+        # Unmapped addresses are not cached as bad: they are cheap to reject
+        # and a scan that runs off the end of a section would otherwise
+        # accumulate one set entry per byte of the overrun.
+        if not self.image.is_mapped(rva):
+            return None
+        if rva in self._bad:
             return None
 
         if rva in self._cache:
@@ -88,18 +98,47 @@ class InstructionDecoder:
 
         data = self.image.read_code_bytes(rva, min_len=self._min_read)
         if not data:
-            self._bad.add(rva)
+            self._note_bad(rva, "no readable bytes")
             return None
 
         va = self.image.rva_to_va(rva)
         instructions = self.engine.disasm(va, data)
-        if not instructions or instructions[0].address != va:
-            self._bad.add(rva)
+        if not instructions:
+            self._note_bad(rva, "disassembler produced nothing")
+            return None
+        if instructions[0].address != va:
+            # capstone skipped a byte it could not use and resumed later;
+            # reporting that instruction would silently attribute the gap to
+            # the wrong offset.
+            self._note_bad(rva, "disassembler resynced past this address")
             return None
 
         insn = instructions[0]
         self._remember(rva, insn)
         return insn
+
+    def failure_reason(self, rva):
+        """Why `decode_one(rva)` returned None, or None when it did not.
+
+        The companion to `is_known_bad`, for callers that report a gap rather
+        than just skip it. Without it a scan can say "4,584 bytes would not
+        decode" but not whether those bytes were undecodable or unreadable.
+
+        The unmapped case is answered from the image rather than cached, so
+        this and `is_known_bad` stay consistent about what "bad" means: an
+        address outside every section was never a decode failure, it was never
+        a candidate.
+        """
+        reason = self._bad_reason.get(rva)
+        if reason is not None:
+            return reason
+        if not self.image.is_mapped(rva):
+            return "not in any mapped section"
+        return None
+
+    def _note_bad(self, rva, reason):
+        self._bad.add(rva)
+        self._bad_reason[rva] = reason
 
     def _remember(self, rva, insn):
         size = insn.size

@@ -37,6 +37,9 @@ from .names import Name, NameTable, auto_names, import_names
 from .workspace import Workspace, WorkspaceError, image_fingerprint
 from .process_source import ProcessSource
 from .refs import branch_target, classify_refs, is_indirect_branch, memory_address
+from .scan import (
+    LinearScan, Resync, Undecodable, linear_scan, scan_executable, scan_section,
+)
 from .seeds import SeedProvider, SeedSet, looks_like_entry
 
 __all__ = [
@@ -55,4 +58,6 @@ __all__ = [
     'profiles', 'STACK_REGISTERS',
     'Workspace', 'WorkspaceError', 'image_fingerprint',
     'branch_target', 'classify_refs', 'is_indirect_branch', 'memory_address',
+    'LinearScan', 'Resync', 'Undecodable', 'linear_scan', 'scan_executable',
+    'scan_section',
 ]
