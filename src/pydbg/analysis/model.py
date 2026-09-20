@@ -380,6 +380,28 @@ class AnalysisResult:
         from .report import render_attribution
         return render_attribution(self.attribution(), limit=limit)
 
+    def scan(self, start, end, **kwargs):
+        """Decode [start, end) linearly, reporting the gaps it had to cross.
+
+        The answer to "what is in this range" for a caller who cannot assume
+        the range decodes cleanly. The sweep that produced this result follows
+        seeds and stops at whatever it cannot reach, so it is not a substitute:
+        its silence about a region means the region was never reached, not that
+        it was decoded and found empty.
+        """
+        from .scan import linear_scan
+        return linear_scan(self.decoder, start, end, **kwargs)
+
+    def scan_section(self, name, **kwargs):
+        """`scan` over one section, by name."""
+        from .scan import scan_section
+        return scan_section(self.image, self.decoder, name, **kwargs)
+
+    def scan_text(self, **kwargs):
+        """`scan` over every executable section."""
+        from .scan import scan_executable
+        return scan_executable(self.image, self.decoder, **kwargs)
+
     def cfg_of(self, rva, max_blocks=4096):
         """The CFG of the function containing 'rva', or None if there is none."""
         from .cfg import build_function_cfg
