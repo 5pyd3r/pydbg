@@ -208,7 +208,6 @@ class TestTheEnumerationsAreCurrent(unittest.TestCase):
 
     def test_the_loop_ids_are_the_ones_capstone_still_reports(self):
         from pydbg.disasm.engine import _LOOP_INSNS
-        import capstone
 
         self.assertTrue(_LOOP_INSNS)
         for data, mnemonic in LOOPS.items():
