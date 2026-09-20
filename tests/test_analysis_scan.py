@@ -335,9 +335,12 @@ class TestIndependenceFromTheSweep(unittest.TestCase):
         # stops. Everything after it is unreached but perfectly decodable.
         code = RET + NOP * 8 + RET
         result = analyze(code)
-        scan = result.scan(TEXT_RVA + 1, TEXT_RVA + len(code))
 
+        # Checked before the scan runs, because the scan itself decodes these
+        # bytes — asserting afterwards would be asserting about the scan.
         self.assertEqual(result.decoder.size_of(TEXT_RVA + 1), 0)
+
+        scan = result.scan(TEXT_RVA + 1, TEXT_RVA + len(code))
         self.assertTrue(scan.is_complete())
         self.assertEqual(len(scan.instructions()), 9)
 
