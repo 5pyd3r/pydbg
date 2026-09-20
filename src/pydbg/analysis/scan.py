@@ -22,6 +22,7 @@ between a resync and the next one, which is exactly the stretch whose alignment
 rests on nothing but where the skip happened to land.
 """
 
+from bisect import bisect_left
 from dataclasses import dataclass
 
 from ..exceptions import PydbgError
@@ -130,16 +131,19 @@ class LinearScan:
         Empty for a scan that never resynced, which is the only case where the
         instructions stand on their own.
         """
+        # `decoded` is ascending, so each stretch is a slice of it. Bisecting a
+        # tuple of (rva, size) against a one-element tuple finds the first
+        # entry whose rva reaches the bound.
         runs = []
         for index, resync in enumerate(self.resyncs):
             if index + 1 < len(self.resyncs):
                 limit = self.resyncs[index + 1].stop_rva
             else:
                 limit = self.end
-            inside = [rva for rva, _size in self.decoded
-                      if resync.resume_rva <= rva < limit]
-            if inside:
-                runs.append((resync.resume_rva, limit, len(inside)))
+            first = bisect_left(self.decoded, (resync.resume_rva,))
+            last = bisect_left(self.decoded, (limit,))
+            if last > first:
+                runs.append((resync.resume_rva, limit, last - first))
         return tuple(runs)
 
     def render(self):
