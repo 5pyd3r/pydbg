@@ -23,6 +23,26 @@ from ..symbol.resolver import SymbolResolver
 from ..thread.manager import ThreadManager
 from .event import DebugEvent
 from .session import DebugSession
+from .window_probe import MessageLoopState
+
+
+def _timeout(message, probe=None):
+    """A TimeoutError carrying what was learned about the target.
+
+    The class is unchanged, so `except PydbgError` / `except TimeoutError`
+    callers are unaffected; what is new is that the probe's answer and its
+    caveat travel with the exception instead of being rendered into a sentence
+    and thrown away. A caller that wants to branch on the cause can, and one
+    that only prints the message still gets a message that names it.
+    """
+    error = TimeoutError(message)
+    error.probe = probe
+    error.caveat = probe.caveat if probe is not None else None
+    return error
+
+
+def _caveat(probe):
+    return f" {probe.caveat}." if probe.caveat else ""
 
 
 class Debugger:
@@ -536,7 +556,8 @@ class Debugger:
             # Non-fatal: process may have already exited (common with children)
             pass
 
-    def run(self, callback, timeout_ms=10000, max_idle_timeouts=None):
+    def run(self, callback, timeout_ms=10000, max_idle_timeouts=None,
+            probe_on_idle=True):
         """Event-driven debug loop. Runs until process exits or callback returns False.
 
         User software breakpoints are always delivered to the callback
@@ -580,10 +601,7 @@ class Debugger:
             if event is None:
                 idle += 1
                 if max_idle_timeouts is not None and idle >= max_idle_timeouts:
-                    raise TimeoutError(
-                        f"no debug event for {idle} consecutive waits "
-                        f"({timeout_ms} ms each); the target is idle, blocked, "
-                        f"or wedged")
+                    raise self._idle_timeout(idle, timeout_ms, probe_on_idle)
                 continue
             idle = 0
 
@@ -645,6 +663,88 @@ class Debugger:
         ip = self._current_ip()
         where = f"last instruction pointer 0x{ip:X}" if ip else "no instruction pointer available"
         return TimeoutError(f"did not reach 0x{addr:X}: {reason} ({where})")
+
+    def _idle_timeout(self, idle, timeout_ms, probe_on_idle=True):
+        """The exception for a run that saw no events, with what is known.
+
+        The old message named three causes and separated none of them:
+        "the target is idle, blocked, or wedged". That sentence is how a
+        target sitting on a modal dialog got read as a component that does not
+        write files — the zeros were real and the conclusion drawn from them
+        was backwards. So the probe runs here, at the moment the threshold
+        trips and nowhere else, and its answer goes into the message.
+        """
+        prefix = (f"no debug event for {idle} consecutive waits "
+                  f"({timeout_ms} ms each)")
+        if not probe_on_idle:
+            return _timeout(
+                f"{prefix}; the target is idle, blocked, or wedged. "
+                f"cannot rule out that the target is blocked: the window "
+                f"probe was disabled (probe_on_idle=False)", probe=None)
+
+        probe = self.window_probe()
+        if probe is None:
+            return _timeout(
+                f"{prefix}. cannot rule out that the target is blocked: the "
+                f"window probe is unavailable on this platform", probe=None)
+
+        if probe.state is MessageLoopState.MODAL:
+            detail = (f"the target is waiting on a dialog it cannot dismiss "
+                      f"itself ({probe.evidence})")
+        elif probe.state is MessageLoopState.WEDGED:
+            detail = (f"the target's window thread is not answering messages "
+                      f"({probe.evidence})")
+        elif probe.state is MessageLoopState.GONE:
+            detail = "the target has exited"
+        elif probe.state is MessageLoopState.PUMPING:
+            detail = (f"the target is pumping messages ({probe.evidence}) and "
+                      f"simply produced no debug event")
+        else:
+            detail = (f"cannot rule out that the target is blocked "
+                      f"({probe.evidence})")
+        return _timeout(f"{prefix}. {detail}.{_caveat(probe)}", probe=probe)
+
+    def window_probe(self, pid=None):
+        """What the target's message loop is doing, or None if unavailable.
+
+        None means the probe could not be built — no Cython extension, or not
+        Windows — and is deliberately distinct from a probe whose answer is
+        UNKNOWN. Both are refusals, but only one of them is a refusal this
+        package can do anything about, and a caller reporting a zero result
+        needs to say which.
+        """
+        try:
+            from .window_probe import WindowProbeQuery
+        except ImportError:
+            return None
+        target = self._session.pid if pid is None else pid
+        if target is None:
+            return None
+        try:
+            return WindowProbeQuery().probe(target)
+        except Exception:                              # noqa: BLE001
+            return None
+
+    def message_loop_state(self, pid=None):
+        """`MessageLoopState`, or None when the probe is unavailable."""
+        probe = self.window_probe(pid)
+        return None if probe is None else probe.state
+
+    def read_window_texts(self, pid=None):
+        """(class name, text) for every window of the target, top level first."""
+        probe = self.window_probe(pid)
+        if probe is None:
+            return ()
+        found = []
+
+        def walk(window):
+            found.append((window.class_name, window.text))
+            for child in window.children:
+                walk(child)
+
+        for window in probe.windows:
+            walk(window)
+        return tuple(found)
 
     def run_until(self, addr, timeout_ms=10000, max_wait_ms=60000,
                   max_idle_timeouts=None):
