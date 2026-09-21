@@ -230,6 +230,16 @@ def cmd_tables(args):
         referrer = f"{table.referrer:#x}" if table.referrer is not None else "-"
         print(f"{table.base:#x}..{end:#x}  {table.kind}  {shown} slots "
               f"of {table.stride}  named by {referrer}")
+
+
+def cmd_values(args):
+    """What a fixed memory address can hold, and the evidence for saying so."""
+    result = analyze_file(args.image)
+    if args.guarded:
+        value = result.narrow_value_set(args.at)
+    else:
+        value = result.value_set_of(args.at)
+    print(value.render())
     return 0
 
 
@@ -305,6 +315,10 @@ def build_parser():
 
     listing = add("list", cmd_list, target_dest="at")
     listing.add_argument("--size", type=_parse_int, default=64)
+
+    values = add("values", cmd_values, target_dest="at")
+    values.add_argument("--guarded", action="store_true",
+                        help="also apply the guards that constrain it")
 
     return parser
 

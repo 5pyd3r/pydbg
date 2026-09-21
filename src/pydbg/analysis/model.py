@@ -399,6 +399,22 @@ class AnalysisResult:
         from .owners import receiver_of
         return receiver_of(self, rva, base_reg=base_reg)
 
+    def value_set_of(self, rva, **kwargs):
+        """The `ValueSet` for the fixed memory address 'rva'.
+
+        Named the long way so it cannot be confused with `xrefs_of` or
+        `callers_of`, which answer about a *position in code*. This answers
+        about a memory location, which in a data section has no code at it at
+        all, and a name like `values_of` would read as though it did.
+        """
+        from .values import value_set_of
+        return value_set_of(self, rva, **kwargs)
+
+    def narrow_value_set(self, rva, **kwargs):
+        """`value_set_of` narrowed by the guards that constrain 'rva'."""
+        from .values import narrow_by_guards
+        return narrow_by_guards(self, rva, **kwargs)
+
     def references_of(self, rva):
         """Xrefs made *by* the instruction at 'rva'."""
         return tuple(xref for refs in self.xrefs.values() for xref in refs

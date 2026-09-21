@@ -46,6 +46,10 @@ from .scan import (
     LinearScan, Resync, Undecodable, linear_scan, scan_executable, scan_section,
 )
 from .seeds import SeedProvider, SeedSet, looks_like_entry
+from .values import (
+    DECIDED, UNDECIDED, Bound, ValueSet, narrow_by_guards,
+    unresolved_write_count, value_set_of, writes_to,
+)
 
 __all__ = [
     'StaticAnalyzer', 'analyze_file', 'analyze_bytes', 'analyze_pe',
@@ -70,4 +74,6 @@ __all__ = [
     'RegionOwnership', 'classify_range',
     'ReceiverNote', 'RECEIVER_FACTS', 'DETERMINED_FACTS', 'receiver_of',
     'memory_base_registers',
+    'Bound', 'ValueSet', 'DECIDED', 'UNDECIDED', 'writes_to', 'value_set_of',
+    'narrow_by_guards', 'unresolved_write_count',
 ]
