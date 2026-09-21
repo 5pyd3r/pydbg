@@ -23,6 +23,25 @@ nested_target = executable(
   'target/nested_parent.c',
 )
 
+# Window probes (F20). Three targets that own an identical real window and
+# differ only in what they do next: pump, block on a modal dialog, or stop
+# pumping. All three are needed — the whole point is that they must NOT be
+# classified the same way.
+window_target = executable(
+  'window_target',
+  'target/window_target.c',
+)
+
+modal_target = executable(
+  'modal_target',
+  'target/modal_target.c',
+)
+
+wedge_target = executable(
+  'wedge_target',
+  'target/wedge_target.c',
+)
+
 # Common environment: PYTHONPATH includes project root (for tests).
 # The editable install (pip install -e .) handles pydbg package discovery,
 # including the compiled Cython extension at the correct import path.
@@ -38,6 +57,9 @@ test_env.set('TEST_INSTRUMENT_TARGET32_PATH',
   meson.project_source_root() / 'tests' / 'target' / 'instrument_target32.exe')
 test_env.set('TEST_ARGV_TARGET_PATH', argv_target.full_path())
 test_env.set('TEST_NESTED_TARGET_PATH', nested_target.full_path())
+test_env.set('TEST_WINDOW_TARGET_PATH', window_target.full_path())
+test_env.set('TEST_MODAL_TARGET_PATH', modal_target.full_path())
+test_env.set('TEST_WEDGE_TARGET_PATH', wedge_target.full_path())
 
 # Test runner: use Python unittest via meson test
 test(
@@ -294,6 +316,17 @@ test(
   args: ['-m', 'unittest', 'tests.test_instrument'],
   env: test_env,
   workdir: meson.project_build_root(),
+)
+
+# Spawns debugged targets and waits on a real message box to come up, which
+# does not fit the 30s default.
+test(
+  'window_probe',
+  py,
+  args: ['-m', 'unittest', 'tests.test_window_probe'],
+  env: test_env,
+  workdir: meson.project_build_root(),
+  timeout: 180,
 )
 
 # Spawns debugged targets, a nested parent/child pair and a real child of the

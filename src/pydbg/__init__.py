@@ -24,6 +24,9 @@ from .trace.calltree import CallTree, CallNode
 from .patch.assembler import Assembler
 from .core.session import ChildProcessInfo
 from .core.event import DebugEvent
+from .core.window_probe import (
+    MessageLoopState, WindowInfo, WindowProbe, WindowProbeQuery,
+)
 from .memory.manager import MemoryRead
 from .analysis import StaticAnalyzer, analyze_bytes, analyze_file, analyze_pe
 from .exceptions import (
@@ -43,6 +46,10 @@ __all__ = [
     "HOST_ARCH",
     "ChildProcessInfo",
     "DebugEvent",
+    "MessageLoopState",
+    "WindowInfo",
+    "WindowProbe",
+    "WindowProbeQuery",
     "MemoryRead",
     "StaticAnalyzer",
     "analyze_file",

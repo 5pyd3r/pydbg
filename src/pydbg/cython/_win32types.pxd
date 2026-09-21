@@ -595,3 +595,53 @@ cdef extern from *:
     void pydbg_ctx_set_dr(void* pctx, int machine, int reg, unsigned long long v)
     unsigned short pydbg_ctx_get_seg(void* pctx, int machine, int reg)
     int pydbg_host_arch()
+
+
+cdef extern from "windows.h":
+    # === user32 / winuser.h ===
+    #
+    # Reached through windows.h, so no extra include — and no build change
+    # either: `-luser32` is already on the extension's link line.
+    #
+    # NOTE ON THE CALLBACK CONVENTION. WNDENUMPROC is __stdcall (WINAPI) on
+    # 32-bit Windows and convention-free on x64. This extension is built for
+    # the host architecture only, and declaring __stdcall here would be wrong
+    # on x64 and is not expressible portably in Cython, so the typedef below
+    # is the x64-correct form. A future 32-bit build must revisit it — an
+    # incorrect convention there corrupts the stack rather than failing to
+    # compile.
+    ctypedef void* HWND
+    ctypedef void* HINSTANCE
+    ctypedef unsigned int UINT
+    ctypedef long long LPARAM
+    ctypedef unsigned long long WPARAM
+
+    ctypedef int (*WNDENUMPROC)(HWND hwnd, LPARAM lParam)
+
+    # GW_OWNER: the window that owns this one. A message box's owner is set,
+    # which is half of how a modal dialog is told from an ordinary window.
+    UINT GW_OWNER
+    UINT GW_ENABLEDPOPUP
+
+    BOOL EnumWindows(WNDENUMPROC lpEnumFunc, LPARAM lParam)
+    BOOL EnumChildWindows(HWND hWndParent, WNDENUMPROC lpEnumFunc,
+                          LPARAM lParam)
+
+    DWORD GetWindowThreadProcessId(HWND hWnd, DWORD* lpdwProcessId)
+    HWND GetWindow(HWND hWnd, UINT uCmd)
+
+    int GetWindowTextLengthW(HWND hWnd)
+    int GetWindowTextW(HWND hWnd, wchar_t* lpString, int nMaxCount)
+    int GetClassNameW(HWND hWnd, wchar_t* lpClassName, int nMaxCount)
+
+    BOOL IsWindow(HWND hWnd)
+    BOOL IsWindowVisible(HWND hWnd)
+    BOOL IsWindowEnabled(HWND hWnd)
+
+    # Documented, but Microsoft explicitly does not guarantee it is stable or
+    # accurate; it is a heuristic over the window's thread's message queue and
+    # can be wrong in both directions. Callers must be able to tell that it
+    # was unavailable rather than read an always-false result as "not hung" —
+    # see core/window_probe.py, where absence becomes UNKNOWN rather than
+    # PUMPING.
+    BOOL IsHungAppWindow(HWND hWnd)

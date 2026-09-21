@@ -14,6 +14,19 @@ _DEFAULT_NESTED_TARGET = os.path.join(_TEST_DIR, 'target', 'nested_parent.exe')
 TEST_NESTED_TARGET_PATH = os.environ.get('TEST_NESTED_TARGET_PATH',
                                          _DEFAULT_NESTED_TARGET)
 
+# Window probe targets (F20). The defaults matter: TEST_*_TARGET_PATH is only
+# set by `meson test`, so without them `python -m unittest discover` silently
+# skips a further batch while printing a green run.
+_DEFAULT_WINDOW_TARGET = os.path.join(_TEST_DIR, 'target', 'window_target.exe')
+TEST_WINDOW_TARGET_PATH = os.environ.get('TEST_WINDOW_TARGET_PATH',
+                                         _DEFAULT_WINDOW_TARGET)
+_DEFAULT_MODAL_TARGET = os.path.join(_TEST_DIR, 'target', 'modal_target.exe')
+TEST_MODAL_TARGET_PATH = os.environ.get('TEST_MODAL_TARGET_PATH',
+                                        _DEFAULT_MODAL_TARGET)
+_DEFAULT_WEDGE_TARGET = os.path.join(_TEST_DIR, 'target', 'wedge_target.exe')
+TEST_WEDGE_TARGET_PATH = os.environ.get('TEST_WEDGE_TARGET_PATH',
+                                        _DEFAULT_WEDGE_TARGET)
+
 # Architecture-aware register name helpers
 HOST_ARCH = struct.calcsize("P") * 8  # 32 or 64
 IP_REG = "rip" if HOST_ARCH == 64 else "eip"
