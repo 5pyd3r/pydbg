@@ -179,6 +179,60 @@ def cmd_list(args):
     return 0
 
 
+def cmd_owners(args):
+    """What an address belongs to — bounded, and naming which finding it is."""
+    result = analyze_file(args.image)
+    owner, kind = result.functions.owner_of(args.at)
+    if owner is None:
+        print(f"{args.at:#x}: owned by nothing ({kind})")
+    else:
+        print(f"{args.at:#x}: {kind} of the function at {owner:#x}")
+    container = result.container_of(args.at)
+    if container is not None:
+        table, index = container
+        where = "entry %d" % index if index is not None else "not slot-aligned"
+        print(f"  inside a {table.kind} at {table.base:#x} "
+              f"({table.count} slots, {where})")
+    return 0
+
+
+def cmd_boundary(args):
+    """Whether an address starts an instruction, sits inside one, or neither."""
+    result = analyze_file(args.image)
+    print(result.boundary_of(args.at).render())
+    return 0
+
+
+def cmd_receiver(args):
+    """Where the base register of the access at 'at' came from."""
+    from pydbg.analysis import receiver_of
+    result = analyze_file(args.image)
+    note = receiver_of(result, args.at, base_reg=args.reg)
+    if note is None:
+        print(f"{args.at:#x} makes no base-register access")
+        return 1
+    print(note.render())
+    if args.evidence:
+        for rva in note.evidencing:
+            print(f"  walked {rva:#x}")
+    return 0
+
+
+def cmd_tables(args):
+    """The runs of indexed slots the sweep read, ascending by base."""
+    result = analyze_file(args.image)
+    if not result.slot_tables:
+        print("no slot tables")
+        return 0
+    for table in result.slot_tables:
+        start, end = table.span()
+        shown = "at least %d" % table.count if table.truncated else str(table.count)
+        referrer = f"{table.referrer:#x}" if table.referrer is not None else "-"
+        print(f"{table.base:#x}..{end:#x}  {table.kind}  {shown} slots "
+              f"of {table.stride}  named by {referrer}")
+    return 0
+
+
 def build_parser():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     sub = parser.add_subparsers(dest="command", required=True)
@@ -238,6 +292,16 @@ def build_parser():
     add("gaps", cmd_gaps)
     add("cfg", cmd_cfg, target_dest="at")
     add("dot", cmd_dot, target_dest="at")
+
+    add("owners", cmd_owners, target_dest="at")
+    add("boundary", cmd_boundary, target_dest="at")
+    receiver = add("receiver", cmd_receiver, target_dest="at")
+    receiver.add_argument("--reg", default=None,
+                          help="base register to ask about; the first "
+                               "non-stack one by default")
+    receiver.add_argument("--evidence", action="store_true",
+                          help="list every instruction the walk looked at")
+    add("tables", cmd_tables)
 
     listing = add("list", cmd_list, target_dest="at")
     listing.add_argument("--size", type=_parse_int, default=64)

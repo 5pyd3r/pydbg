@@ -1,9 +1,9 @@
 """FunctionCFG — one function's control flow, with its gaps shown.
 
-The graph pydbg already had (disasm/analysis.py) drops edges it cannot resolve
-and models calls as though the callee were part of the caller. Both make it
-look complete when it is not, and an incomplete graph that says so is worth
-more than one that reads as total.
+The graph pydbg already had — an earlier `disasm/analysis.py`, removed in F7 —
+dropped edges it could not resolve and modelled calls as though the callee were
+part of the caller. Both make it look complete when it is not, and an
+incomplete graph that says so is worth more than one that reads as total.
 """
 
 from dataclasses import dataclass, field
