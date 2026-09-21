@@ -7,7 +7,7 @@ from .functions import FunctionTable
 from .image import AnalyzedImage
 from .model import (
     AnalysisResult, AnalysisStats, CoverageReport, IndirectSite, RefKind,
-    SeedConfig, Xref,
+    SeedConfig, SlotTable, Xref,
 )
 from .refs import (
     branch_target, classify_refs, is_indirect_branch, memory_address,
@@ -48,6 +48,9 @@ class StaticAnalyzer:
         self.indirect_sites = {}
         # thunk rva -> the IAT slot it jumps through
         self.import_thunks = {}
+        # table base rva -> SlotTable. Keyed by base because the same table can
+        # be named by more than one indexing instruction.
+        self._slot_tables = {}
         self._accesses = []
         self._stack_ids = frozenset()
 
@@ -117,6 +120,8 @@ class StaticAnalyzer:
             indirect_sites=tuple(self.indirect_sites[rva]
                                  for rva in sorted(self.indirect_sites)),
             import_thunks=dict(self.import_thunks),
+            slot_tables=tuple(self._slot_tables[rva]
+                              for rva in sorted(self._slot_tables)),
             access_records=(tuple(self._accesses)
                             if self.config.collect_accesses else None),
             decoder=self.decoder,
@@ -370,12 +375,13 @@ class StaticAnalyzer:
                 # graph did not reveal; queued so the fixpoint can decide.
                 self._enqueue(target, origin=IMMEDIATE)
             elif kind == RefKind.TABLE:
-                self._absorb_jump_table(target, origin=JUMP_TABLE)
+                self._absorb_jump_table(target, origin=JUMP_TABLE,
+                                        referrer=rva)
 
-        self._absorb_indirect_jump(insn)
+        self._absorb_indirect_jump(insn, rva)
         self._note_if_thunk(insn, rva)
 
-    def _absorb_indirect_jump(self, insn):
+    def _absorb_indirect_jump(self, insn, rva):
         """Read a switch table that is reached through one memory operand.
 
         On x86 a jump table appears as `jmp [reg*4 + table]`, whose
@@ -394,7 +400,8 @@ class StaticAnalyzer:
         for op in insn.operands:
             address = memory_address(insn, op, self.image)
             if address is not None:
-                self._absorb_jump_table(address, origin=JUMP_TABLE)
+                self._absorb_jump_table(address, origin=JUMP_TABLE,
+                                        referrer=rva)
 
     def _note_if_thunk(self, insn, rva):
         """Register `jmp [IAT slot]` stubs as the function entries they are.
@@ -419,7 +426,8 @@ class StaticAnalyzer:
                 self.import_thunks[rva] = slot
                 return
 
-    def _absorb_jump_table(self, table_rva, max_entries=512, origin=None):
+    def _absorb_jump_table(self, table_rva, max_entries=512, origin=None,
+                           referrer=None):
         """Read a switch table's entries as code seeds, and as references.
 
         They are case bodies, not function entries — so they are decoded and
@@ -430,8 +438,18 @@ class StaticAnalyzer:
         recorded as a DATA reference like any other pointer. It is the same
         statement the reading of the table makes, and a case body reached only
         through the table otherwise has no reference to show.
+
+        The table's own identity is kept as well. Reading it already computes
+        {base, count, stride} and used to throw all three away, leaving the
+        slots reachable only by asking "what points at this address" — which
+        answers a different question and does not say where the run of slots
+        begins or ends. A byte sitting inside a table embedded in .text is
+        otherwise indistinguishable from one sitting inside a function, and
+        that is the shape this exists to name.
         """
         stride = self.image.slot_size
+        count = 0
+        truncated = False
         for index in range(max_entries):
             slot_rva = table_rva + index * stride
             value = self.image.read_pointer(slot_rva)
@@ -442,6 +460,26 @@ class StaticAnalyzer:
                 break                  # tables are packed; the run has ended
             self._add_data_ref(rva, slot_rva)
             self._enqueue_code_seed(rva, origin=origin)
+            count += 1
+        else:
+            # The loop ran out of budget rather than out of table. Saying so is
+            # the difference between "this table has 512 entries" and "this
+            # table has at least 512", and the second is not a table size.
+            truncated = count > 0
+
+        if count == 0:
+            return None
+        # Two jump instructions may index the same table. The longer reading
+        # wins: a short one means the reader stopped early, and reporting the
+        # shorter count would understate a table both readings agree exists.
+        known = self._slot_tables.get(table_rva)
+        if known is not None and known.count >= count:
+            return known
+        table = SlotTable(base=table_rva, count=count, stride=stride,
+                          kind="jump_table", referrer=referrer,
+                          truncated=truncated)
+        self._slot_tables[table_rva] = table
+        return table
 
     # ── results ────────────────────────────────────────────────
 

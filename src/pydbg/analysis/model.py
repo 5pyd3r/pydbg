@@ -39,6 +39,12 @@ class RefKind(IntEnum):
 # produces at all, and `ref_kinds()` is a statement about producers.
 _ALL_KINDS = frozenset(RefKind)
 
+# The OWNER_KINDS members that name a function. Duplicated from
+# `functions._OWNED` rather than imported: `functions` imports this module, so
+# the dependency only runs one way. `tests/test_analysis_owners.py` asserts the
+# two sets agree, which is what keeps a duplicated constant from drifting.
+_OWNED_KINDS = frozenset(("start", "body", "gap"))
+
 
 @dataclass(frozen=True, slots=True)
 class Xref:
@@ -53,6 +59,68 @@ class Xref:
 
     source: int
     kind: int
+
+
+# Kinds of slot run. `jump_table` is the only one with a producer today;
+# `pointer_run` — a contiguous run of code pointers that no instruction indexes
+# — is declared so that the two are never merged by shape, and
+# `test_analysis_owners` asserts it is still unproduced rather than leaving a
+# declared kind to be mistaken for a broken one.
+SLOT_TABLE_KINDS = ("jump_table", "pointer_run")
+
+
+@dataclass(frozen=True, slots=True)
+class SlotTable:
+    """A run of pointer-sized slots that code indexes into.
+
+    Four integers and the evidence, which is the whole object. What was
+    missing before was not a mapping — `data_refs_of` already answers "which
+    slots point at this address" — but the table's *identity*: where the run
+    begins, how long it is, and which instruction named it. Without that, a
+    byte inside a jump table embedded in ``.text`` is indistinguishable from a
+    byte inside a function, and a caller has to re-derive the run by hand.
+
+    'kind' is deliberately an open string rather than an enum with one member
+    used and the rest aspirational. ``jump_table`` is the only kind currently
+    produced; ``pointer_run`` is reserved for a contiguous run of pointers that
+    is not indexed by an instruction (a vtable in ``.rdata``), and naming the
+    distinction here is what stops a later reader from treating one as the
+    other — the two are the same shape of bytes and different claims.
+
+    'truncated' is set when the reader stopped at its entry budget rather than
+    at the end of the run. A truncated table must not be rendered as a table
+    size: 512 entries and "at least 512 entries" are different statements, and
+    silently reporting the first for the second is the same class of defect
+    that makes a coverage figure look complete.
+    """
+
+    base: int
+    count: int
+    stride: int
+    kind: str = "jump_table"
+    referrer: int | None = None      # the instruction whose operand named it
+    truncated: bool = False
+
+    def span(self):
+        """(start, end) of the slot run, as RVAs."""
+        return (self.base, self.base + self.count * self.stride)
+
+    def covers(self, rva):
+        return self.base <= rva < self.span()[1]
+
+    def index_of(self, rva):
+        """Slot index for 'rva', or None when it is not slot-aligned.
+
+        An address partway into a slot is not an entry, and returning the
+        enclosing index would let a byte in the middle of a pointer be
+        reported as "the third case of this switch".
+        """
+        if not self.covers(rva):
+            return None
+        offset = rva - self.base
+        if offset % self.stride:
+            return None
+        return offset // self.stride
 
 
 @dataclass(frozen=True)
@@ -183,6 +251,11 @@ class AnalysisResult:
     # was configured not to collect them. Named 'records' because
     # `accesses()` below turns them into Access objects.
     access_records: tuple = None
+    # Runs of indexed slots the sweep read, as SlotTable objects ascending by
+    # base. Present so that an address which is a *value in a table* can be
+    # told from one which is a *position in code* — the two are otherwise
+    # indistinguishable once the bytes have been decoded.
+    slot_tables: tuple = ()
     # Kept so a CFG can be built after the fact without re-decoding. The
     # decoder's bookkeeping is small (bytearrays, not Instruction objects), so
     # holding it costs little and re-running the analysis would cost a lot.
@@ -276,8 +349,55 @@ class AnalysisResult:
         return not self.indirect_call_sites()
 
     def function_of(self, rva):
-        """The function containing 'rva', or None."""
-        return self.functions.containing(rva)
+        """The function owning 'rva', or None.
+
+        Bounded, unlike `functions.containing`. An address past everything the
+        analysis claimed, before its first start, or outside the image is not
+        attributed to the nearest function by accident: those three are
+        different findings and `owner_of` names which one it was.
+        """
+        owner, kind = self.functions.owner_of(rva)
+        return owner if kind in _OWNED_KINDS else None
+
+    def owner_of(self, rva):
+        """(owner, kind) — see `FunctionTable.owner_of` for the kinds."""
+        return self.functions.owner_of(rva)
+
+    def container_of(self, rva):
+        """(SlotTable, index) for the table covering 'rva', or None.
+
+        Answers "which table is this byte in" for an address that lives inside
+        a run of slots rather than inside a function. None means no table
+        covers the address at all.
+
+        'index' is the slot number when the address is slot-aligned and **None
+        when it is not** — a byte partway into a pointer is inside the run but
+        is not an entry, and rounding it to the enclosing index would report it
+        as a case. The two facts are therefore kept separate rather than the
+        whole answer being withheld: the byte the feature exists for is exactly
+        the unaligned one. In a table embedded in .text, a pseudo-instruction
+        decoded out of the table's own bytes starts mid-slot, so refusing to
+        name the table for it refuses for the only caller that has one.
+        """
+        for table in self.slot_tables:
+            if table.covers(rva):
+                return (table, table.index_of(rva))
+        return None
+
+    def boundary_of(self, rva):
+        """A `Boundary` describing what the decode has at 'rva'."""
+        from .owners import boundary_of
+        return boundary_of(self, rva)
+
+    def classify_range(self, start, end, limit=100_000):
+        """Per-kind byte counts over [start, end) — the ownership denominator."""
+        from .owners import classify_range
+        return classify_range(self, start, end, limit=limit)
+
+    def receiver_of(self, rva, base_reg=None):
+        """Where the base register of the access at 'rva' came from."""
+        from .owners import receiver_of
+        return receiver_of(self, rva, base_reg=base_reg)
 
     def references_of(self, rva):
         """Xrefs made *by* the instruction at 'rva'."""

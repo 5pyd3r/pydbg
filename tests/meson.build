@@ -172,6 +172,14 @@ test(
   workdir: meson.project_build_root(),
 )
 
+test(
+  'analysis_owners',
+  py,
+  args: ['-m', 'unittest', 'tests.test_analysis_owners'],
+  env: test_env,
+  workdir: meson.project_build_root(),
+)
+
 # Analyses a real system DLL end to end, which does not fit the 30s default.
 test(
   'analysis_data_refs',

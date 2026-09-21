@@ -27,11 +27,16 @@ from .consts import ConstantTracker
 from .engine import (
     StaticAnalyzer, analyze_bytes, analyze_file, analyze_pe, analyze_process,
 )
-from .functions import FunctionTable
+from .functions import OWNER_KINDS, FunctionTable
 from .image import AnalyzedImage, SectionInfo
 from .model import (
     AnalysisResult, AnalysisStats, CoverageReport, Function, IndirectSite,
-    RefKind, SeedConfig, Xref,
+    RefKind, SeedConfig, SlotTable, Xref,
+)
+from .owners import (
+    DETERMINED_FACTS, BOUNDARY_KINDS, RECEIVER_FACTS, Boundary,
+    ReceiverNote, RegionOwnership, boundary_of, classify_range,
+    memory_base_registers, receiver_of,
 )
 from .names import Name, NameTable, auto_names, import_names
 from .workspace import Workspace, WorkspaceError, image_fingerprint
@@ -60,4 +65,9 @@ __all__ = [
     'branch_target', 'classify_refs', 'is_indirect_branch', 'memory_address',
     'LinearScan', 'Resync', 'Undecodable', 'linear_scan', 'scan_executable',
     'scan_section',
+    'SlotTable', 'OWNER_KINDS',
+    'Boundary', 'BOUNDARY_KINDS', 'boundary_of',
+    'RegionOwnership', 'classify_range',
+    'ReceiverNote', 'RECEIVER_FACTS', 'DETERMINED_FACTS', 'receiver_of',
+    'memory_base_registers',
 ]

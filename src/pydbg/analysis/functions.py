@@ -4,6 +4,16 @@ from bisect import bisect_right
 
 from .model import Function
 
+# What an address can turn out to be owned by. Every member has a producer in
+# `owner_of`, and the three that mean "nothing owns this" are kept apart
+# because they are three different findings: an address before the first start,
+# one past everything the analysis claimed, and one the image does not map at
+# all. Folding them into a bare None is how "past the last function" came to be
+# answered with the last function's start.
+OWNER_KINDS = ("start", "body", "gap", "after", "before", "unmapped")
+
+_OWNED = frozenset(("start", "body", "gap"))
+
 
 class FunctionTable:
     """Function starts, two-tier by confidence, plus their extents.
@@ -118,17 +128,75 @@ class FunctionTable:
         return self._sorted
 
     def containing(self, rva):
-        """The function containing 'rva', or None.
+        """The nearest preceding start at or before 'rva', or None.
 
-        Nearest preceding start, via bisect. The prototype recorded the naive
-        alternative — testing every instruction against every function — as
-        unusable at real scale (670k instructions against 27k functions).
+        **Unbounded on purpose.** This answers "which function's span did I walk
+        into", which is what rendering a listing wants, and it is the documented
+        performance query: the naive alternative — testing every instruction
+        against every function — was unusable at real scale (670k instructions
+        against 27k functions).
+
+        It is therefore *not* an ownership answer. Past the last function it
+        returns that function's start no matter how far past, and it has no
+        opinion about whether anything decodes there. `owner_of` is the bounded
+        query; the two are kept apart rather than merged because fixing the
+        semantics here would change every listing, and the callers that want
+        "nearest preceding" (`access.py`, the CLI, `report.py`) genuinely want
+        that.
         """
         starts = self.sorted_starts
         index = bisect_right(starts, rva) - 1
         if index < 0:
             return None
         return starts[index]
+
+    def owner_of(self, rva):
+        """(owner, kind) for the function 'rva' belongs to, bounded.
+
+        `kind` is one of OWNER_KINDS:
+
+        - ``start`` / ``body`` / ``gap`` — a function owns it, and ``owner`` is
+          that function's RVA. ``body`` means a decoded instruction claims
+          these bytes. ``gap`` means the address is inside a function's span
+          but nothing decodes there — which is the shape a jump table embedded
+          in ``.text`` leaves behind, and answering ``body`` for it is how a
+          byte that was decoded as part of an *operand* gets reported as
+          function interior.
+        - ``after`` / ``before`` / ``unmapped`` — nothing owns it, ``owner`` is
+          None. ``after`` is the case `containing` gets wrong: an address past
+          everything the analysis claimed.
+
+        The upper bound is the function's extent — the furthest byte its own
+        instructions claim, itself bounded by the next start (see `extents`).
+        An unmapped address is answered from the image rather than from the
+        start list, so "the image has nothing here" is not confused with "the
+        analysis has not reached here yet".
+        """
+        if rva is None or rva < 0:
+            return (None, "unmapped")
+        image = self.image
+        if image is not None and not image.is_mapped(rva):
+            return (None, "unmapped")
+
+        starts = self.sorted_starts
+        index = bisect_right(starts, rva) - 1
+        if index < 0:
+            return (None, "before")
+
+        start = starts[index]
+        if rva == start:
+            return (start, "start")
+
+        end = start + self.extents().get(start, 0)
+        if rva < end:
+            return (start, "body")
+        if index + 1 < len(starts):
+            return (start, "gap")
+        return (None, "after")
+
+    def is_owned(self, rva):
+        """Whether a function owns 'rva', without saying which or how."""
+        return self.owner_of(rva)[1] in _OWNED
 
     def extent_of(self, rva):
         """Size of the function starting at 'rva', or 0 if unknown."""
