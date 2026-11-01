@@ -176,6 +176,20 @@ class TestProfiles(unittest.TestCase):
         self.assertIsNone(result.access_records)
         self.assertEqual(len(result.accesses()), 3)
 
+    def test_the_replay_applies_the_same_image_base_rule_as_the_sweep(self):
+        """Both paths must answer the same question the same way.
+
+        `[ebx + image_base]` is an absolute address formed through a register,
+        not a field at that offset. The sweep skipped it; the replay path did
+        not, so the same image produced different structure tables depending
+        on whether collection was enabled.
+        """
+        from pydbg.analysis import SeedConfig, analyze_bytes
+        code = b"\x8b\x83" + struct.pack("<I", IMAGE_BASE) + b"\xc3"
+        result = analyze_bytes(build(code),
+                               config=SeedConfig(collect_accesses=False))
+        self.assertEqual(result.accesses(), ())
+
 
 class TestRealImageTraces(unittest.TestCase):
 

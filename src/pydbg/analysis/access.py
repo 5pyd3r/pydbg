@@ -199,8 +199,15 @@ def _replay(result, stack_registers):
         if insn is None:
             continue
         resolved = base_relative_access(insn, stack_ids=ids)
-        if resolved is not None:
-            out.append((rva,) + resolved)
+        if resolved is None:
+            continue
+        # Same rule as the sweep in engine._record_access: a displacement at
+        # or beyond the image base is an absolute address formed through a
+        # register, not a structure field. Without it this replay answered
+        # differently from the recorded path for the very same instruction.
+        if abs(resolved[1]) >= result.image.image_base:
+            continue
+        out.append((rva,) + resolved)
     return out
 
 
