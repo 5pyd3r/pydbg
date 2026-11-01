@@ -76,16 +76,14 @@ class Instrumenter:
                 f"target 0x{target_addr:X} is already instrumented; restore() it first")
 
         from ..disasm.engine import DisasmEngine
-        from ..memory.manager import MemoryManager
         from . import codegen
         from .templates import build_stub, build_trampoline
 
-        mem = MemoryManager(self._s)
         mode = "x64" if getattr(self._s, 'target_arch', 64) == 64 else "x86"
         engine = DisasmEngine(mode=mode)
 
         # 1. 读取 ≥5 字节原始代码（指令边界）
-        original = self._read_min_5_bytes(mem, engine, target_addr)
+        original = self._read_min_5_bytes(self._mem, engine, target_addr)
 
         # 2. 分配一块连续区域放 trampoline + stub 缓冲（近目标 ±2GB）。
         #    两者同区 ⇒ payload 内 call original_func（rel32 到 trampoline）恒在 ±2GB 内，
@@ -93,16 +91,16 @@ class Instrumenter:
         tramp_size = len(original) + 5
         stub_cap = _STUB_ALLOC
         region_size = tramp_size + stub_cap
-        region_addr = self._alloc_rwx(mem, region_size, near=target_addr)
+        region_addr = self._alloc_rwx(region_size, near=target_addr)
         if region_addr == 0:
             raise PydbgError("Failed to allocate trampoline+stub region")
         tramp_addr = region_addr
         stub_addr = region_addr + tramp_size
         try:
             tramp_code = build_trampoline(original, tramp_addr, target_addr)
-            mem.write(tramp_addr, tramp_code)
+            self._mem.write(tramp_addr, tramp_code)
         except Exception:
-            self._free_rwx(mem, region_addr, region_size)
+            self._free_rwx(region_addr, region_size)
             raise
 
         # 3. LLVM 编译 payload；original_func 强制映射到 trampoline
@@ -117,17 +115,17 @@ class Instrumenter:
                     f"Generated payload is {len(machine)} bytes, exceeding the "
                     f"{stub_cap}-byte stub buffer")
         except Exception:
-            self._free_rwx(mem, region_addr, region_size)
+            self._free_rwx(region_addr, region_size)
             raise
         try:
-            mem.write(stub_addr, machine)
-            mem.write(target_addr, build_stub(target_addr, stub_addr))
+            self._mem.write(stub_addr, machine)
+            self._mem.write(target_addr, build_stub(target_addr, stub_addr))
         except Exception:
             try:
-                mem.write(target_addr, original)   # 尽力恢复目标
+                self._mem.write(target_addr, original)   # 尽力恢复目标
             except Exception:
                 pass
-            self._free_rwx(mem, region_addr, region_size)
+            self._free_rwx(region_addr, region_size)
             raise
 
         info = InstrumentInfo(
@@ -146,17 +144,17 @@ class Instrumenter:
 
     def restore(self, target_addr):
         """Restore original code and free trampoline + stub memory. Idempotent."""
-        info = self._hooks.pop(target_addr, None)
+        info = self._hooks.get(target_addr)
         if info is None:
             return
-        from ..memory.manager import MemoryManager
-        mem = MemoryManager(self._s)
-        try:
-            mem.write(target_addr, info.original_bytes)
-        finally:
-            # 单块连续区域：trampoline + stub 缓冲一次释放
-            self._free_rwx(mem, info.trampoline_addr,
-                           info.trampoline_size + info.stub_alloc_size)
+        # Free only after the original bytes are back. Freeing first (the old
+        # finally-block order) meant a failed write left the E9 detour in the
+        # target pointing into released memory, which turns a failed restore
+        # into a crash inside the hooked function.
+        self._mem.write(target_addr, info.original_bytes)
+        self._free_rwx(info.trampoline_addr,
+                       info.trampoline_size + info.stub_alloc_size)
+        del self._hooks[target_addr]
 
     # ── internal helpers ────────────────────────────────────────
 
@@ -172,22 +170,22 @@ class Instrumenter:
                 f"Need at least 5 bytes for JMP at 0x{addr:X}, got {len(result)}")
         return result
 
-    def _alloc_rwx(self, mem, size, near=None):
+    def _alloc_rwx(self, size, near=None):
         """分配可执行 RWX 内存。near 给出后，在 near ±2GB 内就近分配，
         保证 E9 rel32 detour 可达。返回基址或 0。"""
+        from .. import _pydbg
+        h = self._s.process_handle
+        if near:
+            return self._alloc_near(h, near, size)
         try:
-            from .. import _pydbg
-            h = self._s.process_handle
-            if near:
-                return self._alloc_near(h, near, size)
             result = _pydbg.virtual_alloc(
                 h, size,
                 _MEM_COMMIT_RESERVE,
                 _PAGE_EXECUTE_READWRITE,
             )
-            return result.get('base_address', 0)
-        except Exception:
-            return 0
+        except OSError as e:
+            raise PydbgError(f"cannot allocate instrument memory: {e}") from e
+        return result.get('base_address', 0)
 
     def _alloc_near(self, h, near, size):
         """在 [near-_RELOC_WINDOW, near+_RELOC_WINDOW] 内扫描空闲区域并就近分配。
@@ -230,9 +228,11 @@ class Instrumenter:
                         pass
         return 0
 
-    def _free_rwx(self, mem, addr, size):
+    def _free_rwx(self, addr, size):
+        from .. import _pydbg
         try:
-            from .. import _pydbg
             _pydbg.virtual_free(self._s.process_handle, addr, 0, 0x8000)  # MEM_RELEASE 要求 dwSize==0
-        except Exception:
-            pass
+        except OSError as e:
+            raise PydbgError(
+                f"instrumentation removed, but the region at 0x{addr:X} "
+                f"could not be released: {e}") from e
