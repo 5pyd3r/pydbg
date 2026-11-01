@@ -39,3 +39,30 @@ class StackWalker:
             if ip == 0:
                 break
         return frames
+
+    def get_call_stack(self, h_thread, context_bytes, max_frames=64,
+                       resolve=None):
+        """The call stack as a list of dicts, frame 0 innermost.
+
+        Same inputs as walk(): dbghelp unwinds from the raw CONTEXT captured
+        at the point of interest, so there is nothing to fetch implicitly. The
+        design spec lists this without a context argument; a walk that picked
+        its own context would start the stack somewhere else.
+
+        'resolve' is an optional ip -> name callable that fills 'func_name'.
+        The frame this binding returns carries no symbol, and guessing one
+        from a module base is the confident-wrong answer dump/ exists to
+        avoid.
+        """
+        stack = []
+        for index, frame in enumerate(
+                self.walk(h_thread, context_bytes, max_frames)):
+            ip = frame.get('frame_ip', 0)
+            stack.append({
+                'index': index,
+                'ip': ip,
+                'sp': frame.get('frame_sp', 0),
+                'fp': frame.get('frame_fp', 0),
+                'func_name': resolve(ip) if resolve and ip else None,
+            })
+        return stack
