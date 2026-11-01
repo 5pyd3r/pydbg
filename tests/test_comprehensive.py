@@ -553,9 +553,13 @@ class TestIATHookFullFlow(unittest.TestCase):
     """Tests for IATHook with synthetic PE data."""
 
     def _build_pe_with_imports(self):
-        """Build minimal PE32+ with one import: MessageBoxA from user32.dll."""
-        from tests.test_pe import build_pe_with_imports
-        return build_pe_with_imports()
+        """A loaded-layout PE32+ with icon 'MessageBoxA' imported.
+
+        Returns (image_bytes, iat_rva). IATHook parses the module where it is
+        mapped, so the fixture has to be a loaded image, not a file image.
+        """
+        from tests.pe_builder import build_loaded_image_with_one_import
+        return build_loaded_image_with_one_import()
 
     def test_set_and_restore(self):
         """Full set/restore cycle with mock memory."""
@@ -565,15 +569,15 @@ class TestIATHookFullFlow(unittest.TestCase):
         session = DebugSession()
         session.target_arch = 64
         hook = IATHook(session)
-        pe_data = self._build_pe_with_imports()
+        pe_data, iat_rva = self._build_pe_with_imports()
 
         base = 0x140000000
-        # IAT entry at RVA 0x5400 → absolute addr = base + 0x5400
-        iat_abs = base + 0x5400
+        # The IAT slot the fixture's import descriptor points at.
+        iat_abs = base + iat_rva
         # Pre-fill IAT with a fake function pointer
         fake_func_ptr = 0x7FFE1234
         pe_buf = bytearray(pe_data)
-        struct.pack_into('<Q', pe_buf, 0x5400, fake_func_ptr)
+        struct.pack_into('<Q', pe_buf, iat_rva, fake_func_ptr)
 
         # Mock memory that reads from the PE buffer at the right offset
         class MockMemory:
@@ -629,14 +633,25 @@ class TestIATHookFullFlow(unittest.TestCase):
     def test_find_returns_none_for_unknown(self):
         from pydbg.core.session import DebugSession
         from pydbg.hook.iat import IATHook
+        from tests.pe_builder import PEBuilder
 
         session = DebugSession()
         session.target_arch = 64
         hook = IATHook(session)
 
+        # A blank memory used to be enough because the lookup swallowed every
+        # parse error. It parses the image now, so the fixture has to be one:
+        # a valid loaded image whose import table is just its terminator.
+        builder = PEBuilder()
+        builder.add_section(".text", b"\x90" * 0x10, 0x1000)
+        builder.add_section(".rdata", b"\x00" * 0x40, 0x2000)
+        builder.add_dir(1, 0x2000, 0x14)
+        pe_data = builder.build()
+
         class MockMemory:
             def read(self, addr, size):
-                return b'\x00' * size
+                offset = addr - 0x140000000
+                return pe_data[offset:offset + size]
 
         class MockModules:
             def enumerate(self):

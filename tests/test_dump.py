@@ -62,7 +62,10 @@ class TestStackWalker(unittest.TestCase):
             process_handle = None
 
         sw = StackWalker(FakeSession())
-        with self.assertRaises((PydbgError, ThreadError, OSError)):
+        # Whichever layer refuses first (ThreadManager None-handling raises
+        # TypeError, a real handle failure raises ThreadError/OSError), the
+        # point is that walk() does not answer with an empty stack.
+        with self.assertRaises((PydbgError, ThreadError, OSError, TypeError)):
             sw.walk(None, b"\x00" * 0x4d0)
 
 
