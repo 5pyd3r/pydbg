@@ -19,7 +19,8 @@ pydbg/
 ├── core/               — 调试核心
 │   ├── debugger.py     — Debugger 门面（组合模式，生命周期 + 事件循环）
 │   ├── event.py        — DebugEvent（事件封装 + 异常解析）
-│   └── session.py      — DebugSession / ChildProcessInfo（纯状态数据类）
+│   ├── session.py      — DebugSession / ChildProcessInfo（状态、句柄表、模块缓存）
+│   └── window_probe.py — 窗口与消息循环探测（对话框挂起 vs 仍在泵消息）
 ├── memory/manager.py   — 读写/查询/保护进程内存
 ├── thread/manager.py   — 线程句柄/寄存器上下文/挂起恢复/枚举/单步
 ├── breakpoint/
@@ -31,10 +32,28 @@ pydbg/
 │   ├── types.py        — 结构体 dataclass
 │   ├── source.py       — 字节源抽象（BytesSource / FileSource）
 │   ├── view.py         — RVA↔文件偏移（FileView / LoadedView）
-│   └── parser.py       — DOS/NT/节表/导出/导入解析
-├── disasm/
-│   ├── engine.py       — capstone 封装（x86/x64 模式）
-│   └── analysis.py     — 基本块 / CFG / 后继分析
+│   ├── parser.py       — DOS/NT/节表/导出/导入解析
+│   └── resource.py     — 资源目录树
+├── disasm/engine.py    — capstone 封装（x86/x64 模式）
+├── analysis/           — 静态分析工作台（纯 Python，不依赖调试器）
+│   ├── model.py        — 结果模型（Image / RefKind / Xref / SlotTable / ValueSet）
+│   ├── image.py        — 分析用的镜像视图（节表、可执行判定）
+│   ├── engine.py       — 线性扫描、种子推进与交叉引用收集
+│   ├── decoder.py      — 指令解码缓存与覆盖记录
+│   ├── functions.py    — 函数起点与范围（FunctionTable）
+│   ├── owners.py       — 地址/基址寄存器归属查询
+│   ├── access.py       — 基址相对访问（结构体字段证据）
+│   ├── values.py       — 定址处取值集合，含拒绝语义
+│   ├── seeds.py        — 种子来源（入口/导出/表/数据指针）
+│   ├── cfg.py          — 基本块与控制流图（含 DOT 渲染）
+│   ├── scan.py         — 线性扫描原语及其缺口
+│   ├── attribution.py  — 未覆盖字节归因
+│   ├── report.py       — 文本报告
+│   ├── names.py        — 名字表与自动命名
+│   ├── refs.py         — 引用分类与地址解析
+│   ├── consts.py       — 常量与取址辅助
+│   ├── workspace.py    — 名字与注释的持久化
+│   └── process_source.py — 以进程内存作为字节源
 ├── trace/
 │   ├── step.py         — 单步执行（TF 标志）
 │   └── calltree.py     — call/ret 调用树
@@ -44,7 +63,9 @@ pydbg/
 ├── dump/
 │   ├── minidump.py     — Minidump 文件解析器
 │   └── stackwalk.py    — x64 栈回溯
-├── patch/assembler.py  — keystone 封装（汇编字符串 → 机器码）
+├── patch/
+│   ├── assembler.py    — keystone 封装（汇编字符串 → 机器码）
+│   └── encoding.py     — 共享的 E9 / 绝对跳转编码
 ├── instrument/         — 插桩（硬编码 stub + LLVM 动态代码生成）
 │   ├── instrumenter.py — install / restore / active 编排
 │   ├── codegen.py      — extern 扫描、符号校验、_llvm_backend 懒加载
@@ -178,5 +199,5 @@ CI：GitHub Actions，`windows-latest`，仅 x64 宿主；32 位目标在 CI 现
   extern 无法可靠识别。
 - 插桩 payload 类型仅支持 `int`/`void`；`&&`/`||` 不保留短路求值。
 - 多线程安全性由调用方负责（插桩/inline hook 挂起其他线程）。
-- `pyproject.toml` 声明 `requires-python = ">=3.8"`，但代码使用 `int | None` 等
-  PEP 604 语法（实际构建/CI 用 Python 3.13+），版本声明与语法要求不一致。
+- `pyproject.toml` 声明 `requires-python = ">=3.10"`，代码使用 `int | None` 等
+  PEP 604 语法，CI 与本地构建使用 3.13。

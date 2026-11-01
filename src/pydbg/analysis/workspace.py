@@ -18,7 +18,7 @@ import json
 import os
 from dataclasses import dataclass, field
 
-from .names import Name, NameTable, SOURCE_USER
+from .names import NameTable, SOURCE_USER
 
 FORMAT_VERSION = 1
 
@@ -152,13 +152,3 @@ class Workspace:
     def for_image(cls, image_path):
         """An empty workspace bound to an image."""
         return cls(image=image_fingerprint(image_path), path=None)
-
-
-def apply_to_names(table, workspace):
-    """Merge a workspace's names into a table, person-supplied names winning."""
-    for rva, name in workspace.names.items():
-        if isinstance(name, Name):
-            table.add(rva, name.text, name.source)
-        else:
-            table.add(rva, name, SOURCE_USER)
-    return table

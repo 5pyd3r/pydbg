@@ -50,6 +50,13 @@ class Assembler:
         return '; '.join(lines)
 
     def verify(self, code, addr=0):
+        """Whether assembling 'code' reproduces the mnemonics it was written as.
+
+        The check compares mnemonics, not source text. It used to compare the
+        whole statement against the disassembler's mnemonic, so any line with
+        an operand — every line that does anything — answered False whether or
+        not the encoding was right, and the tests only ever passed ret/nop.
+        """
         try:
             from ..disasm.engine import DisasmEngine
         except ImportError:
@@ -59,6 +66,12 @@ class Assembler:
         insns = engine.disasm(addr, assembled)
         if not insns:
             return False
-        original_mnemonics = self._normalize(code).lower().replace('; ', ';').split(';')
-        roundtrip_mnemonics = [i.mnemonic.lower() for i in insns]
-        return original_mnemonics == roundtrip_mnemonics
+        expected = [self._mnemonic_of(line)
+                    for line in self._normalize(code).split(';')]
+        roundtrip = [insn.mnemonic.lower() for insn in insns]
+        return expected == roundtrip
+
+    @staticmethod
+    def _mnemonic_of(statement):
+        parts = statement.split()
+        return parts[0].lower() if parts else ''

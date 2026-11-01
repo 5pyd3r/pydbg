@@ -1,6 +1,18 @@
 # Known Issues
 
-*No known issues at this time.*
+## Open
+
+- **WOW64 附加模式的 `DebugActiveProcessStop` 可能瞬态返回 `ERROR_ACCESS_DENIED`**
+  （目标主线程挂起时），必要时重试；句柄槽可能被调试子系统复用，调用方须用
+  `GetProcessId` 校验。当前不自动处理。
+- **32 位插桩目标不随默认构建产出**：`instrument_target32.exe` 只在
+  `scripts/build-target32.ps1` 运行时生成，因此 `test_instrument` 的 WOW64 live
+  一组在缺少它时 skip。CI 的 `build-and-test` job 会构建它。
+- **x64 trampoline 不做 RIP-relative 重定位**（见 `architecture.md` §已知限制）。
+- **`analysis` 模块的设计文档不在 master**：它只存在于未合并分支
+  `feat/game-analysis-framework` 的 `docs/superpowers/specs/` 下（`git show
+  2fb3f88:docs/superpowers/specs/2026-06-22-pydbg-analysis-fixes-design.md`）。
+  master 上的实现按该文档编写，但仓库里查不到它。
 
 ## Resolved
 
@@ -129,15 +141,16 @@ bare interpreter is what catches it, which is what the verify step in
 ### Dynamic-analysis gaps (found by the same three analysis sessions)
 
 The same three targets surfaced a second family: capabilities whose absence
-pushed every caller into hand-rolling a workaround. Recorded in
-`targets/pydbg-gaps.md` §C and fixed here.
+pushed every caller into hand-rolling a workaround. Fixed here.
 
 - **`enum_modules()` raised `ERROR_PARTIAL_COPY` (299) on the loader
   breakpoint** — precisely when module info is first wanted. `CREATE_PROCESS`
   and `LOAD_DLL` name every image the loader maps, so those bases are now
-  recorded from the events and `module_at(addr)` answers from that table with
-  no syscall. `enum_modules()` falls back to it too, and merges in images PSAPI
-  cannot see (on WOW64 the 32-bit image is not mapped at the first breakpoint).
+  recorded from the events and `module_at(addr)` answers from that table
+  instead of running a module enumeration (each entry is still decorated by
+  reading the image's own PE header). `enum_modules()` falls back to it too,
+  and merges in images PSAPI cannot see (on WOW64 the 32-bit image is not
+  mapped at the first breakpoint).
 - **`create_process()` could not pass a command line**, forcing callers onto
   the `attach()` path — and so losing every startup-time breakpoint — for any
   target configured by argv. It now takes `cmdline=`, passed verbatim with
@@ -288,7 +301,7 @@ would have been verified only in CI's `llvm-instrument` job.
 window, is 64KB-aligned (the E9 rel32 range check depends on that), and two
 successive calls do not return the same address.
 
-The general lesson is the one §D of `targets/pydbg-gaps.md` keeps re-teaching:
+The general lesson, which this file keeps re-learning:
 **"covered by a test" and "covered in the configuration you are running" are
 different claims**, and a `skipUnless` on an optional backend silently moves a
 test from the first to the second.

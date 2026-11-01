@@ -61,29 +61,22 @@ if ($LASTEXITCODE -ne 0) {
     exit 1
 }
 
-# Verify imports
+# Verify imports — a missing dependency must fail the script instead of
+# printing "FAILED" above a green "[pass]" line.
 Write-Host "[verify] checking imports..." -ForegroundColor Yellow
 & $venvPython -c @"
-import sys
+import sys, struct
 print(f'  Python {sys.version}')
-import struct
-print(f'  Arch: {struct.calcsize('P')*8}-bit')
-try:
-    import capstone
-    print(f'  capstone: {capstone.cs_version()}')
-except ImportError as e:
-    print(f'  capstone: FAILED - {e}')
-try:
-    import keystone
-    print(f'  keystone: OK')
-except ImportError as e:
-    print(f'  keystone: FAILED - {e}')
-try:
-    import cython
-    print(f'  cython: {cython.__version__}')
-except ImportError as e:
-    print(f'  cython: FAILED - {e}')
+print(f"  Arch: {struct.calcsize('P')*8}-bit")
+import capstone, keystone, cython
+print(f'  capstone: {capstone.cs_version()}')
+print('  keystone: OK')
+print(f'  cython: {cython.__version__}')
 "@
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "[fail] venv-x64 is missing a required dependency" -ForegroundColor Red
+    exit 1
+}
 
 Write-Host "[pass] venv-x64 ready" -ForegroundColor Green
 Write-Host "  Activate: .\venv-x64\Scripts\Activate.ps1" -ForegroundColor Gray

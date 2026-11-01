@@ -542,5 +542,40 @@ class TestRealImageDirectories(unittest.TestCase):
         self.assertIn(2, types, "IMAGE_DEBUG_TYPE_CODEVIEW (the PDB) missing")
 
 
+class TestHeaderPlacementIsNotTheCount(unittest.TestCase):
+    """The section table follows SizeOfOptionalHeader, not the directory count.
+
+    A header that lies about NumberOfRvaAndSizes used to move the section table
+    into whatever followed, and the sections then parsed "successfully" from
+    the wrong offset — a plausible-looking answer to a broken question.
+    """
+
+    def _image(self):
+        builder = PEBuilder()
+        builder.add_section(".text", b"\x90" * 0x40, RVA_TEXT)
+        builder.add_section(".rdata", b"\x00" * 0x40, RVA_RDATA)
+        return bytearray(builder.build())
+
+    def test_a_lying_directory_count_does_not_move_the_sections(self):
+        from pydbg.pe import PE
+
+        data = self._image()
+        # NumberOfRvaAndSizes sits 108 bytes into the optional header.
+        struct.pack_into("<I", data, 0x80 + 4 + 20 + 108, 0xFFFF)
+        pe = PE(bytes(data))
+        self.assertEqual([s.name for s in pe.sections], [".text", ".rdata"])
+
+    def test_a_directory_pointing_past_the_file_ends_its_own_parse(self):
+        from pydbg.pe import PE
+
+        data = self._image()
+        dirs_offset = 0x80 + 4 + 20 + 112
+        struct.pack_into("<II", data, dirs_offset, 0x99999, 0x100)      # export
+        struct.pack_into("<II", data, dirs_offset + 8, 0x99999, 0x100)  # import
+        pe = PE(bytes(data))            # must not raise out of PE()
+        self.assertEqual(pe.exports, [])
+        self.assertEqual(pe.imports, [])
+
+
 if __name__ == "__main__":
     unittest.main()

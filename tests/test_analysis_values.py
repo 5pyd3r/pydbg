@@ -155,6 +155,21 @@ class TestTheLattice(unittest.TestCase):
         self.assertNotIn(joined.kind, (self.Bound.UNMODELED,
                                        self.Bound.UNBOUNDED))
 
+    def test_a_join_that_becomes_unbounded_says_why(self):
+        """widen() must reach UNBOUNDED through the constructor that demands a
+        reason, and the reason must survive the join.
+
+        The constructor validated a reason and then discarded it, so a caller
+        holding an UNBOUNDED set had no way to tell a modelled-everything
+        answer from one that merely stopped.
+        """
+        wide = self.ValueSet.unbounded("every writer admits any value",
+                                       ((0x10, "store of a parameter"),))
+        joined = self.ValueSet.of_value(1, 0x20).widen(wide)
+        self.assertEqual(joined.kind, self.Bound.UNBOUNDED)
+        self.assertIn("every writer admits any value", joined.reason)
+        self.assertIn("every writer admits any value", joined.render())
+
     def test_an_unmodelled_writer_survives_the_join_and_accumulates(self):
         """The second defect, as an executable test.
 

@@ -30,6 +30,7 @@ if ($LASTEXITCODE -ne 0) { Write-Host "[fail] build-target32" -ForegroundColor R
 
 Write-Host "[pip] install capstone" -ForegroundColor Yellow
 & $python -m pip install "capstone>=5.0" 2>&1 | Out-Null
+if ($LASTEXITCODE -ne 0) { Write-Host "[fail] capstone install" -ForegroundColor Red; exit 1 }
 
 Write-Host "[install] pip install -e ." -ForegroundColor Yellow
 Push-Location $ROOT_DIR

@@ -69,11 +69,12 @@ class TestProcessLifecycle(unittest.TestCase):
                 break
             _pydbg.continue_debug_event(event["pid"], event["tid"])
 
-        # Should hit the loader breakpoint
-        if event and event["event_name"] == "EXCEPTION":
-            self.assertEqual(
-                event["exception_code"], 0x80000003
-            )  # EXCEPTION_BREAKPOINT
+        # Should hit the loader breakpoint. This used to be wrapped in
+        # `if event and ...`, so a run that never reached one passed silently.
+        self.assertIsNotNone(event, "no debug event arrived at all")
+        self.assertEqual(event["event_name"], "EXCEPTION",
+                         "the loader breakpoint never arrived")
+        self.assertEqual(event["exception_code"], 0x80000003)
 
         _pydbg.terminate_process(h_proc, 0)
         _pydbg.close_handle(h_proc)

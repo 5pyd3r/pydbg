@@ -1,5 +1,6 @@
 """Debugger — high-level debugging API with composition pattern."""
 
+import struct
 import time
 
 from .. import _pydbg
@@ -243,20 +244,17 @@ class Debugger:
 
     def _detect_target_arch(self, h_process):
         """Detect if target process is 32-bit (WoW64) or 64-bit."""
-        import struct
-        import ctypes
-        if struct.calcsize("P") == 8:
-            # 64-bit host: check if target is WoW64 (32-bit)
-            try:
-                is_wow64 = ctypes.c_int(0)
-                ctypes.windll.kernel32.IsWow64Process(
-                    ctypes.c_void_p(h_process), ctypes.byref(is_wow64))
-                return 32 if is_wow64.value else 64
-            except Exception:
-                return 64
-        else:
-            # 32-bit host: always 32-bit
+        if struct.calcsize("P") != 8:
             return 32
+        # Ask Windows rather than guessing: a failed query used to be swallowed
+        # and answered "64", which mislabelled every WOW64 target and made the
+        # rest of the session read 64-bit context structs from a 32-bit process.
+        try:
+            is_wow64 = _pydbg.is_wow64_process(h_process)
+        except OSError as e:
+            raise ProcessError(
+                f"cannot determine target architecture: {e}") from e
+        return 32 if is_wow64 else 64
 
     def attach(self, pid):
         try:
@@ -947,6 +945,40 @@ class Debugger:
     def module_at(self, addr, pid=None):
         """Module containing 'addr', or None. See ModuleResolver.module_at."""
         return self.modules.module_at(addr, pid)
+
+    def parse_loaded_dll(self, event):
+        """PE for the image a LOAD_DLL event announced.
+
+        Parses the image where it is mapped (LoadedView over process memory):
+        that is where the directories actually point, and it reflects any
+        runtime fixups. Falls back to the file the loader named when the image
+        is no longer readable — a stale event, or a module already unloaded.
+
+        The event carries the path rather than the file's bytes on purpose:
+        copying every loaded DLL into the event stream costs hundreds of
+        megabytes per process, and most callers never look.
+
+        Raises PydbgError when the event has neither a readable image nor a
+        usable path.
+        """
+        base = getattr(event, 'dll_base', 0) or 0
+        path = getattr(event, 'dll_path', '') or ''
+        from ..analysis.process_source import ProcessSource
+        from ..exceptions import PydbgError
+        from ..pe import PE
+        from ..pe.view import LoadedView
+
+        if base:
+            try:
+                return PE.from_source(ProcessSource(self._session, base),
+                                      LoadedView(), va_base=base)
+            except (PydbgError, OSError):
+                if not path:
+                    raise
+        if not path:
+            raise PydbgError(
+                "LOAD_DLL event carries neither a readable image nor a path")
+        return PE.from_file(path)
 
     def get_module_filename(self, h_module):
         return self.modules.get_filename(h_module)

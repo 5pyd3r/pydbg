@@ -35,7 +35,7 @@ def build_minimal_pe32plus():
         0x5A000000,  # time_date_stamp
         0,  # PointerToSymbolTable
         0,  # NumberOfSymbols
-        0xF0,  # SizeOfOptionalHeader (PE32+)
+        0x80,  # SizeOfOptionalHeader (PE32+): 112 + 2 dirs * 8
         0x22,
     )  # characteristics
 
@@ -140,7 +140,7 @@ def build_pe_with_exports():
     dos_header = struct.pack("<2s58xI", b"MZ", 0x80)
     dos_header += b"\x00" * (0x80 - len(dos_header))
     pe_sig = struct.pack("<I", 0x00004550)
-    file_header = struct.pack("<HHIIIHH", 0x8664, 2, 0x5A000000, 0, 0, 0xF0, 0x22)
+    file_header = struct.pack("<HHIIIHH", 0x8664, 2, 0x5A000000, 0, 0, 0x80, 0x22)
 
     # Optional header (PE32+)
     oh = struct.pack("<HBB", 0x20B, 14, 0)
@@ -248,7 +248,7 @@ def build_pe_with_imports():
     dos_header = struct.pack("<2s58xI", b"MZ", 0x80)
     dos_header += b"\x00" * (0x80 - len(dos_header))
     pe_sig = struct.pack("<I", 0x00004550)
-    file_header = struct.pack("<HHIIIHH", 0x8664, 2, 0x5A000000, 0, 0, 0xF0, 0x22)
+    file_header = struct.pack("<HHIIIHH", 0x8664, 2, 0x5A000000, 0, 0, 0x80, 0x22)
 
     oh = struct.pack("<HBB", 0x20B, 14, 0)
     oh += struct.pack("<III", 0x1000, 0, 0)
@@ -356,7 +356,7 @@ def build_minimal_pe32():
         0x5A000000,  # time_date_stamp
         0,
         0,  # PointerToSymbolTable, NumberOfSymbols
-        0xE0,  # SizeOfOptionalHeader (PE32)
+        0x70,  # SizeOfOptionalHeader (PE32): 96 + 2 dirs * 8
         0x22,  # characteristics
     )
 

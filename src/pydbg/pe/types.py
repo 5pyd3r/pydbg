@@ -63,9 +63,13 @@ class ExportEntry:
 @dataclass
 class ImportEntry:
     dll_name: str
-    name: str | None     # None if imported by ordinal only
+    name: str | None     # None when the import has no name, or it was unreadable
     ordinal: int | None  # None if imported by name
     rva: int             # RVA of the IAT entry (thunk)
+    # `name is None` alone used to mean "imported by ordinal", which made a
+    # failed name lookup look exactly like a legitimate ordinal import. This
+    # flag is the fact; None is just the absence of a string.
+    by_ordinal: bool = False
 
 
 @dataclass

@@ -50,15 +50,23 @@ class TestStackWalker(unittest.TestCase):
         with self.assertRaises(TypeError):
             StackWalker()  # noqa — missing required session argument
 
-    def test_walk_no_extension(self):
-        """walk() raises PydbgError when extension not available."""
+    def test_walk_without_a_usable_thread_refuses(self):
+        """walk() must refuse, not return an empty frame list.
+
+        The old version never called walk at all: it asserted the StackWalker
+        object was not None, which is true of every StackWalker ever built.
+        """
+        from pydbg.exceptions import PydbgError, ThreadError
+
         class FakeSession:
             process_handle = None
+
         sw = StackWalker(FakeSession())
-        # Cannot call walk without the extension, but the walker object
-        # is valid and the method signature is correct.
-        self.assertIsNotNone(sw)
-        self.assertIs(sw._s.process_handle, None)
+        # Whichever layer refuses first (ThreadManager None-handling raises
+        # TypeError, a real handle failure raises ThreadError/OSError), the
+        # point is that walk() does not answer with an empty stack.
+        with self.assertRaises((PydbgError, ThreadError, OSError, TypeError)):
+            sw.walk(None, b"\x00" * 0x4d0)
 
 
 def _build_synthetic_minidump():
@@ -116,6 +124,27 @@ class TestMinidumpReaderLive(unittest.TestCase):
             ):
                 with self.assertRaises(PydbgError):
                     reader.get_stream(STREAM_MODULE_LIST)
+
+
+class TestMinidumpReaderStreams(unittest.TestCase):
+    """The four named stream accessors the dump design specifies."""
+
+    @unittest.skipUnless(_has_cython, "requires Cython extension")
+    def test_a_dump_can_be_opened_from_bytes(self):
+        from pydbg.dump.minidump import MinidumpReader
+
+        reader = MinidumpReader(_build_synthetic_minidump())
+        self.assertEqual(reader.get_module_list(), b"\x00\x00\x00\x00")
+
+    @unittest.skipUnless(_has_cython, "requires Cython extension")
+    def test_a_stream_the_dump_does_not_have_raises(self):
+        """Absent must not read as empty: b'' is a dump with zero threads."""
+        from pydbg.dump.minidump import MinidumpReader
+        from pydbg.exceptions import PydbgError
+
+        reader = MinidumpReader(_build_synthetic_minidump())
+        with self.assertRaises(PydbgError):
+            reader.get_thread_list()
 
 
 class TestStackWalkerCoverage(unittest.TestCase):
@@ -183,3 +212,27 @@ class TestStackWalkerCoverage(unittest.TestCase):
             dbg.close_handle(h_thread)
         finally:
             teardown(dbg)
+
+    def test_get_call_stack_shapes_frames_and_only_names_what_it_can(self):
+        """get_call_stack is the dict form the dump design asks for.
+
+        'func_name' is filled only through the caller's resolver: the frame
+        dbghelp returns here carries no symbol, and inventing one would be the
+        confident-wrong answer this module exists to avoid.
+        """
+        from pydbg.core.session import DebugSession
+        from pydbg.dump.stackwalk import StackWalker
+
+        class FakeWalker(StackWalker):
+            def walk(self, h_thread, context_bytes, max_frames=64):
+                return [
+                    {"frame_ip": 0x1000, "frame_sp": 0x2000, "frame_fp": 0x3000},
+                    {"frame_ip": 0, "frame_sp": 0, "frame_fp": 0},
+                ]
+
+        stack = FakeWalker(DebugSession()).get_call_stack(
+            None, b"", resolve=lambda ip: f"sub_{ip:x}")
+        self.assertEqual([frame["index"] for frame in stack], [0, 1])
+        self.assertEqual(stack[0]["ip"], 0x1000)
+        self.assertEqual(stack[0]["func_name"], "sub_1000")
+        self.assertIsNone(stack[1]["func_name"])

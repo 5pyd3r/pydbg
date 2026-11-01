@@ -229,7 +229,7 @@ class TestInstrumenter(unittest.TestCase):
              mock.patch.object(self.inst, '_alloc_rwx',
                                return_value=0x5000), \
              mock.patch.object(self.inst, '_free_rwx') as free_mock, \
-             mock.patch('pydbg.memory.manager.MemoryManager'), \
+             mock.patch.object(self.inst, '_mem'), \
              mock.patch.object(codegen, 'compile_payload',
                                side_effect=PydbgError("LLVM backend not available.")) as compile_mock:
             with self.assertRaises(PydbgError):
@@ -243,9 +243,8 @@ class TestInstrumenter(unittest.TestCase):
         self.assertEqual(kwargs['base_addr'], stub_addr)
         self.assertEqual(args[2]['original_func'], 0x5000)
         # 回滚路径：整块连续区域（trampoline + stub 缓冲）一次释放。
-        # _free_rwx(mem, addr, size) 的首参是 mem 实例，断言后两个参数。
         self.assertEqual(free_mock.call_count, 1)
-        self.assertEqual(free_mock.call_args[0][1:], (0x5000, region_size))
+        self.assertEqual(free_mock.call_args[0], (0x5000, region_size))
 
     def test_install_success_contiguous_region(self):
         # 确定性：mock 分配/编译/内存读写，验证成功安装时 trampoline 与 stub 落在
@@ -258,7 +257,7 @@ class TestInstrumenter(unittest.TestCase):
              mock.patch.object(self.inst, '_alloc_rwx',
                                return_value=0x5000), \
              mock.patch.object(self.inst, '_free_rwx') as free_mock, \
-             mock.patch('pydbg.memory.manager.MemoryManager'), \
+             mock.patch.object(self.inst, '_mem'), \
              mock.patch.object(codegen, 'compile_payload',
                                return_value=b'\x00' * 64) as compile_mock:
             info = self.inst.install(
@@ -274,17 +273,22 @@ class TestInstrumenter(unittest.TestCase):
             # install 期间没有任何释放；restore 一次性释放整块区域
             self.assertEqual(free_mock.call_count, 0)
             self.inst.restore(0x1000)
-            # _free_rwx(mem, addr, size) 的首参是 mem 实例，断言后两个参数
+            # _free_rwx(addr, size)
             self.assertEqual(free_mock.call_count, 1)
             self.assertEqual(
-                free_mock.call_args[0][1:],
+                free_mock.call_args[0],
                 (info.trampoline_addr,
                  info.trampoline_size + info.stub_alloc_size))
 
 
+_TARGET_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'target')
+
+# Defaults are the paths scripts/build-target32.ps1 and meson write to. They
+# used to be one developer's absolute ai_eden path, so on every other machine
+# the live tests silently skipped and the suite stayed green.
 _TEST_TARGET = os.environ.get(
     'TEST_INSTRUMENT_TARGET_PATH',
-    r'C:\Users\Spyder\Desktop\ai_eden\Output\instrument-module\build-instrument\tests\instrument_target.exe',
+    os.path.join(_TARGET_DIR, 'instrument_target.exe'),
 )
 
 
@@ -398,7 +402,7 @@ class TestInstrumentLive(unittest.TestCase):
 
 _TEST_TARGET32 = os.environ.get(
     'TEST_INSTRUMENT_TARGET32_PATH',
-    r'C:\Users\Spyder\Desktop\ai_eden\Output\instrument-module\tests\target\instrument_target32.exe',
+    os.path.join(_TARGET_DIR, 'instrument_target32.exe'),
 )
 
 

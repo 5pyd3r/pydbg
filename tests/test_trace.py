@@ -1,6 +1,8 @@
 import unittest
 
-from pydbg.trace.step import StepTracer, EXCEPTION_SINGLE_STEP
+from pydbg.trace.step import (
+    EXCEPTION_SINGLE_STEP, STATUS_WX86_SINGLE_STEP, StepTracer,
+)
 from pydbg.trace.calltree import CallTree, CallNode
 
 try:
@@ -22,6 +24,21 @@ class TestStepTracer(unittest.TestCase):
             'exception_address': 0x1000,
             'first_chance': 1,
             'exception_params': [],
+        })
+        self.assertTrue(StepTracer.is_step_event(event))
+
+    def test_is_step_event_accepts_the_wow64_code(self):
+        """A 32-bit target under WOW64 reports 0x4000001E, not 0x80000004.
+
+        Recognising only the native code meant a single step on an x86 target
+        never matched, so the tracer waited for an event that had arrived.
+        """
+        from pydbg.core.event import DebugEvent
+        event = DebugEvent({
+            'pid': 1, 'tid': 2,
+            'event_name': 'EXCEPTION',
+            'exception_code': STATUS_WX86_SINGLE_STEP,
+            'first_chance': 1,
         })
         self.assertTrue(StepTracer.is_step_event(event))
 

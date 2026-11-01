@@ -117,3 +117,30 @@ class PEBuilder:
 def build_with_directories(**kwargs):
     """A PE32+ image whose .rdata holds the directories the caller supplies."""
     return PEBuilder(**kwargs)
+
+
+def build_loaded_image_with_one_import(func_name="MessageBoxA",
+                                       dll_name="user32.dll",
+                                       image_base=0x140000000):
+    """A PE32+ image in *loaded* layout with a single named import.
+
+    Loaded layout (pointer_to_raw_data == RVA) is what a debugger reads from a
+    live process, and what LoadedView expects. Both IAT tests used to build a
+    file-layout image, which only worked while the lookup parsed memory as a
+    file. Returns (image_bytes, iat_rva); the caller fills the IAT slot.
+    """
+    builder = PEBuilder(image_base=image_base)
+    builder.add_section(".text", b"\x90" * 0x100, 0x1000)
+    builder.add_section(".rdata", b"\x00" * 0x500, 0x2000)
+    builder.add_dir(1, 0x2000, 0x14)      # import directory
+    data = bytearray(builder.build())
+
+    ilt_rva, ibn_rva, dll_rva, iat_rva = 0x2100, 0x2200, 0x2300, 0x2400
+    struct.pack_into("<IIIII", data, 0x2000, ilt_rva, 0, 0, dll_rva, iat_rva)
+    struct.pack_into("<Q", data, ilt_rva, ibn_rva)
+    struct.pack_into("<H", data, ibn_rva, 0)          # hint
+    name = func_name.encode("ascii") + b"\x00"
+    data[ibn_rva + 2:ibn_rva + 2 + len(name)] = name
+    dll = dll_name.encode("ascii") + b"\x00"
+    data[dll_rva:dll_rva + len(dll)] = dll
+    return bytes(data), iat_rva

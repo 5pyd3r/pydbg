@@ -16,8 +16,12 @@ real one — a missing edge is visible, a fabricated one is not.
 from ..disasm.engine import OP_IMM, OP_MEM, OP_REG
 
 # capstone spells a 64-bit immediate/moffs load 'movabs'; both it and 'mov'
-# put the source value in the destination.
-_MOV_LIKE = frozenset(("mov", "movabs"))
+# put the source value in the destination. Matched on the mnemonic rather than
+# on an operand-kind constant because that constant is exactly what the first
+# hand-written version got wrong: it hard-coded capstone's OP_IMM value, so
+# every immediate was read as some other kind and the resulting set printed
+# normally while being wrong. Shared with values.py, which needs the same set.
+MOV_LIKE = frozenset(("mov", "movabs"))
 # 'lea' differs from 'mov' in using the address of a memory operand rather
 # than its contents, and the two are otherwise identical at the operand level.
 _LEA_LIKE = frozenset(("lea",))
@@ -53,7 +57,7 @@ class ConstantTracker:
         if destination.kind != OP_REG:
             return None
 
-        if source.kind == OP_IMM and insn.mnemonic in _MOV_LIKE:
+        if source.kind == OP_IMM and insn.mnemonic in MOV_LIKE:
             return destination.reg, source.imm
 
         if source.kind == OP_MEM:
@@ -66,7 +70,7 @@ class ConstantTracker:
                 return None
             if insn.mnemonic in _LEA_LIKE:
                 return destination.reg, address
-            if insn.mnemonic in _MOV_LIKE:
+            if insn.mnemonic in MOV_LIKE:
                 value = self._read_pointer_at(address)
                 return None if value is None else (destination.reg, value)
 

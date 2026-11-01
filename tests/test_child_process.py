@@ -116,10 +116,10 @@ class TestChildProcessTracking(unittest.TestCase):
             if event.type == "EXIT_PROCESS" and child_pid and event.pid == child_pid:
                 break
 
-        if child_pid:
-            child = dbg.get_child_process(child_pid)
-            self.assertIsNotNone(child)
-            self.assertIsNotNone(child.exit_code)
+        self.assertTrue(child_pid, "no CREATE_PROCESS event for the child")
+        child = dbg.get_child_process(child_pid)
+        self.assertIsNotNone(child)
+        self.assertIsNotNone(child.exit_code)
 
         dbg.terminate_process(0)
         dbg.close_handle(dbg._session.process_handle)
@@ -207,9 +207,12 @@ class TestChildProcessOperations(unittest.TestCase):
 
         children = dbg.get_child_processes()
         child = children[child_pid]
-        if child.process_handle:
-            data = dbg.read_memory(child.base_of_image or 0x400000, 2, pid=child_pid)
-            self.assertEqual(data[:2], b"MZ")
+        self.assertTrue(child.process_handle,
+                        "the child was recorded without a process handle")
+        self.assertIsNotNone(child.base_of_image,
+                             "the child has no base of image")
+        data = dbg.read_memory(child.base_of_image, 2, pid=child_pid)
+        self.assertEqual(data[:2], b"MZ")
 
         dbg.terminate_process(0)
         _drain_child_exit(dbg, child_pid)
@@ -229,10 +232,13 @@ class TestChildProcessOperations(unittest.TestCase):
 
         children = dbg.get_child_processes()
         child = children[child_pid]
-        if child.process_handle and child.base_of_image:
-            bp_id = dbg.set_breakpoint(child.base_of_image, pid=child_pid)
-            self.assertGreater(bp_id, 0)
-            dbg.remove_breakpoint(bp_id)
+        self.assertTrue(child.process_handle,
+                        "the child was recorded without a process handle")
+        self.assertTrue(child.base_of_image,
+                        "the child has no base of image to break on")
+        bp_id = dbg.set_breakpoint(child.base_of_image, pid=child_pid)
+        self.assertGreater(bp_id, 0)
+        dbg.remove_breakpoint(bp_id)
 
         dbg.terminate_process(0)
         _drain_child_exit(dbg, child_pid)

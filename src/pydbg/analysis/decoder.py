@@ -20,7 +20,6 @@ class InstructionDecoder:
         self.image = image
         self.engine = DisasmEngine(mode=mode or image.mode)
         self._size_at = bytearray(image.span)
-        self._flags_at = bytearray(image.span)
         self._covered = bytearray(image.span)
         self._bad = set()
         # rva -> why it would not decode. Kept alongside `_bad` so a scan that
@@ -43,30 +42,13 @@ class InstructionDecoder:
         # which class would have to change".
         self.overlap_by_origin = {}
 
-    # flag bits
-    _CALL = 1
-    _JMP = 2
-    _RET = 4
-    _COND = 8
-
     def is_decoded(self, rva):
         return 0 <= rva < len(self._size_at) and self._size_at[rva] != 0
-
-    def is_known_bad(self, rva):
-        return rva in self._bad
 
     def size_of(self, rva):
         if 0 <= rva < len(self._size_at):
             return self._size_at[rva]
         return 0
-
-    def flags_of(self, rva):
-        if 0 <= rva < len(self._flags_at):
-            return self._flags_at[rva]
-        return 0
-
-    def is_call(self, rva):
-        return bool(self.flags_of(rva) & self._CALL)
 
     def decode_one(self, rva):
         """The instruction at 'rva', or None if it will not decode.
@@ -120,14 +102,13 @@ class InstructionDecoder:
     def failure_reason(self, rva):
         """Why `decode_one(rva)` returned None, or None when it did not.
 
-        The companion to `is_known_bad`, for callers that report a gap rather
-        than just skip it. Without it a scan can say "4,584 bytes would not
-        decode" but not whether those bytes were undecodable or unreadable.
+        For callers that report a gap rather than just skip it. Without it a
+        scan can say "4,584 bytes would not decode" but not whether those bytes
+        were undecodable or unreadable.
 
         The unmapped case is answered from the image rather than cached, so
-        this and `is_known_bad` stay consistent about what "bad" means: an
-        address outside every section was never a decode failure, it was never
-        a candidate.
+        this stays consistent about what "bad" means: an address outside every
+        section was never a decode failure, it was never a candidate.
         """
         reason = self._bad_reason.get(rva)
         if reason is not None:
@@ -145,17 +126,6 @@ class InstructionDecoder:
         if rva + size > len(self._size_at):
             return
         self._size_at[rva] = size
-
-        flags = 0
-        if insn.is_call:
-            flags |= self._CALL
-        if insn.is_jmp:
-            flags |= self._JMP
-        if insn.is_ret:
-            flags |= self._RET
-        if insn.is_cond:
-            flags |= self._COND
-        self._flags_at[rva] = flags
 
         self._cache[rva] = insn
         if len(self._cache) > self._cache_size:

@@ -65,15 +65,19 @@ class InlineHook:
         from ..memory.manager import MemoryManager
 
         mem = MemoryManager(self._s)
-        target_addr = None
-        for addr, t in self._hooks.items():
-            if t is trampoline:
-                target_addr = addr
-                break
-        if target_addr is not None:
-            mem.write(target_addr, trampoline.original_code)
-            self._free(mem, trampoline.addr, trampoline.size)
-            del self._hooks[target_addr]
+        target_addr = next(
+            (addr for addr, known in self._hooks.items() if known is trampoline),
+            None)
+        if target_addr is None:
+            # Silently doing nothing here meant a caller that restored the
+            # wrong trampoline (or restored twice) believed the target had its
+            # original bytes back while the E9 detour was still in place.
+            raise PydbgError(
+                f"trampoline at 0x{trampoline.addr:X} is not installed; "
+                "restore() only accepts a Trampoline returned by set()")
+        mem.write(target_addr, trampoline.original_code)
+        del self._hooks[target_addr]
+        self._free(mem, trampoline.addr, trampoline.size)
 
     @staticmethod
     def _build_abs_jmp(from_addr, to_addr):
@@ -99,20 +103,25 @@ class InlineHook:
         return result
 
     def _alloc(self, mem, size):
+        from .. import _pydbg
         try:
-            from .. import _pydbg
             result = _pydbg.virtual_alloc(
                 self._s.process_handle, size,
                 _MEM_COMMIT_RESERVE,
                 _PAGE_EXECUTE_READWRITE,
             )
-            return result.get('base_address', 0)
-        except Exception:
-            return 0
+        except OSError as e:
+            raise PydbgError(f"cannot allocate trampoline memory: {e}") from e
+        return result.get('base_address', 0)
 
     def _free(self, mem, addr, size):
+        from .. import _pydbg
         try:
-            from .. import _pydbg
             _pydbg.virtual_free(self._s.process_handle, addr, 0, _MEM_RELEASE)
-        except Exception:
-            pass
+        except OSError as e:
+            # The detour is already gone, so this is a leak, not a broken
+            # target — but a leak the caller never hears about is the silent
+            # failure this module is supposed to stop producing.
+            raise PydbgError(
+                f"detour removed, but trampoline memory at 0x{addr:X} "
+                f"could not be released: {e}") from e

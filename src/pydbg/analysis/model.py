@@ -39,10 +39,13 @@ class RefKind(IntEnum):
 # produces at all, and `ref_kinds()` is a statement about producers.
 _ALL_KINDS = frozenset(RefKind)
 
-# The OWNER_KINDS members that name a function. Duplicated from
-# `functions._OWNED` rather than imported: `functions` imports this module, so
-# the dependency only runs one way. `tests/test_analysis_owners.py` asserts the
-# two sets agree, which is what keeps a duplicated constant from drifting.
+# What a walked address belongs to. Defined in this module — the lowest layer
+# of the analysis package — because functions.py, owners.py and model.py all
+# speak it, and it used to be repeated in three places with tests as the only
+# thing keeping the copies aligned.
+OWNER_KINDS = ("start", "body", "gap", "after", "before", "unmapped")
+
+# The OWNER_KINDS members that name a function.
 _OWNED_KINDS = frozenset(("start", "body", "gap"))
 
 

@@ -89,13 +89,21 @@ class IATHook:
         base = mod.get('base_address', 0)
         if base == 0:
             return None
-        try:
-            from ..pe import PE
-            # Read enough data to cover headers + section table + import directory
-            pe = PE(mem.read(base, 0x10000))
-            for imp in pe.imports:
-                if imp.name and imp.name.lower() == func_name.lower():
-                    return imp.rva
-        except Exception:
-            pass
+
+        from ..analysis.process_source import ProcessSource
+        from ..pe import PE
+        from ..pe.view import LoadedView
+
+        # Parse the live module through the same code path as a file. The
+        # previous version read a fixed 64 KiB and swallowed every exception:
+        # a module whose import directory sat past that window, or a read that
+        # failed, both came back as "this function is not in the IAT" — a
+        # confident wrong answer instead of an error.
+        pe = PE.from_source(
+            ProcessSource(None, base, size=mod.get('size'), reader=mem.read),
+            LoadedView())
+        wanted = func_name.lower()
+        for imp in pe.imports:
+            if imp.name and imp.name.lower() == wanted:
+                return imp.rva
         return None

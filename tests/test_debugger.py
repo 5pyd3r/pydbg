@@ -2,7 +2,7 @@
 
 import unittest
 
-from tests import TEST_TARGET_PATH, IP_REG
+from tests import TEST_AV_TARGET_PATH, TEST_TARGET_PATH, IP_REG
 
 try:
     from pydbg import _pydbg
@@ -68,6 +68,58 @@ class TestDebugEvent(unittest.TestCase):
         self.assertIsNotNone(event.exception_info)
         self.assertEqual(event.exception_info["name"], "EXCEPTION_BREAKPOINT")
 
+    def test_debug_event_exposes_load_dll_fields(self):
+        """LOAD_DLL carries where the image landed and which file it was."""
+        from pydbg import DebugEvent
+
+        raw = {
+            "event_name": "LOAD_DLL",
+            "pid": 1,
+            "tid": 2,
+            "dll_base": 0x7FFE0000,
+            "dll_path": "C:\\Windows\\System32\\ntdll.dll",
+        }
+        event = DebugEvent(raw)
+        self.assertEqual(event.dll_base, 0x7FFE0000)
+        self.assertEqual(event.dll_path, "C:\\Windows\\System32\\ntdll.dll")
+
+
+class TestParseLoadedDll(unittest.TestCase):
+    """Pe plan Task 10: a LOAD_DLL event must lead to a parsed PE."""
+
+    def test_an_event_with_neither_image_nor_path_is_refused(self):
+        from pydbg import DebugEvent, Debugger
+        from pydbg.exceptions import PydbgError
+
+        dbg = Debugger()
+        with self.assertRaises(PydbgError):
+            dbg.parse_loaded_dll(DebugEvent({"event_name": "LOAD_DLL"}))
+
+    def test_the_first_loaded_image_parses_from_memory(self):
+        from pydbg import Debugger
+
+        dbg = Debugger()
+        dbg.create_process(TEST_TARGET_PATH)
+        try:
+            for _ in range(400):
+                event = dbg.wait_event(2000)
+                if event is None:
+                    self.fail("no event arrived while draining to the breakpoint")
+                if event.type == "LOAD_DLL":
+                    self.assertTrue(event.dll_path,
+                                    "LOAD_DLL lost the file it was loaded from")
+                    pe = dbg.parse_loaded_dll(event)
+                    self.assertTrue(pe.sections, "parsed image has no sections")
+                    return
+                if event.type == "EXCEPTION":
+                    self.fail("reached the breakpoint without a LOAD_DLL event")
+                dbg.continue_event(event.pid, event.tid)
+        finally:
+            try:
+                dbg.terminate_process(0)
+            except Exception:
+                pass
+
 
 class TestDebuggerAPICompleteness(unittest.TestCase):
     """Tests for terminate_process and get_exit_code."""
@@ -82,6 +134,9 @@ class TestDebuggerAPICompleteness(unittest.TestCase):
         dbg.continue_event(pid, tid)
 
         dbg.terminate_process(0)
+        # "It returned without raising" is not the same as "the target died".
+        self.assertEqual(dbg.get_exit_code(), 0,
+                         "the target is still running after terminate_process")
         dbg.close_handle(dbg._session.process_handle)
         dbg.close_handle(dbg._session.thread_handle)
 
@@ -485,6 +540,47 @@ class TestFailureIsVisible(unittest.TestCase):
                                    side_effect=degrade):
                 with self.assertRaises(BreakpointError):
                     dbg.run(lambda e: None, timeout_ms=10)
+
+
+class TestAccessViolationPayload(unittest.TestCase):
+    """The producer side of an access violation, not a hand-built event.
+
+    test_comprehensive.py builds ``exception_params`` into a raw dict itself,
+    so it proves the parser and nothing about WaitForDebugEvent(). The defect
+    that hid for months was in the producer: the Cython event dict never
+    carried ExceptionInformation, so every real access violation arrived
+    without access_type/access_addr. This test reads a real exception record
+    from a target that dereferences NULL.
+    """
+
+    def test_real_access_violation_keeps_its_parameters(self):
+        from pydbg import Debugger
+
+        dbg = Debugger()
+        dbg.create_process(TEST_AV_TARGET_PATH)
+        try:
+            for _ in range(200):
+                event = dbg.wait_event(timeout_ms=2000)
+                if event is None:
+                    break
+                if (event.type == "EXCEPTION"
+                        and event.exception_code == 0xC0000005):
+                    params = event.raw.get("exception_params")
+                    self.assertIsNotNone(
+                        params, "wait_event dropped ExceptionInformation")
+                    self.assertGreaterEqual(len(params), 2)
+                    self.assertEqual(params[0], 0, "expected a read fault")
+                    self.assertEqual(event.exception_info["access_type"], "read")
+                    self.assertEqual(event.exception_info["access_addr"],
+                                     params[1])
+                    return
+                dbg.continue_event(event.pid, event.tid)
+            self.fail("the target never produced an access violation")
+        finally:
+            try:
+                dbg.terminate_process()
+            except Exception:
+                pass
 
 
 if __name__ == "__main__":

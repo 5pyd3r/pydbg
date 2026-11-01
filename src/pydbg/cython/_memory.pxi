@@ -198,28 +198,51 @@ cpdef list enum_process_modules(uintptr_t h_process):
 
     Returns list of dicts with: handle, base_address.
     Raises OSError on failure.
+
+    The buffer grows until EnumProcessModulesEx reports that everything fit.
+    A fixed 1024-entry array used to return whatever portion fit, and a
+    truncated module list is indistinguishable from a complete one.
     """
-    cdef HMODULE[1024] modules
     cdef DWORD cb_needed = 0
-    cdef BOOL result = EnumProcessModulesEx(
-        <HANDLE>h_process,
-        modules,
-        sizeof(modules),
-        &cb_needed,
-        LIST_MODULES_ALL)
-
-    if result == 0:
-        raise OSError(GetLastError(), "EnumProcessModulesEx failed")
-
-    cdef int count = cb_needed // sizeof(HANDLE)
-    cdef list out = []
+    cdef DWORD capacity = 256
+    cdef void* buffer = NULL
+    cdef BOOL result
+    cdef list out
+    cdef int count
     cdef int i
+    cdef int attempt
+
+    for attempt in range(16):
+        buffer = malloc(capacity * sizeof(HMODULE))
+        if buffer == NULL:
+            raise MemoryError("cannot allocate module list buffer")
+        result = EnumProcessModulesEx(
+            <HANDLE>h_process,
+            <HMODULE*>buffer,
+            capacity * sizeof(HMODULE),
+            &cb_needed,
+            LIST_MODULES_ALL)
+        if result == 0:
+            free(buffer)
+            raise OSError(GetLastError(), "EnumProcessModulesEx failed")
+        if cb_needed <= capacity * sizeof(HMODULE):
+            break
+        free(buffer)
+        buffer = NULL
+        # Grow past the reported need: modules can load between the calls.
+        capacity = cb_needed // sizeof(HMODULE) + 16
+    else:
+        free(buffer)
+        raise OSError(0, "EnumProcessModulesEx kept reporting growth")
+
+    count = cb_needed // sizeof(HMODULE)
+    out = []
     for i in range(count):
         out.append({
-            'handle': <uint64_t>modules[i],
-            'base_address': <uint64_t>modules[i],
+            'handle': <uint64_t>((<HMODULE*>buffer)[i]),
+            'base_address': <uint64_t>((<HMODULE*>buffer)[i]),
         })
-
+    free(buffer)
     return out
 
 
@@ -238,7 +261,7 @@ cpdef str get_module_file_name_ex(uintptr_t h_process, uintptr_t h_module):
     if len == 0:
         raise OSError(GetLastError(), "GetModuleFileNameExA failed")
 
-    return filename[:len].decode('utf-8', errors='replace')
+    return filename[:len].decode('mbcs', errors='replace')
 
 
 cpdef dict virtual_alloc_ex(uintptr_t h_process, uintptr_t addr,

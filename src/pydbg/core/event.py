@@ -15,6 +15,8 @@ class DebugEvent:
         "first_chance",
         "exception_name",
         "exception_info",
+        "dll_base",
+        "dll_path",
         "raw",
         "is_child",
     )
@@ -29,6 +31,11 @@ class DebugEvent:
         self.first_chance = event_dict.get("first_chance")
         self.exception_name = None
         self.exception_info = None
+        # LOAD_DLL: where the image landed, and the file the loader opened.
+        # The path is captured before the handle is closed, so a caller can
+        # parse the image later without the event holding its bytes.
+        self.dll_base = event_dict.get("dll_base")
+        self.dll_path = event_dict.get("dll_path")
         self.is_child = is_child
         if self.exception_code is not None:
             self.exception_name = _pydbg.exception_code_to_str(self.exception_code)
