@@ -121,10 +121,14 @@ def import_names(image):
     for entry in image.pe.imports:
         if not entry.rva:
             continue
-        if entry.name:
+        if entry.by_ordinal:
+            text = f"{entry.dll_name}!{entry.ordinal}"
+        elif entry.name:
             text = f"{entry.dll_name}!{entry.name}" if entry.dll_name else entry.name
         else:
-            text = f"{entry.dll_name}!{entry.ordinal}"
+            # The name was unreadable. Inventing "dll!None" would be a name
+            # the binary never used; leaving the slot unnamed is the truth.
+            continue
         names[entry.rva] = text
     return names
 

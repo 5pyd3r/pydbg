@@ -27,6 +27,12 @@ DEBUG_TYPE_CODEVIEW = 2
 # All 16 slots fit; the cap is what keeps a lying NumberOfRvaAndSizes bounded.
 MAX_DATA_DIRECTORIES = 16
 
+# Import table bounds. A descriptor table is NUL-terminated, but a truncated
+# or lying directory has no terminator in reach; these caps end the walk with
+# the partial list instead of letting it run to the end of the image.
+MAX_IMPORT_DESCRIPTORS = 4096
+MAX_IMPORTS_PER_DLL = 65536
+
 # A CodeView payload is a 24-byte header plus a path. Both bounds are what stop
 # a debug entry whose SizeOfData lies from turning into a huge read.
 MAX_CODEVIEW_PAYLOAD = 0x1000
@@ -128,56 +134,69 @@ class PEParser:
         magic = struct.unpack_from('<H', self._src.read(offset, 2), 0)[0]
 
         if magic == 0x20B:
-            opt_hdr, sections_offset = self._parse_optional_64(offset, num_sections)
+            opt_hdr = self._parse_optional_64(offset)
+            minimum_size = 112
         elif magic == 0x10B:
-            opt_hdr, sections_offset = self._parse_optional_32(offset, num_sections)
+            opt_hdr = self._parse_optional_32(offset)
+            minimum_size = 96
         else:
             raise ValueError(f"Unknown optional header magic: 0x{magic:04X}")
 
+        # The section table starts after the *declared* SizeOfOptionalHeader,
+        # not after NumberOfRvaAndSizes * 8. A header that lied about the count
+        # used to shift the table into whatever followed, and the sections then
+        # parsed "successfully" from the wrong offset.
+        if opt_hdr_size < minimum_size:
+            raise ValueError(
+                f"SizeOfOptionalHeader {opt_hdr_size} cannot hold a "
+                f"0x{magic:04X} optional header (needs {minimum_size})")
+        sections_offset = offset + opt_hdr_size
+
         return file_hdr, opt_hdr, sections_offset
 
-    def _parse_optional_64(self, offset, num_sections):
+    def _parse_optional_64(self, offset: int) -> OptionalHeader:
+        """PE32+ optional header (112 bytes) — the layout, not a prefix of it.
+
+        The previous format string described only its first 76 bytes, so every
+        field from Subsystem-sized ones onward was read from a separate offset
+        and the tuple was partly misaligned. Parsing the whole structure makes
+        the field indices mean what the spec says they mean.
+        """
         fields_data = self._src.read(offset, 112)
-        fields = struct.unpack_from('<HBBIIIIIQIIIIHHHHHHIIII', fields_data, 0)
-        num_rva = struct.unpack_from('<I', fields_data, 108)[0]
+        fields = struct.unpack_from(
+            '<HBBIIIIIQIIHHHHHHIIIIHHQQQQII', fields_data, 0)
+        num_rva = fields[28]
 
         data_dirs = self._parse_data_directories(offset + 112, num_rva)
-        sections_offset = offset + 112 + num_rva * 8
 
-        opt_hdr = OptionalHeader(
+        return OptionalHeader(
             magic=fields[0], major_linker_version=fields[1],
             minor_linker_version=fields[2], size_of_code=fields[3],
             entry_point_rva=fields[6], base_of_code=fields[7],
             image_base=fields[8], section_alignment=fields[9],
             file_alignment=fields[10],
-            size_of_image=struct.unpack_from('<I', fields_data, 56)[0],
-            size_of_headers=struct.unpack_from('<I', fields_data, 60)[0],
-            checksum=struct.unpack_from('<I', fields_data, 64)[0],
-            subsystem=struct.unpack_from('<H', fields_data, 68)[0],
+            size_of_image=fields[18], size_of_headers=fields[19],
+            checksum=fields[20], subsystem=fields[21],
             number_of_rva_and_sizes=num_rva, data_directories=data_dirs)
-        return opt_hdr, sections_offset
 
-    def _parse_optional_32(self, offset, num_sections):
+    def _parse_optional_32(self, offset: int) -> OptionalHeader:
+        """PE32 optional header (96 bytes)."""
         fields_data = self._src.read(offset, 96)
         fields = struct.unpack_from(
             '<HBBIIIIIIIIIHHHHHHIIIIHHIIIIII', fields_data, 0)
-        num_rva = struct.unpack_from('<I', fields_data, 92)[0]
+        num_rva = fields[29]
 
         data_dirs = self._parse_data_directories(offset + 96, num_rva)
-        sections_offset = offset + 96 + num_rva * 8
 
-        opt_hdr = OptionalHeader(
+        return OptionalHeader(
             magic=fields[0], major_linker_version=fields[1],
             minor_linker_version=fields[2], size_of_code=fields[3],
             entry_point_rva=fields[6], base_of_code=fields[7],
             image_base=fields[9], section_alignment=fields[10],
             file_alignment=fields[11],
-            size_of_image=struct.unpack_from('<I', fields_data, 56)[0],
-            size_of_headers=struct.unpack_from('<I', fields_data, 60)[0],
-            checksum=struct.unpack_from('<I', fields_data, 64)[0],
-            subsystem=struct.unpack_from('<H', fields_data, 68)[0],
+            size_of_image=fields[19], size_of_headers=fields[20],
+            checksum=fields[21], subsystem=fields[22],
             number_of_rva_and_sizes=num_rva, data_directories=data_dirs)
-        return opt_hdr, sections_offset
 
     def _parse_data_directories(self, offset: int, count: int) -> dict:
         data_dirs = {}
@@ -219,11 +238,9 @@ class PEParser:
         if dd.virtual_address == 0 or dd.size == 0:
             return exports
 
-        offset = self._view.rva_to_source_offset(dd.virtual_address)
-        if offset is None:
+        export_data = self._read_rva(dd.virtual_address, 40)
+        if export_data is None:
             return exports
-
-        export_data = self._src.read(offset, 40)
         fields = struct.unpack_from('<IIHHIIIIIII', export_data, 0)
         base = fields[5]
         num_funcs = fields[6]
@@ -267,9 +284,14 @@ class PEParser:
         ordinal_flag = 0x8000000000000000 if is_pe32plus else 0x80000000
         thunk_fmt = '<Q' if is_pe32plus else '<I'
 
+        # Bounded walks: a truncated or lying directory must end the parse the
+        # way every sibling directory does, not raise out of PE() while its
+        # neighbours quietly return [].
         cursor = offset
-        while True:
-            desc_data = self._src.read(cursor, 20)
+        for _ in range(MAX_IMPORT_DESCRIPTORS):
+            desc_data = self._src.try_read(cursor, 20)
+            if desc_data is None:
+                break
             ilt_rva, _, _, name_rva, iat_rva = struct.unpack_from(
                 '<IIIII', desc_data, 0)
             if ilt_rva == 0 and name_rva == 0 and iat_rva == 0:
@@ -283,9 +305,10 @@ class PEParser:
             thunk_rva = ilt_rva if ilt_rva != 0 else iat_rva
             thunk_offset = self._view.rva_to_source_offset(thunk_rva)
             if thunk_offset is not None:
-                t_index = 0
-                while True:
-                    t_data = self._src.read(thunk_offset, thunk_size)
+                for t_index in range(MAX_IMPORTS_PER_DLL):
+                    t_data = self._src.try_read(thunk_offset, thunk_size)
+                    if t_data is None:
+                        break
                     thunk = struct.unpack_from(thunk_fmt, t_data, 0)[0]
                     if thunk == 0:
                         break
@@ -293,7 +316,8 @@ class PEParser:
                         imports.append(ImportEntry(
                             dll_name=dll_name, name=None,
                             ordinal=thunk & 0xFFFF,
-                            rva=iat_rva + t_index * thunk_size))
+                            rva=iat_rva + t_index * thunk_size,
+                            by_ordinal=True))
                     else:
                         ibn_offset = self._view.rva_to_source_offset(thunk)
                         func_name = None
@@ -304,7 +328,6 @@ class PEParser:
                             ordinal=None,
                             rva=iat_rva + t_index * thunk_size))
                     thunk_offset += thunk_size
-                    t_index += 1
             cursor += 20
         return imports
 
@@ -569,9 +592,13 @@ class PEParser:
         if name_off is None or ord_off is None:
             return mapping
         for i in range(num_names):
-            n_data = self._src.read(name_off + i * 4, 4)
+            n_data = self._src.try_read(name_off + i * 4, 4)
+            if n_data is None:
+                break
             name_rva = struct.unpack_from('<I', n_data, 0)[0]
-            o_data = self._src.read(ord_off + i * 2, 2)
+            o_data = self._src.try_read(ord_off + i * 2, 2)
+            if o_data is None:
+                break
             ordinal = struct.unpack_from('<H', o_data, 0)[0]
             str_off = self._view.rva_to_source_offset(name_rva)
             if str_off is not None:
@@ -581,7 +608,9 @@ class PEParser:
 
     def _read_string_at_offset(self, offset: int) -> str:
         max_read = 256
-        data = self._src.read(offset, max_read)
+        data = self._src.try_read(offset, max_read)
+        if data is None:
+            return ''
         end = data.find(b'\x00')
         if end == -1:
             end = len(data)
