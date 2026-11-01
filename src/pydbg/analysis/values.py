@@ -93,6 +93,11 @@ class ValueSet:
     # address. Carried as a count so the scope of the answer is visible rather
     # than implied by silence.
     unresolved_writes: int = 0
+    # Why this set is what it is, when the kind alone under-describes it.
+    # `unbounded()` demanded a reason and then dropped it on the floor, so the
+    # one refusal that says "every writer was modelled" arrived without the
+    # evidence that made it credible.
+    reason: str | None = None
 
     # ── construction ───────────────────────────────────────────
 
@@ -108,7 +113,7 @@ class ValueSet:
         return cls(kind=Bound.RANGE, lo=lo, hi=hi, writers=tuple(writers))
 
     @classmethod
-    def unbounded(cls, reason, writers=()):
+    def unbounded(cls, reason, writers=(), parts=(), unresolved_writes=0):
         """The only way to get `UNBOUNDED`.
 
         It requires writers and a reason, so that "truly unbounded" cannot be
@@ -121,7 +126,9 @@ class ValueSet:
                 "them it is indistinguishable from 'not found out'")
         if not reason:
             raise ValueError("UNBOUNDED must carry a reason")
-        return cls(kind=Bound.UNBOUNDED, writers=tuple(writers))
+        return cls(kind=Bound.UNBOUNDED, writers=tuple(writers),
+                   parts=tuple(parts), unresolved_writes=unresolved_writes,
+                   reason=reason)
 
     @classmethod
     def of_unmodeled(cls, entries, writers=()):
@@ -190,6 +197,8 @@ class ValueSet:
             body = f"in [0x{self.lo:X}, 0x{self.hi:X}]"
         elif self.kind is Bound.UNBOUNDED:
             body = "any value, and every writer was modelled"
+            if self.reason:
+                body = f"{body} — {self.reason}"
         elif self.kind is Bound.UNMODELED:
             body = f"{len(self.unmodeled)} writer(s) not modelled"
         else:
@@ -234,8 +243,11 @@ class ValueSet:
                             unmodeled=unmodeled, parts=parts,
                             unresolved_writes=unresolved)
         if Bound.UNBOUNDED in (self.kind, other.kind):
-            return ValueSet(kind=Bound.UNBOUNDED, writers=writers,
-                            parts=parts, unresolved_writes=unresolved)
+            reasons = [part.reason for part in (self, other)
+                       if part.kind is Bound.UNBOUNDED and part.reason]
+            return ValueSet.unbounded(
+                "; ".join(reasons) or "a joined writer admits any value",
+                writers, parts=parts, unresolved_writes=unresolved)
         if Bound.UNREPRESENTABLE in (self.kind, other.kind):
             separate = tuple(p for p in (self, other)
                              if p.kind is not Bound.UNREPRESENTABLE)
@@ -535,12 +547,4 @@ def _immediate_of(insn):
     for operand in insn.operands:
         if operand.kind == OP_IMM:
             return operand.imm
-    return None
-
-
-def _lowest(value_set):
-    if value_set.kind is Bound.SET and value_set.values:
-        return min(value_set.values)
-    if value_set.kind is Bound.RANGE:
-        return value_set.lo
     return None

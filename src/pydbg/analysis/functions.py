@@ -2,17 +2,14 @@
 
 from bisect import bisect_right
 
-from .model import Function
+from .model import OWNER_KINDS, _OWNED_KINDS, Function
 
-# What an address can turn out to be owned by. Every member has a producer in
-# `owner_of`, and the three that mean "nothing owns this" are kept apart
-# because they are three different findings: an address before the first start,
-# one past everything the analysis claimed, and one the image does not map at
-# all. Folding them into a bare None is how "past the last function" came to be
-# answered with the last function's start.
-OWNER_KINDS = ("start", "body", "gap", "after", "before", "unmapped")
+# What an address can turn out to be owned by. The vocabulary lives in
+# `model` because three modules speak it; re-exported here because that is
+# where callers have always imported it from.
+__all__ = ["FunctionTable", "OWNER_KINDS"]
 
-_OWNED = frozenset(("start", "body", "gap"))
+_OWNED = _OWNED_KINDS
 
 
 class FunctionTable:

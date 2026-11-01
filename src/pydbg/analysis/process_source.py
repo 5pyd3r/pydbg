@@ -38,10 +38,6 @@ class ProcessSource(Source):
                 f"Read past the end of the module: offset={offset:#x}")
         return self._reader(self.base_address + offset, size)
 
-    def read_at_va(self, va, size):
-        """Bytes at an absolute address inside the module."""
-        return self.read(va - self.base_address, size)
-
     def __repr__(self):
         return (f"ProcessSource(base={self.base_address:#x}, "
                 f"size={self.size}, pid={getattr(self.session, 'pid', None)})")

@@ -31,10 +31,6 @@ class CFGBlock:
     def end(self):
         return self.instructions[-1] if self.instructions else self.rva
 
-    def targets(self):
-        """Successor RVAs that are known."""
-        return tuple(t for _, t in self.successors if t is not None)
-
 
 @dataclass
 class FunctionCFG:
@@ -178,15 +174,12 @@ def cfg_to_dot(cfg, name=None):
             text += "\\l..."
         lines.append(f'  b{rva:x} [label="{text}\\l"];')
 
-    missing = set()
     for rva, block in sorted(cfg.blocks.items()):
         for kind, target in block.successors:
             if target is None:
-                missing.add(kind)
                 lines.append(f'  {kind}_{rva:x} [shape=ellipse, label="{kind}?"];')
                 lines.append(f'  b{rva:x} -> {kind}_{rva:x} [style=dashed];')
             else:
                 lines.append(f'  b{rva:x} -> b{target:x} [label="{kind}"];')
-    del missing
     lines.append("}")
     return "\n".join(lines)

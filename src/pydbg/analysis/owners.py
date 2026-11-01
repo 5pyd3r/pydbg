@@ -23,6 +23,7 @@ from ..disasm.engine import (
     ACC_READ, ACC_WRITE, OP_IMM, OP_MEM, OP_REG, DisasmEngine,
 )
 from .access import STACK_REGISTERS
+from .model import OWNER_KINDS, _OWNED_KINDS
 
 # What the decode has at one address. Three findings, kept apart because
 # folding them collapses the distinction the whole module is about: an address
@@ -42,8 +43,6 @@ RECEIVER_FACTS = ("constant", "loaded_from_slot", "loaded_from_stack",
 # day a seventh fact is added.
 DETERMINED_FACTS = frozenset(("constant", "loaded_from_slot",
                               "loaded_from_stack", "returned_by_call"))
-
-_OWNER_KINDS = ("start", "body", "gap", "after", "before", "unmapped")
 
 # The register a call leaves its result in, on both Win32 ABIs this package
 # analyses. Named rather than derived: capstone does not describe the calling
@@ -172,13 +171,13 @@ class RegionOwnership:
         if self.truncated:
             return False
         return all(self.bytes_by_kind.get(kind, 0) == 0
-                   for kind in _OWNER_KINDS if kind not in ("start", "body"))
+                   for kind in OWNER_KINDS if kind not in _OWNED_KINDS)
 
     def render(self):
         parts = [f"0x{self.start:X}..0x{self.end:X}: "
                  f"{self.scanned} bytes scanned, "
                  f"{self.instruction_starts} instruction starts"]
-        for kind in _OWNER_KINDS:
+        for kind in OWNER_KINDS:
             count = self.bytes_by_kind.get(kind, 0)
             if count:
                 parts.append(f"  owned({kind}): {count}")
@@ -204,7 +203,7 @@ def classify_range(result, start, end, limit=100_000):
     accidentally ask about an image; a range that hits it reports
     ``truncated``, and `is_fully_owned` refuses to answer True for one.
     """
-    counts = {kind: 0 for kind in _OWNER_KINDS}
+    counts = {kind: 0 for kind in OWNER_KINDS}
     boundaries = {kind: 0 for kind in BOUNDARY_KINDS}
     starts = 0
     scanned = 0
@@ -308,7 +307,7 @@ def receiver_of(result, rva, base_reg=None):
         base_reg = candidates[0]
 
     owner, owner_kind = result.functions.owner_of(rva)
-    if owner is None or owner_kind not in ("start", "body"):
+    if owner is None or owner_kind not in _OWNED_KINDS:
         return _unknown(rva, base_reg, "the site is not inside a recovered "
                                        f"function ({owner_kind})")
 
