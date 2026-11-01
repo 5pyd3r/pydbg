@@ -882,9 +882,11 @@ class TestDebuggerFullLifecycle(unittest.TestCase):
             if event.type == "EXCEPTION":
                 break
             dbg.continue_event(event.pid, event.tid)
-        # Now wait with very short timeout - should return None
-        event = dbg.wait_event(1)  # 1ms
-        # May or may not be None depending on timing
+        # The target is stopped at the initial breakpoint and has not been
+        # continued, so no event can arrive. This used to discard the result
+        # with "may or may not be None", which asserts nothing at all.
+        self.assertIsNone(dbg.wait_event(1),
+                          "an event arrived while the target was stopped")
         dbg.terminate_process(0)
         dbg.close_handle(dbg._session.process_handle)
         dbg.close_handle(dbg._session.thread_handle)
@@ -1205,10 +1207,11 @@ class TestThreadIntegration(unittest.TestCase):
 
         h_thread = dbg.open_thread(tid)
         count = dbg.suspend_thread(h_thread)
-        self.assertGreaterEqual(count, 0)
+        self.assertEqual(count, 0, "a freshly opened thread starts at 0")
 
         count2 = dbg.resume_thread(h_thread)
-        self.assertGreaterEqual(count2, 0)
+        self.assertEqual(count2, 1,
+                         "resume must report the count before decrementing")
 
         dbg.close_handle(h_thread)
         dbg.terminate_process(0)

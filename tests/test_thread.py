@@ -48,10 +48,11 @@ class TestThreadContext(unittest.TestCase):
         """Verify suspend and resume cycle."""
         h = _pydbg.open_thread(self.tid)
         count = _pydbg.suspend_thread(h)
-        self.assertGreaterEqual(count, 0)
+        self.assertEqual(count, 0, "a freshly opened thread starts at 0")
 
         count2 = _pydbg.resume_thread(h)
-        self.assertGreaterEqual(count2, 0)
+        self.assertEqual(count2, 1,
+                         "resume must report the count before decrementing")
 
         _pydbg.close_handle(h)
 

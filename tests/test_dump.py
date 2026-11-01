@@ -50,15 +50,20 @@ class TestStackWalker(unittest.TestCase):
         with self.assertRaises(TypeError):
             StackWalker()  # noqa — missing required session argument
 
-    def test_walk_no_extension(self):
-        """walk() raises PydbgError when extension not available."""
+    def test_walk_without_a_usable_thread_refuses(self):
+        """walk() must refuse, not return an empty frame list.
+
+        The old version never called walk at all: it asserted the StackWalker
+        object was not None, which is true of every StackWalker ever built.
+        """
+        from pydbg.exceptions import PydbgError, ThreadError
+
         class FakeSession:
             process_handle = None
+
         sw = StackWalker(FakeSession())
-        # Cannot call walk without the extension, but the walker object
-        # is valid and the method signature is correct.
-        self.assertIsNotNone(sw)
-        self.assertIs(sw._s.process_handle, None)
+        with self.assertRaises((PydbgError, ThreadError, OSError)):
+            sw.walk(None, b"\x00" * 0x4d0)
 
 
 def _build_synthetic_minidump():

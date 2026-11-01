@@ -82,6 +82,9 @@ class TestDebuggerAPICompleteness(unittest.TestCase):
         dbg.continue_event(pid, tid)
 
         dbg.terminate_process(0)
+        # "It returned without raising" is not the same as "the target died".
+        self.assertEqual(dbg.get_exit_code(), 0,
+                         "the target is still running after terminate_process")
         dbg.close_handle(dbg._session.process_handle)
         dbg.close_handle(dbg._session.thread_handle)
 

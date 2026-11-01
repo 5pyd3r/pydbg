@@ -80,23 +80,30 @@ class TestUncoveredClassification(unittest.TestCase):
     def test_a_region_pointed_at_as_data_is_data(self):
         """However much it might decode like code.
 
-        The entry loads a pointer from .data; the .text bytes that pointer
-        refers to are data by evidence even if they decode.
+        The entry calls through a pointer at 0x1020; nothing branches there,
+        but the byte at 0x1020 decodes as `ret`. The evidence says data, so
+        those bytes must not be reported as code the analysis failed to reach.
+
+        The old version pointed into .data, which is not executable and so is
+        outside coverage altogether — it asserted total > 0 and proved nothing.
         """
         from pydbg.analysis import analyze_bytes
 
-        # call dword ptr [0x402000] — a memory reference into .data
-        code = b"\xff\x15" + struct.pack("<I", IMAGE_BASE + DATA_RVA) + b"\xc3"
+        target = TEXT_RVA + 0x20
+        # call dword ptr [0x<target>] ; ret — a memory reference into .text
+        code = b"\xff\x15" + struct.pack("<I", IMAGE_BASE + target) + b"\xc3"
         text = bytearray(b"\x90" * TEXT_SIZE)
         text[0:len(code)] = code
-        builder = PEBuilder(magic=0x10B, image_base=IMAGE_BASE, entry_rva=TEXT_RVA)
+        text[0x20] = 0xC3          # decodes cleanly, and is still data
+        builder = PEBuilder(magic=0x10B, image_base=IMAGE_BASE,
+                            entry_rva=TEXT_RVA)
         builder.add_section(".text", bytes(text), TEXT_RVA)
         builder.add_section(".data", b"\x00" * 16, DATA_RVA, 0xC0000040)
         result = analyze_bytes(builder.build())
-        # The .data span is not executable, so it is not part of coverage at
-        # all — assert the .text classification is unaffected and sane.
         breakdown = result.attribution().sections[".text"]
-        self.assertGreater(breakdown.total, 0)
+        self.assertGreaterEqual(
+            breakdown.data, 1,
+            "the pointer target was not counted as data")
 
     def test_totals_add_up_to_the_section(self):
         result = analyze(tail=b"\xcc" * 8 + b"\xc3\x90\xc3")
