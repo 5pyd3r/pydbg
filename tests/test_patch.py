@@ -59,6 +59,21 @@ class TestAssembler(unittest.TestCase):
         asm = Assembler()
         self.assertTrue(asm.verify("nop"))
 
+    def test_verify_with_operands(self):
+        """The regression: a statement with operands used to never verify.
+
+        verify() compared 'mov eax, ebx' against the disassembler's 'mov', so
+        it answered False for every real instruction and the suite only ever
+        exercised zero-operand lines.
+        """
+        asm = Assembler()
+        self.assertTrue(asm.verify("mov eax, ebx"))
+        self.assertTrue(asm.verify("xor eax, eax; ret"))
+
+    def test_verify_multi_statement_counts_instructions(self):
+        asm = Assembler()
+        self.assertTrue(asm.verify("push rbp\nmov rbp, rsp\npop rbp\nret"))
+
     def test_empty_code(self):
         asm = Assembler()
         code = asm.assemble("")

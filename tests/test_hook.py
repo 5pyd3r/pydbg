@@ -73,7 +73,7 @@ class TestIATFindAddr(unittest.TestCase):
         dos = struct.pack('<2s58xI', b'MZ', 0x80)
         dos += b'\x00' * (0x80 - len(dos))
         pe_sig = struct.pack('<I', 0x00004550)
-        fh = struct.pack('<HHIIIHH', 0x8664, 2, 0x5A000000, 0, 0, 0xF0, 0x22)
+        fh = struct.pack('<HHIIIHH', 0x8664, 2, 0x5A000000, 0, 0, 0x80, 0x22)
         oh = struct.pack('<HBB', 0x20B, 14, 0)
         oh += struct.pack('<III', 0x1000, 0, 0)
         oh += struct.pack('<II', 0x1000, 0x1000)
@@ -270,13 +270,19 @@ class TestInlineHookErrors(unittest.TestCase):
                 with self.assertRaises(PydbgError):
                     hook.set(0x400000, 0x500000)
 
-    def test_restore_unknown_trampoline_is_noop(self):
+    def test_restore_unknown_trampoline_raises(self):
+        """Silently returning left the E9 detour in place.
+
+        The caller believed the target had its original bytes back; it did
+        not. Refusing is the only honest answer.
+        """
         from pydbg.core.session import DebugSession
+        from pydbg.exceptions import PydbgError
 
         hook = InlineHook(DebugSession())
         tramp = Trampoline(addr=0x2000, size=10, original_code=b"\x90" * 5)
-        # not in _hooks -> restore should not raise
-        hook.restore(tramp)
+        with self.assertRaises(PydbgError):
+            hook.restore(tramp)
         self.assertEqual(hook._hooks, {})
 
 
