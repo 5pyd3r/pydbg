@@ -37,14 +37,8 @@ from dataclasses import dataclass
 from enum import IntEnum
 
 from ..disasm.engine import ACC_WRITE, OP_IMM, OP_MEM, OP_REG
+from .consts import MOV_LIKE
 from .refs import memory_address
-
-# Instructions that put a source operand into the destination. Matched on the
-# mnemonic rather than on an operand-kind constant because that constant is
-# exactly what the first hand-written version got wrong: it hard-coded
-# capstone's OP_IMM value, so every immediate was read as some other kind and
-# the resulting set printed normally while being wrong.
-_MOV_LIKE = frozenset(("mov", "movabs"))
 
 
 class Bound(IntEnum):
@@ -513,7 +507,7 @@ def _write_of(insn, rva, address, image):
     # the mnemonic rather than by the destination's read flag because capstone
     # marks a mov destination write-only, which would leave a read-flag test
     # unreachable — and an unreachable branch is a claim that never runs.
-    if insn.mnemonic not in _MOV_LIKE:
+    if insn.mnemonic not in MOV_LIKE:
         return unmodeled(f"{insn.mnemonic}: the previous value participates")
 
     for operand in insn.operands:

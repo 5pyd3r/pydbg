@@ -242,7 +242,6 @@ class SeedProvider:
         rejected: it would have admitted 563 slots, 312 of them resource bytes
         that read as pointers only by coincidence.
         """
-        slot_size = self.image.slot_size
         found = 0
         for section in self.image.sections:
             if section.is_exec or section.size_of_raw_data == 0:
@@ -251,15 +250,14 @@ class SeedProvider:
                                        section.size_of_raw_data)
             if data is None:
                 continue
-            for offset in range(0, len(data) - slot_size + 1, slot_size):
-                value = int.from_bytes(data[offset:offset + slot_size], "little")
-                rva = self.image.va_to_rva(value)
-                if rva is None or not self.image.is_exec(rva):
+            for offset, rva in self.image.pointer_slots(
+                    data, base_rva=section.virtual_address):
+                if not self.image.is_exec(rva):
                     continue
                 if not looks_like_entry(self.image, rva):
                     continue
                 seeds.add(rva, False, "data_pointers")
-                seeds.add_pointer(rva, section.virtual_address + offset)
+                seeds.add_pointer(rva, offset)
                 found += 1
                 if found >= self.max_data_pointers:
                     seeds.truncated.add("data_pointers")

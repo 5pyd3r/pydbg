@@ -104,12 +104,11 @@ def _looks_like_pointer_array(image, blob, threshold=0.5):
     slot = image.slot_size
     if len(blob) < slot * 2:
         return False
-    values = [int.from_bytes(blob[i:i + slot], "little")
-              for i in range(0, len(blob) - slot + 1, slot)]
-    if not values:
+    slots = len(blob) // slot
+    if not slots:
         return False
-    inside = sum(1 for value in values if image.va_to_rva(value) is not None)
-    return inside / len(values) >= threshold
+    inside = sum(1 for _ in image.pointer_slots(blob))
+    return inside / slots >= threshold
 
 
 def _decodes_as_code(result, start, end):

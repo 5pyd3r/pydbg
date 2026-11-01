@@ -171,3 +171,19 @@ class AnalyzedImage:
         if raw is None:
             return None
         return int.from_bytes(raw, "little")
+
+    def pointer_slots(self, blob, base_rva=0):
+        """Yield (rva_of_slot, target_rva) for pointer-sized slots in 'blob'.
+
+        Both the data-pointer sweep in seeds.py and coverage attribution ask
+        'does this blob read as an array of pointers into the image', and both
+        used to spell out the same stride-and-convert loop. Slots whose value
+        does not land inside the image are skipped here, because that is what
+        made the two copies agree in the first place.
+        """
+        slot = self.slot_size
+        for offset in range(0, len(blob) - slot + 1, slot):
+            value = int.from_bytes(blob[offset:offset + slot], "little")
+            target = self.va_to_rva(value)
+            if target is not None:
+                yield base_rva + offset, target

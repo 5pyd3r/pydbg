@@ -1,6 +1,7 @@
 """Turn one decoded instruction into the references it makes."""
 
 from ..disasm.engine import OP_IMM, OP_MEM
+from .consts import address_without_registers
 from .model import RefKind
 
 
@@ -10,17 +11,16 @@ def memory_address(insn, op, image):
     Handles both forms that name a fixed location — [disp] and [rip + disp] —
     which between them are how every direct memory reference appears. Anything
     with a base or an index is a computed address and is not resolved here.
+
+    The address arithmetic lives in consts.address_without_registers, which
+    answers in VA space; this is the one conversion that makes it an RVA.
+    Two copies of 'rip + size + disp' is the address-space mistake this
+    analysis has already made once.
     """
-    if op.kind != OP_MEM:
+    address = address_without_registers(insn, op)
+    if address is None:
         return None
-    if op.is_rip_relative:
-        # [rip + disp] is relative to the *next* instruction, and this is how
-        # x64 reaches data most of the time. Skipping it is why an x64 pass
-        # that only looks at absolute operands finds almost nothing.
-        return image.va_to_rva(insn.address + insn.size + op.mem_disp)
-    if op.is_absolute_mem and op.mem_disp:
-        return image.va_to_rva(op.mem_disp)
-    return None
+    return image.va_to_rva(address)
 
 
 def classify_refs(insn, image):
