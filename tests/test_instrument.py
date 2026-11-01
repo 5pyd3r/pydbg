@@ -281,9 +281,14 @@ class TestInstrumenter(unittest.TestCase):
                  info.trampoline_size + info.stub_alloc_size))
 
 
+_TARGET_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'target')
+
+# Defaults are the paths scripts/build-target32.ps1 and meson write to. They
+# used to be one developer's absolute ai_eden path, so on every other machine
+# the live tests silently skipped and the suite stayed green.
 _TEST_TARGET = os.environ.get(
     'TEST_INSTRUMENT_TARGET_PATH',
-    r'C:\Users\Spyder\Desktop\ai_eden\Output\instrument-module\build-instrument\tests\instrument_target.exe',
+    os.path.join(_TARGET_DIR, 'instrument_target.exe'),
 )
 
 
@@ -397,7 +402,7 @@ class TestInstrumentLive(unittest.TestCase):
 
 _TEST_TARGET32 = os.environ.get(
     'TEST_INSTRUMENT_TARGET32_PATH',
-    r'C:\Users\Spyder\Desktop\ai_eden\Output\instrument-module\tests\target\instrument_target32.exe',
+    os.path.join(_TARGET_DIR, 'instrument_target32.exe'),
 )
 
 

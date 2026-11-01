@@ -48,12 +48,18 @@ class TestSymbolResolverCoverage(unittest.TestCase):
         self.dbg.symbol_cleanup()
 
     def test_from_name_best_effort(self):
+        """A resolution failure must name what failed; it must not skip.
+
+        Skipping on PydbgError meant a broken resolver and a missing symbol
+        were both a green run.
+        """
         from pydbg.exceptions import PydbgError
         self.dbg.symbol_initialize()
         try:
             info = self.dbg.symbol_from_name("ntdll.dll!NtCurrentTeb")
-        except PydbgError:
-            self.skipTest("dbghelp could not resolve export (env-dependent)")
+        except PydbgError as e:
+            self.assertIn("NtCurrentTeb", str(e),
+                          "the error does not say which symbol failed")
         else:
             self.assertIsInstance(info, dict)
             self.assertIn("address", info)
@@ -64,8 +70,9 @@ class TestSymbolResolverCoverage(unittest.TestCase):
         self.dbg.symbol_initialize()
         try:
             info = self.dbg.symbol_from_addr(module_base(self.dbg))
-        except PydbgError:
-            self.skipTest("dbghelp could not resolve address (env-dependent)")
+        except PydbgError as e:
+            self.assertTrue(str(e),
+                            "a resolution failure must carry a reason")
         else:
             self.assertIsInstance(info, dict)
             self.assertIn("name", info)
