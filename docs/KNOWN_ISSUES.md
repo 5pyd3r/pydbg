@@ -129,15 +129,16 @@ bare interpreter is what catches it, which is what the verify step in
 ### Dynamic-analysis gaps (found by the same three analysis sessions)
 
 The same three targets surfaced a second family: capabilities whose absence
-pushed every caller into hand-rolling a workaround. Recorded in
-`targets/pydbg-gaps.md` §C and fixed here.
+pushed every caller into hand-rolling a workaround. Fixed here.
 
 - **`enum_modules()` raised `ERROR_PARTIAL_COPY` (299) on the loader
   breakpoint** — precisely when module info is first wanted. `CREATE_PROCESS`
   and `LOAD_DLL` name every image the loader maps, so those bases are now
-  recorded from the events and `module_at(addr)` answers from that table with
-  no syscall. `enum_modules()` falls back to it too, and merges in images PSAPI
-  cannot see (on WOW64 the 32-bit image is not mapped at the first breakpoint).
+  recorded from the events and `module_at(addr)` answers from that table
+  instead of running a module enumeration (each entry is still decorated by
+  reading the image's own PE header). `enum_modules()` falls back to it too,
+  and merges in images PSAPI cannot see (on WOW64 the 32-bit image is not
+  mapped at the first breakpoint).
 - **`create_process()` could not pass a command line**, forcing callers onto
   the `attach()` path — and so losing every startup-time breakpoint — for any
   target configured by argv. It now takes `cmdline=`, passed verbatim with
@@ -288,7 +289,7 @@ would have been verified only in CI's `llvm-instrument` job.
 window, is 64KB-aligned (the E9 rel32 range check depends on that), and two
 successive calls do not return the same address.
 
-The general lesson is the one §D of `targets/pydbg-gaps.md` keeps re-teaching:
+The general lesson, which this file keeps re-learning:
 **"covered by a test" and "covered in the configuration you are running" are
 different claims**, and a `skipUnless` on an optional backend silently moves a
 test from the first to the second.
