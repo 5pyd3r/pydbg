@@ -68,6 +68,58 @@ class TestDebugEvent(unittest.TestCase):
         self.assertIsNotNone(event.exception_info)
         self.assertEqual(event.exception_info["name"], "EXCEPTION_BREAKPOINT")
 
+    def test_debug_event_exposes_load_dll_fields(self):
+        """LOAD_DLL carries where the image landed and which file it was."""
+        from pydbg import DebugEvent
+
+        raw = {
+            "event_name": "LOAD_DLL",
+            "pid": 1,
+            "tid": 2,
+            "dll_base": 0x7FFE0000,
+            "dll_path": "C:\\Windows\\System32\\ntdll.dll",
+        }
+        event = DebugEvent(raw)
+        self.assertEqual(event.dll_base, 0x7FFE0000)
+        self.assertEqual(event.dll_path, "C:\\Windows\\System32\\ntdll.dll")
+
+
+class TestParseLoadedDll(unittest.TestCase):
+    """Pe plan Task 10: a LOAD_DLL event must lead to a parsed PE."""
+
+    def test_an_event_with_neither_image_nor_path_is_refused(self):
+        from pydbg import DebugEvent, Debugger
+        from pydbg.exceptions import PydbgError
+
+        dbg = Debugger()
+        with self.assertRaises(PydbgError):
+            dbg.parse_loaded_dll(DebugEvent({"event_name": "LOAD_DLL"}))
+
+    def test_the_first_loaded_image_parses_from_memory(self):
+        from pydbg import Debugger
+
+        dbg = Debugger()
+        dbg.create_process(TEST_TARGET_PATH)
+        try:
+            for _ in range(400):
+                event = dbg.wait_event(2000)
+                if event is None:
+                    self.fail("no event arrived while draining to the breakpoint")
+                if event.type == "LOAD_DLL":
+                    self.assertTrue(event.dll_path,
+                                    "LOAD_DLL lost the file it was loaded from")
+                    pe = dbg.parse_loaded_dll(event)
+                    self.assertTrue(pe.sections, "parsed image has no sections")
+                    return
+                if event.type == "EXCEPTION":
+                    self.fail("reached the breakpoint without a LOAD_DLL event")
+                dbg.continue_event(event.pid, event.tid)
+        finally:
+            try:
+                dbg.terminate_process(0)
+            except Exception:
+                pass
+
 
 class TestDebuggerAPICompleteness(unittest.TestCase):
     """Tests for terminate_process and get_exit_code."""

@@ -219,6 +219,11 @@ cdef extern from "windows.h":
     BOOL CloseHandle(HANDLE hObject)
     DWORD GetLastError()
 
+    # LOAD_DLL hands the debugger an open file handle; its path is how the
+    # image can be parsed later without holding a copy of every DLL in memory.
+    DWORD GetFinalPathNameByHandleW(HANDLE hFile, unsigned short* lpszFilePath,
+        DWORD cchFilePath, DWORD dwFlags)
+
     BOOL ReadProcessMemory(HANDLE hProcess, LPCVOID lpBaseAddress,
         void* lpBuffer, SIZE_T nSize, SIZE_T* lpNumberOfBytesRead)
     BOOL WriteProcessMemory(HANDLE hProcess, LPVOID lpBaseAddress,

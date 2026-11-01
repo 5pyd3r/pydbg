@@ -946,6 +946,40 @@ class Debugger:
         """Module containing 'addr', or None. See ModuleResolver.module_at."""
         return self.modules.module_at(addr, pid)
 
+    def parse_loaded_dll(self, event):
+        """PE for the image a LOAD_DLL event announced.
+
+        Parses the image where it is mapped (LoadedView over process memory):
+        that is where the directories actually point, and it reflects any
+        runtime fixups. Falls back to the file the loader named when the image
+        is no longer readable — a stale event, or a module already unloaded.
+
+        The event carries the path rather than the file's bytes on purpose:
+        copying every loaded DLL into the event stream costs hundreds of
+        megabytes per process, and most callers never look.
+
+        Raises PydbgError when the event has neither a readable image nor a
+        usable path.
+        """
+        base = getattr(event, 'dll_base', 0) or 0
+        path = getattr(event, 'dll_path', '') or ''
+        from ..analysis.process_source import ProcessSource
+        from ..exceptions import PydbgError
+        from ..pe import PE
+        from ..pe.view import LoadedView
+
+        if base:
+            try:
+                return PE.from_source(ProcessSource(self._session, base),
+                                      LoadedView(), va_base=base)
+            except (PydbgError, OSError):
+                if not path:
+                    raise
+        if not path:
+            raise PydbgError(
+                "LOAD_DLL event carries neither a readable image nor a path")
+        return PE.from_file(path)
+
     def get_module_filename(self, h_module):
         return self.modules.get_filename(h_module)
 

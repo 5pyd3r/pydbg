@@ -16,7 +16,7 @@ from _win32types cimport (
     EXIT_THREAD_DEBUG_EVENT, LOAD_DLL_DEBUG_EVENT,
     UNLOAD_DLL_DEBUG_EVENT, EXCEPTION_ACCESS_VIOLATION,
     EXCEPTION_BREAKPOINT, EXCEPTION_SINGLE_STEP,
-    WAIT_OBJECT_0, WAIT_TIMEOUT, IsWow64Process,
+    WAIT_OBJECT_0, WAIT_TIMEOUT, IsWow64Process, GetFinalPathNameByHandleW,
     CreateToolhelp32Snapshot, Process32FirstW, Process32NextW,
     PROCESSENTRY32W, TH32CS_SNAPPROCESS,
 )
@@ -158,6 +158,25 @@ cpdef int debug_active_process(int pid) except? -1:
     return 0
 
 
+cdef str _final_path_of(HANDLE h_file):
+    """The file a LOAD_DLL handle refers to, or '' when it cannot be named.
+
+    Windows returns the '\\\\?\\' (or '\\\\?\\UNC\\') form; both prefixes are
+    stripped so the result can go straight to open().
+    """
+    cdef unsigned short buf[32768]
+    cdef DWORD n = GetFinalPathNameByHandleW(h_file, buf, 32767, 0)
+    if n == 0 or n >= 32767:
+        return ''
+    cdef bytes raw = (<char*>buf)[:n * 2]
+    cdef str path = raw.decode('utf-16-le', errors='replace')
+    if path.startswith('\\\\?\\UNC\\'):
+        return '\\\\' + path[8:]
+    if path.startswith('\\\\?\\'):
+        return path[4:]
+    return path
+
+
 cpdef object wait_for_debug_event(int timeout_ms=10000):
     """Wait for the next debug event.
 
@@ -215,6 +234,7 @@ cpdef object wait_for_debug_event(int timeout_ms=10000):
     cdef DWORD nparams
     cdef DWORD idx
     cdef list params
+    cdef HANDLE dll_file
 
     if code == EXCEPTION_DEBUG_EVENT:
         event['exception_code'] = de.u.Exception.ExceptionRecord.ExceptionCode
@@ -244,6 +264,14 @@ cpdef object wait_for_debug_event(int timeout_ms=10000):
         event['thread_exit_code'] = de.u.ExitThread.dwExitCode
     elif code == LOAD_DLL_DEBUG_EVENT:
         event['dll_base'] = <unsigned long long>de.u.LoadDll.lpBaseOfDll
+        # The loader hands over an open file handle for every image and
+        # expects it back: this branch never closed it, so a long session
+        # leaked one handle per DLL. Resolve the path first (what the image
+        # was loaded from), then give the handle back.
+        dll_file = de.u.LoadDll.hFile
+        if dll_file != NULL:
+            event['dll_path'] = _final_path_of(dll_file)
+            CloseHandle(dll_file)
 
     return event
 
