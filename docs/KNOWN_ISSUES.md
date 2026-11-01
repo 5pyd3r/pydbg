@@ -1,6 +1,18 @@
 # Known Issues
 
-*No known issues at this time.*
+## Open
+
+- **WOW64 附加模式的 `DebugActiveProcessStop` 可能瞬态返回 `ERROR_ACCESS_DENIED`**
+  （目标主线程挂起时），必要时重试；句柄槽可能被调试子系统复用，调用方须用
+  `GetProcessId` 校验。当前不自动处理。
+- **32 位插桩目标不随默认构建产出**：`instrument_target32.exe` 只在
+  `scripts/build-target32.ps1` 运行时生成，因此 `test_instrument` 的 WOW64 live
+  一组在缺少它时 skip。CI 的 `build-and-test` job 会构建它。
+- **x64 trampoline 不做 RIP-relative 重定位**（见 `architecture.md` §已知限制）。
+- **`analysis` 模块的设计文档不在 master**：它只存在于未合并分支
+  `feat/game-analysis-framework` 的 `docs/superpowers/specs/` 下（`git show
+  2fb3f88:docs/superpowers/specs/2026-06-22-pydbg-analysis-fixes-design.md`）。
+  master 上的实现按该文档编写，但仓库里查不到它。
 
 ## Resolved
 
