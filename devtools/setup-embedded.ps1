@@ -44,12 +44,20 @@ for ($i = 0; $i -lt $ARCHES.Length; $i++) {
     $getpip = Join-Path $DEVTOOLS_DIR "get-pip.py"
     Invoke-WebRequest -Uri "https://bootstrap.pypa.io/get-pip.py" -OutFile $getpip
     & "$dir\python.exe" $getpip --no-warn-script-location
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "[fail] pip bootstrap for python-$name" -ForegroundColor Red
+        exit 1
+    }
     Remove-Item $getpip
 
     # Install project deps
     Write-Host "[deps] installing build dependencies ..." -ForegroundColor Cyan
     & "$dir\python.exe" -m pip install --no-warn-script-location `
         meson meson-python ninja cython flake8 "capstone>=5.0" keystone-engine
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "[fail] dependency install for python-$name" -ForegroundColor Red
+        exit 1
+    }
 
     Write-Host "[done] python-$name ready at $dir" -ForegroundColor Green
 }

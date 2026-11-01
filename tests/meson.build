@@ -42,6 +42,13 @@ wedge_target = executable(
   'target/wedge_target.c',
 )
 
+# Faults on purpose: the only way to test that a real access violation reaches
+# Python with its ExceptionInformation, instead of a dict built by hand.
+av_target = executable(
+  'av_target',
+  'target/av_target.c',
+)
+
 # Common environment: PYTHONPATH includes project root (for tests).
 # The editable install (pip install -e .) handles pydbg package discovery,
 # including the compiled Cython extension at the correct import path.
@@ -60,6 +67,7 @@ test_env.set('TEST_NESTED_TARGET_PATH', nested_target.full_path())
 test_env.set('TEST_WINDOW_TARGET_PATH', window_target.full_path())
 test_env.set('TEST_MODAL_TARGET_PATH', modal_target.full_path())
 test_env.set('TEST_WEDGE_TARGET_PATH', wedge_target.full_path())
+test_env.set('TEST_AV_TARGET_PATH', av_target.full_path())
 
 # Test runner: use Python unittest via meson test
 test(

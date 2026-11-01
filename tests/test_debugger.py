@@ -2,7 +2,7 @@
 
 import unittest
 
-from tests import TEST_TARGET_PATH, IP_REG
+from tests import TEST_AV_TARGET_PATH, TEST_TARGET_PATH, IP_REG
 
 try:
     from pydbg import _pydbg
@@ -485,6 +485,47 @@ class TestFailureIsVisible(unittest.TestCase):
                                    side_effect=degrade):
                 with self.assertRaises(BreakpointError):
                     dbg.run(lambda e: None, timeout_ms=10)
+
+
+class TestAccessViolationPayload(unittest.TestCase):
+    """The producer side of an access violation, not a hand-built event.
+
+    test_comprehensive.py builds ``exception_params`` into a raw dict itself,
+    so it proves the parser and nothing about WaitForDebugEvent(). The defect
+    that hid for months was in the producer: the Cython event dict never
+    carried ExceptionInformation, so every real access violation arrived
+    without access_type/access_addr. This test reads a real exception record
+    from a target that dereferences NULL.
+    """
+
+    def test_real_access_violation_keeps_its_parameters(self):
+        from pydbg import Debugger
+
+        dbg = Debugger()
+        dbg.create_process(TEST_AV_TARGET_PATH)
+        try:
+            for _ in range(200):
+                event = dbg.wait_event(timeout_ms=2000)
+                if event is None:
+                    break
+                if (event.type == "EXCEPTION"
+                        and event.exception_code == 0xC0000005):
+                    params = event.raw.get("exception_params")
+                    self.assertIsNotNone(
+                        params, "wait_event dropped ExceptionInformation")
+                    self.assertGreaterEqual(len(params), 2)
+                    self.assertEqual(params[0], 0, "expected a read fault")
+                    self.assertEqual(event.exception_info["access_type"], "read")
+                    self.assertEqual(event.exception_info["access_addr"],
+                                     params[1])
+                    return
+                dbg.continue_event(event.pid, event.tid)
+            self.fail("the target never produced an access violation")
+        finally:
+            try:
+                dbg.terminate_process()
+            except Exception:
+                pass
 
 
 if __name__ == "__main__":

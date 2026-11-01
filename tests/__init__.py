@@ -27,6 +27,11 @@ _DEFAULT_WEDGE_TARGET = os.path.join(_TEST_DIR, 'target', 'wedge_target.exe')
 TEST_WEDGE_TARGET_PATH = os.environ.get('TEST_WEDGE_TARGET_PATH',
                                         _DEFAULT_WEDGE_TARGET)
 
+# Target that dereferences NULL, to test the access-violation payload as it
+# actually arrives from WaitForDebugEvent (not a hand-built event dict).
+_DEFAULT_AV_TARGET = os.path.join(_TEST_DIR, 'target', 'av_target.exe')
+TEST_AV_TARGET_PATH = os.environ.get('TEST_AV_TARGET_PATH', _DEFAULT_AV_TARGET)
+
 # Architecture-aware register name helpers
 HOST_ARCH = struct.calcsize("P") * 8  # 32 or 64
 IP_REG = "rip" if HOST_ARCH == 64 else "eip"

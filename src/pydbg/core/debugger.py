@@ -1,5 +1,6 @@
 """Debugger — high-level debugging API with composition pattern."""
 
+import struct
 import time
 
 from .. import _pydbg
@@ -243,20 +244,17 @@ class Debugger:
 
     def _detect_target_arch(self, h_process):
         """Detect if target process is 32-bit (WoW64) or 64-bit."""
-        import struct
-        import ctypes
-        if struct.calcsize("P") == 8:
-            # 64-bit host: check if target is WoW64 (32-bit)
-            try:
-                is_wow64 = ctypes.c_int(0)
-                ctypes.windll.kernel32.IsWow64Process(
-                    ctypes.c_void_p(h_process), ctypes.byref(is_wow64))
-                return 32 if is_wow64.value else 64
-            except Exception:
-                return 64
-        else:
-            # 32-bit host: always 32-bit
+        if struct.calcsize("P") != 8:
             return 32
+        # Ask Windows rather than guessing: a failed query used to be swallowed
+        # and answered "64", which mislabelled every WOW64 target and made the
+        # rest of the session read 64-bit context structs from a 32-bit process.
+        try:
+            is_wow64 = _pydbg.is_wow64_process(h_process)
+        except OSError as e:
+            raise ProcessError(
+                f"cannot determine target architecture: {e}") from e
+        return 32 if is_wow64 else 64
 
     def attach(self, pid):
         try:
