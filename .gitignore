@@ -21,3 +21,4 @@ venv-x86/
 .worktrees/
 .pytest_cache/
 .coverage
+._fix-review/

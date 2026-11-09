@@ -16,6 +16,7 @@ Test categories:
 
 import os
 import struct
+import subprocess
 import unittest
 
 from tests import HOST_ARCH, IP_REG, SP_REG, GP_REG
@@ -371,6 +372,30 @@ class TestNoBuildOutputInThePackage(unittest.TestCase):
             os.path.exists(os.path.join(self.repo_root, "scripts",
                                         "build_venv.py")),
             "scripts/build_venv.py copied the built extension into src/pydbg/")
+
+    def test_no_build_output_is_under_version_control(self):
+        """A file may exist in the working tree; it must not be tracked.
+
+        tests/target/*.exe used to be force-added, so the tests they back could
+        not be reproduced from a clean checkout — no build rule produced them.
+        What the build writes into the tree is fine; what git carries is not.
+        """
+        if not os.path.exists(os.path.join(self.repo_root, ".git")):
+            self.skipTest("not a git checkout; nothing to check")
+        try:
+            out = subprocess.run(
+                ["git", "-C", self.repo_root, "ls-files", "src", "tests"],
+                capture_output=True, text=True, check=True).stdout
+        except (OSError, subprocess.CalledProcessError) as exc:
+            self.skipTest(f"git ls-files unavailable: {exc}")
+        suffixes = (".exe", ".obj", ".lib", ".exp", ".pyd", ".dll")
+        tracked = [line for line in out.splitlines()
+                   if line.lower().endswith(suffixes)]
+        self.assertEqual(
+            tracked, [],
+            "build outputs are under version control; no build rule can "
+            "regenerate them, so every test that needs one depends on a "
+            "binary that a clean checkout cannot produce")
 
 
 # ═══════════════════════════════════════════════════════════════════

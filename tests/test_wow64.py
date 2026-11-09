@@ -521,8 +521,12 @@ class TestWow64ChildProcess(unittest.TestCase):
         from pydbg import Debugger
         from tests.helpers import teardown
 
-        spawn = os.path.join(_TEST_DIR, "target", "spawn_child.exe")
-        child = os.path.join(_TEST_DIR, "target", "child_target_x64.exe")
+        spawn = os.environ.get(
+            "TEST_SPAWN_CHILD",
+            os.path.join(_TEST_DIR, "target", "spawn_child.exe"))
+        child = os.environ.get(
+            "TEST_CHILD_TARGET_X64",
+            os.path.join(_TEST_DIR, "target", "child_target_x64.exe"))
         if not (os.path.exists(spawn) and os.path.exists(child)):
             self.skipTest("spawn_child.exe / child_target_x64.exe not built")
         dbg = Debugger()

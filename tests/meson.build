@@ -49,6 +49,17 @@ av_target = executable(
   'target/av_target.c',
 )
 
+# Child-process target. Built here as native x64 and used for two different
+# things: the debuggee of the child-debugging tests, and the *64-bit child* that
+# a WOW64 parent spawns (test_wow64). Its 32-bit counterpart and the WOW64
+# parent need the x86 toolchain, so scripts/build-target32.ps1 builds those —
+# the same split as simple_target32.exe. Both used to sit in the tree as
+# committed .exe files that no build rule could reproduce.
+child_target = executable(
+  'child_target',
+  'target/child_target.c',
+)
+
 # Common environment: PYTHONPATH includes project root (for tests).
 # The editable install (pip install -e .) handles pydbg package discovery,
 # including the compiled Cython extension at the correct import path.
@@ -68,6 +79,11 @@ test_env.set('TEST_WINDOW_TARGET_PATH', window_target.full_path())
 test_env.set('TEST_MODAL_TARGET_PATH', modal_target.full_path())
 test_env.set('TEST_WEDGE_TARGET_PATH', wedge_target.full_path())
 test_env.set('TEST_AV_TARGET_PATH', av_target.full_path())
+test_env.set('TEST_CHILD_TARGET',
+  meson.project_source_root() / 'tests' / 'target' / 'child_target32.exe')
+test_env.set('TEST_CHILD_TARGET_X64', child_target.full_path())
+test_env.set('TEST_SPAWN_CHILD',
+  meson.project_source_root() / 'tests' / 'target' / 'spawn_child.exe')
 
 # One meson test for the whole suite. pytest discovers tests/test_*.py by name,
 # so a new test file is picked up without being registered here. The previous
