@@ -150,7 +150,7 @@ class TestCallTree(unittest.TestCase):
 class TestStepTracerLive(unittest.TestCase):
     """Live TF-flag stepping coverage."""
 
-    @unittest.skipUnless(_has_cython, "requires Cython extension")
+    @unittest.skipUnless(_has_cython, "optional dependency: Cython extension")
     def test_step_sets_tf_and_clear_restores(self):
         from tests.helpers import create_debugger, teardown
         from pydbg.trace.step import StepTracer

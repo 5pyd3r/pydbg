@@ -13,7 +13,7 @@ except ImportError:
 class TestSymbolResolverCoverage(unittest.TestCase):
     """Live happy paths + best-effort dbghelp calls."""
 
-    @unittest.skipUnless(_has_cython, "requires Cython extension")
+    @unittest.skipUnless(_has_cython, "optional dependency: Cython extension")
     def setUp(self):
         from tests.helpers import create_debugger
         self.dbg, self.pid, self.tid = create_debugger()

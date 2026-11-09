@@ -520,7 +520,7 @@ class TestRealImageDirectories(unittest.TestCase):
 
     def setUp(self):
         if not os.path.exists(self.KERNEL32):
-            self.skipTest(f"no system DLL at {self.KERNEL32}")
+            self.skipTest(f"environment: no system DLL at {self.KERNEL32}")
         from pydbg.pe import PE
         self.pe = PE.from_file(self.KERNEL32)
 

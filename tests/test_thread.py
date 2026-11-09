@@ -92,7 +92,7 @@ INVALID_TID = 0x7FFFFFF0
 class TestThreadManagerCoverage(unittest.TestCase):
     """Live-process coverage for ThreadManager error paths, step, get_ids."""
 
-    @unittest.skipUnless(_has_cython, "requires Cython extension")
+    @unittest.skipUnless(_has_cython, "optional dependency: Cython extension")
     def setUp(self):
         from tests.helpers import create_debugger
         self.dbg, self.pid, self.tid = create_debugger()

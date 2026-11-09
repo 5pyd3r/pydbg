@@ -80,7 +80,7 @@ class ProgressCounter(threading.Thread):
         self._stop = True
 
 
-@unittest.skipUnless(_has_cython, "requires Cython extension")
+@unittest.skipUnless(_has_cython, "optional dependency: Cython extension")
 class TestBreakpointHitCounts(unittest.TestCase):
     """F19 — "this site never ran" and "the probe was never armed" read alike."""
 
@@ -124,7 +124,7 @@ class TestBreakpointHitCounts(unittest.TestCase):
         failed setup.
         """
         if not self.scratch:
-            self.skipTest("could not allocate scratch memory in the target")
+            self.skipTest("environment: could not allocate scratch memory in the target")
 
         bp_id = self.dbg.set_breakpoint(self.scratch)
         self._drain_to_exit()
@@ -139,7 +139,7 @@ class TestBreakpointHitCounts(unittest.TestCase):
     def test_the_never_armed_case_is_absence_from_the_report(self):
         """An address with no breakpoint must not produce a zero-hit entry."""
         if not self.scratch:
-            self.skipTest("could not allocate scratch memory in the target")
+            self.skipTest("environment: could not allocate scratch memory in the target")
         addresses = {e["addr"] for e in self.dbg.breakpoint_report()}
         self.assertNotIn(self.scratch, addresses)
 
@@ -152,7 +152,7 @@ class TestBreakpointHitCounts(unittest.TestCase):
         """
         target = _instrument_target()
         if not os.path.exists(target):
-            self.skipTest(f"instrument target not built: {target}")
+            self.skipTest(f"target not built: instrument target: {target}")
 
         from tests.helpers import teardown
         from pydbg import Debugger
@@ -205,7 +205,7 @@ class TestBreakpointHitCounts(unittest.TestCase):
         from tests.helpers import entry_point
 
         if not self.scratch:
-            self.skipTest("could not allocate scratch memory in the target")
+            self.skipTest("environment: could not allocate scratch memory in the target")
 
         never_armed = self.scratch + 0x800     # no breakpoint here at all
         armed_never = self.scratch             # armed, never executed
@@ -225,7 +225,7 @@ class TestBreakpointHitCounts(unittest.TestCase):
 
     def test_removing_a_breakpoint_drops_its_count(self):
         if not self.scratch:
-            self.skipTest("could not allocate scratch memory in the target")
+            self.skipTest("environment: could not allocate scratch memory in the target")
         bp_id = self.dbg.set_breakpoint(self.scratch)
         self.assertIn(bp_id, {e["bp_id"] for e in self.dbg.breakpoint_report()})
         self.dbg.remove_breakpoint(bp_id)
@@ -238,7 +238,7 @@ class TestBreakpointHitCounts(unittest.TestCase):
         not evidence that the site never ran — the report has to say so.
         """
         if not self.scratch:
-            self.skipTest("could not allocate scratch memory in the target")
+            self.skipTest("environment: could not allocate scratch memory in the target")
         bp_id = self.dbg.set_breakpoint(self.scratch)
         self.dbg.write_memory(self.scratch, b"\x90")
         entry = {e["bp_id"]: e for e in self.dbg.breakpoint_report()}[bp_id]
@@ -248,7 +248,7 @@ class TestBreakpointHitCounts(unittest.TestCase):
     def test_verify_breakpoints_contract_is_unchanged(self):
         """The pre-existing report must keep its shape and its contents."""
         if not self.scratch:
-            self.skipTest("could not allocate scratch memory in the target")
+            self.skipTest("environment: could not allocate scratch memory in the target")
         bp_id = self.dbg.set_breakpoint(self.scratch)
         self.assertEqual(self.dbg.verify_breakpoints(), [])
         self.assertEqual(self.dbg.brk_sw.degraded_hits, 0)
@@ -263,7 +263,7 @@ class TestBreakpointHitCounts(unittest.TestCase):
         self.assertIn(bp_id, self.dbg.brk_sw.lost)
 
 
-@unittest.skipUnless(_has_cython, "requires Cython extension")
+@unittest.skipUnless(_has_cython, "optional dependency: Cython extension")
 class TestForeignProcessReads(unittest.TestCase):
     """F19 (2) part one — reading a process by pid through pydbg's own API."""
 
@@ -370,7 +370,7 @@ class TestForeignProcessReads(unittest.TestCase):
         self.dbg.close_process(pid)                   # nothing to close
 
 
-@unittest.skipUnless(_has_cython, "requires Cython extension")
+@unittest.skipUnless(_has_cython, "optional dependency: Cython extension")
 class TestProcessTreeEnumeration(unittest.TestCase):
     """F19 (2) part two — enumerating children from a snapshot, not events."""
 
@@ -465,7 +465,7 @@ class TestProcessTreeEnumeration(unittest.TestCase):
                          "another pid's event table was merged in")
 
 
-@unittest.skipUnless(_has_cython, "requires Cython extension")
+@unittest.skipUnless(_has_cython, "optional dependency: Cython extension")
 class TestNestedDebugging(unittest.TestCase):
     """F19 (2) — the debuggee of a process we attached to.
 
@@ -482,7 +482,7 @@ class TestNestedDebugging(unittest.TestCase):
     def setUp(self):
         from pydbg import Debugger
         if not os.path.exists(TEST_NESTED_TARGET_PATH):
-            self.skipTest(f"nested target not built: {TEST_NESTED_TARGET_PATH}")
+            self.skipTest(f"target not built: nested target: {TEST_NESTED_TARGET_PATH}")
         self.pid, self.tid, self.h_proc, self.h_thr = \
             _pydbg.create_process_suspended(TEST_NESTED_TARGET_PATH)
         self.dbg = Debugger()
@@ -606,7 +606,7 @@ class TestNestedDebugging(unittest.TestCase):
         self.assertEqual(found["base_address"], base)
 
 
-@unittest.skipUnless(_has_cython, "requires Cython extension")
+@unittest.skipUnless(_has_cython, "optional dependency: Cython extension")
 class TestGILIsReleasedWhileWaiting(unittest.TestCase):
     """F19 (3) — a blocking debug wait must not starve other Python threads.
 

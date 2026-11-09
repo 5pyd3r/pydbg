@@ -39,7 +39,7 @@ class DynamicGapTestCase(unittest.TestCase):
         teardown(self.dbg)
 
 
-@unittest.skipUnless(_has_cython, "requires Cython extension")
+@unittest.skipUnless(_has_cython, "optional dependency: Cython extension")
 class TestCreateProcessCmdline(unittest.TestCase):
     """C1 — create_process() could not pass a command line.
 
@@ -67,7 +67,7 @@ class TestCreateProcessCmdline(unittest.TestCase):
     def test_cmdline_reaches_the_target(self):
         """The command line is handed over verbatim, argv[0] included."""
         if not os.path.exists(self.target):
-            self.skipTest(f"argv target not built: {self.target}")
+            self.skipTest(f"target not built: argv target: {self.target}")
 
         marker = "pydbg-cmdline-marker"
         out = os.path.join(tempfile.gettempdir(), "pydbg_argv_out.txt")
@@ -110,7 +110,7 @@ class TestCreateProcessCmdline(unittest.TestCase):
         observation that proves argc == 1 here.
         """
         if not os.path.exists(self.target):
-            self.skipTest(f"argv target not built: {self.target}")
+            self.skipTest(f"target not built: argv target: {self.target}")
 
         from pydbg import Debugger
         dbg = Debugger()
@@ -127,7 +127,7 @@ class TestCreateProcessCmdline(unittest.TestCase):
         self.assertEqual(code, 2, "expected argc == 1 without a cmdline")
 
 
-@unittest.skipUnless(_has_cython, "requires Cython extension")
+@unittest.skipUnless(_has_cython, "optional dependency: Cython extension")
 class TestSafeReadAndRegions(DynamicGapTestCase):
     """C2/C3 — read_memory() dropped partial results; no region enumeration."""
 
@@ -186,7 +186,7 @@ class TestSafeReadAndRegions(DynamicGapTestCase):
         self.assertTrue(all(r["region_size"] > 0 for r in regions))
 
 
-@unittest.skipUnless(_has_cython, "requires Cython extension")
+@unittest.skipUnless(_has_cython, "optional dependency: Cython extension")
 class TestModuleAt(DynamicGapTestCase):
     """C4 — enum_modules() raised ERROR_PARTIAL_COPY (299) on the loader
     breakpoint, i.e. precisely when module information is first wanted."""
@@ -255,7 +255,7 @@ class TestModuleAt(DynamicGapTestCase):
         self.assertTrue(all(m["arch"] == "unknown" for m in modules))
 
 
-@unittest.skipUnless(_has_cython, "requires Cython extension")
+@unittest.skipUnless(_has_cython, "optional dependency: Cython extension")
 class TestBreakpointOverwriteDetection(DynamicGapTestCase):
     """C5 — a software breakpoint overwritten by the target went silent.
 
@@ -291,7 +291,7 @@ class TestBreakpointOverwriteDetection(DynamicGapTestCase):
         self.assertNotIn(bp_id, self.dbg.brk_sw.lost)
 
 
-@unittest.skipUnless(_has_cython, "requires Cython extension")
+@unittest.skipUnless(_has_cython, "optional dependency: Cython extension")
 class TestRunUntil(unittest.TestCase):
     """C6 — no run_until(addr), so "did it get there?" was a wall-clock guess."""
 
@@ -328,7 +328,7 @@ class TestRunUntil(unittest.TestCase):
     def test_budget_exhausted_is_reported_not_guessed(self):
         """An address that is never executed must fail loudly and on time."""
         if not self.scratch:
-            self.skipTest("could not allocate scratch memory in the target")
+            self.skipTest("environment: could not allocate scratch memory in the target")
         from pydbg.exceptions import TimeoutError as PydbgTimeout
 
         started = time.monotonic()

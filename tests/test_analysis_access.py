@@ -199,13 +199,13 @@ class TestRealImageTraces(unittest.TestCase):
         path = os.path.join(os.environ.get("SystemRoot", r"C:\Windows"),
                             "System32", "kernel32.dll")
         if not os.path.exists(path):
-            raise unittest.SkipTest(f"no system DLL at {path}")
+            raise unittest.SkipTest(f"environment: no system DLL at {path}")
         from pydbg.analysis import analyze_file
         cls.result = analyze_file(path)
 
     def setUp(self):
         if not hasattr(self.__class__, "result"):
-            self.skipTest("no system DLL to analyse")
+            self.skipTest("environment: no system DLL to analyse")
 
     def test_the_trace_comes_from_the_sweep_not_a_second_decode(self):
         """Asserted structurally, not by timing.

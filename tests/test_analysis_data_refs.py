@@ -397,7 +397,7 @@ class TestRealImageDataRefs(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         if not os.path.exists(cls.KERNEL32):
-            raise unittest.SkipTest(f"no system DLL at {cls.KERNEL32}")
+            raise unittest.SkipTest(f"environment: no system DLL at {cls.KERNEL32}")
         from pydbg.analysis import analyze_file
         # Once for the class: the analysis is half a minute and every test
         # here reads the same immutable result.

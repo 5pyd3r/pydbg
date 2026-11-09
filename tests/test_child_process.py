@@ -8,6 +8,8 @@ HOST_ARCH = struct.calcsize("P") * 8
 _TEST_DIR = os.path.dirname(os.path.abspath(__file__))
 _DEFAULT_CHILD_TARGET = os.path.join(_TEST_DIR, "target", "child_target.exe")
 TEST_CHILD_TARGET = os.environ.get("TEST_CHILD_TARGET", _DEFAULT_CHILD_TARGET)
+_CHILD_TARGET_MISSING = ("target not built: child_target32.exe "
+                         "(scripts/build-target32.ps1)")
 
 try:
     from pydbg import _pydbg  # noqa: F401
@@ -37,8 +39,8 @@ def _drain_child_exit(dbg, child_pid):
             break
 
 
-@unittest.skipUnless(_has_cython, "requires Cython extension")
-@unittest.skipUnless(os.path.exists(TEST_CHILD_TARGET), "child_target.exe not found")
+@unittest.skipUnless(_has_cython, "optional dependency: Cython extension")
+@unittest.skipUnless(os.path.exists(TEST_CHILD_TARGET), _CHILD_TARGET_MISSING)
 class TestChildProcessFlag(unittest.TestCase):
     """Tests for set_debug_children flag."""
 
@@ -64,8 +66,8 @@ class TestChildProcessFlag(unittest.TestCase):
         dbg.close_handle(dbg._session.thread_handle)
 
 
-@unittest.skipUnless(_has_cython, "requires Cython extension")
-@unittest.skipUnless(os.path.exists(TEST_CHILD_TARGET), "child_target.exe not found")
+@unittest.skipUnless(_has_cython, "optional dependency: Cython extension")
+@unittest.skipUnless(os.path.exists(TEST_CHILD_TARGET), _CHILD_TARGET_MISSING)
 class TestChildProcessTracking(unittest.TestCase):
     """Tests for automatic child process tracking."""
 
@@ -178,8 +180,8 @@ class TestChildProcessTracking(unittest.TestCase):
         dbg.close_handle(dbg._session.thread_handle)
 
 
-@unittest.skipUnless(_has_cython, "requires Cython extension")
-@unittest.skipUnless(os.path.exists(TEST_CHILD_TARGET), "child_target.exe not found")
+@unittest.skipUnless(_has_cython, "optional dependency: Cython extension")
+@unittest.skipUnless(os.path.exists(TEST_CHILD_TARGET), _CHILD_TARGET_MISSING)
 class TestChildProcessOperations(unittest.TestCase):
     """Tests for operating on child processes via pid parameter."""
 
@@ -264,7 +266,7 @@ class TestChildProcessOperations(unittest.TestCase):
         dbg.close_handle(dbg._session.thread_handle)
 
 
-@unittest.skipUnless(_has_cython, "requires Cython extension")
+@unittest.skipUnless(_has_cython, "optional dependency: Cython extension")
 class TestChildProcessErrors(unittest.TestCase):
     """Tests for error handling."""
 
