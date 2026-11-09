@@ -386,6 +386,39 @@ class TestBPDeliveryAPI(unittest.TestCase):
             teardown(dbg)
 
     @unittest.skipUnless(_has_cython, "requires Cython extension")
+    def test_set_same_address_twice_does_not_corrupt(self):
+        """Re-arming an address answers with the same bp_id and removes cleanly.
+
+        The second set used to read back the 0xCC the first one had just
+        written, store it as the displaced byte, and remove_breakpoint then
+        put that 0xCC back for good — a permanent int3 in the middle of a real
+        instruction, with no error anywhere.
+        """
+        from tests.helpers import create_debugger, teardown, entry_point
+
+        dbg, pid, tid = create_debugger()
+        try:
+            entry = entry_point(dbg)
+            original = dbg.read_memory(entry, 1)
+            self.assertNotEqual(original, b"\xcc",
+                                "target entry is already INT3; pick another site")
+
+            first = dbg.set_breakpoint(entry)
+            second = dbg.set_breakpoint(entry)
+            self.assertEqual(first, second,
+                             "the same address must answer with one bp_id")
+            self.assertEqual(len(dbg._session.breakpoints), 1)
+            self.assertEqual(dbg.read_memory(entry, 1), b"\xcc")
+            self.assertEqual(dbg._session.breakpoints[first][2], original,
+                             "the displaced byte must still be the target's own")
+
+            dbg.remove_breakpoint(first)
+            self.assertEqual(dbg.read_memory(entry, 1), original)
+            self.assertEqual(dbg._session.breakpoints, {})
+        finally:
+            teardown(dbg)
+
+    @unittest.skipUnless(_has_cython, "requires Cython extension")
     def test_remove_all_breakpoints_restores_bytes(self):
         from tests.helpers import create_debugger, teardown, entry_point
 

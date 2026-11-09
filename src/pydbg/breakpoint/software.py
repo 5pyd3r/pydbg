@@ -100,7 +100,18 @@ class SoftwareBreakpointManager:
         self._restore_byte_handle(h_process, addr, original)
 
     def set_handle(self, h_process, addr):
-        """Set INT3 breakpoint using explicit process handle."""
+        """Set INT3 breakpoint using explicit process handle.
+
+        Idempotent per (process, address): asking twice returns the bp_id that
+        is already armed there and writes nothing. The second write used to
+        read back the 0xCC the first one had just planted and store it as the
+        displaced byte, so remove() restored 0xCC for good — a permanent int3
+        in the middle of a real instruction, with no error anywhere.
+        """
+        existing = self.find(addr, h_process)
+        if existing is not None:
+            return existing
+
         try:
             original = _pydbg.read_process_memory(h_process, addr, 1)
             old_prot = _pydbg.virtual_protect_ex(
@@ -219,8 +230,18 @@ class SoftwareBreakpointManager:
 
         return True
 
-    def find(self, addr):
+    def find(self, addr, h_process=None):
+        """bp_id of the software breakpoint at addr, or None.
+
+        h_process narrows the answer to breakpoints armed through that handle.
+        Addresses are process-local: a child and its parent can each hold one
+        at 0x401000, and an address-only search would answer with whichever
+        record came first — arming the wrong process, or none at all.
+        """
         for bp_id, bp_info in self._s.breakpoints.items():
-            if bp_info[0] == "int3" and bp_info[1] == addr:
-                return bp_id
+            if bp_info[0] != "int3" or bp_info[1] != addr:
+                continue
+            if h_process is not None and len(bp_info) > 3 and bp_info[3] != h_process:
+                continue
+            return bp_id
         return None

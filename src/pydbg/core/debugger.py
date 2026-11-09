@@ -1088,8 +1088,19 @@ class Debugger:
     # ── delegated: breakpoints ─────────────────────────────────
 
     def set_breakpoint(self, addr, pid=None):
-        # A software breakpoint writes to the target (INT3 plus a protection
-        # change), so a read-only foreign handle is refused here by name.
+        """Arm an INT3 breakpoint and return its bp_id.
+
+        Idempotent per (process, address): arming an address that already has
+        one returns the existing bp_id instead of writing a second INT3 over
+        the first. 'pid' selects the process; the same address in a child and
+        in the parent are two different breakpoints.
+
+        A software breakpoint writes to the target (INT3 plus a protection
+        change), so a read-only foreign handle is refused here by name.
+
+        Raises:
+            BreakpointError: the INT3 could not be written.
+        """
         h = self._get_process_handle(pid, need=self._NEED_VM_WRITE)
         return self.brk_sw.set_handle(h, addr)
 
