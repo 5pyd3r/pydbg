@@ -193,18 +193,12 @@ class ModuleResolver:
     def _handle_for(self, pid):
         """Process handle for 'pid', or None if it is not a known process.
 
-        'Known' includes processes opened by pid that we are not debugging
-        (Debugger.open_process), so module_at() answers for a debugger's
-        debuggee as well as for our own target and its debug children.
+        The lookup itself belongs to ProcessManager, which is also what the
+        read and write paths ask; this used to be a fourth, slightly different
+        answer to the same question.
         """
-        if pid is None:
-            return None
-        if pid == self._s.pid:
-            return self._s.process_handle
-        child = self._s.child_processes.get(pid)
-        if child:
-            return child.process_handle
-        return self._s.foreign_handles.get(pid)
+        from ..core.process import ProcessManager
+        return ProcessManager(self._s).try_handle(pid)
 
     def get_filename(self, h_module):
         """Resolve a module handle to its filesystem path."""

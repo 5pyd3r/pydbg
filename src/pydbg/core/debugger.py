@@ -27,6 +27,7 @@ from ..module.resolver import ModuleResolver
 from ..symbol.resolver import SymbolResolver
 from ..thread.manager import ThreadManager
 from .event import DebugEvent
+from .process import ProcessManager
 from .session import DebugSession
 from .status import ExitReason, ExitStatus
 from .window_probe import MessageLoopState
@@ -69,6 +70,7 @@ class Debugger:
 
     def __init__(self):
         self._session = DebugSession()
+        self.process = ProcessManager(self._session)
         self.memory = MemoryManager(self._session)
         self.thread = ThreadManager(self._session)
         self.brk_sw = SoftwareBreakpointManager(self._session)
@@ -83,145 +85,32 @@ class Debugger:
         self.instrumenter = Instrumenter(self._session)
         self.stack_walker = StackWalker(self._session)
 
-    # Access rights for a process opened by pid that we are not debugging.
-    # PROCESS_QUERY_INFORMATION | PROCESS_VM_READ is the pair a prior session
-    # proved sufficient to read a real image out of another debugger's
-    # debuggee; QUERY_LIMITED_INFORMATION is the fallback for processes that
-    # refuse the broader query right.
-    _READ_ACCESS = 0x0410
-    _READ_ACCESS_LIMITED = 0x1010
-    # What a foreign handle must carry before a write/terminate path may use
-    # it, so a read-only handle is refused by name instead of failing later as
-    # ERROR_NOACCESS out of the syscall that wanted the right.
-    _NEED_VM_WRITE = 0x0028        # PROCESS_VM_WRITE | PROCESS_VM_OPERATION
-    _NEED_TERMINATE = 0x0001       # PROCESS_TERMINATE
+    # The masks live on ProcessManager; these aliases are what the call sites
+    # in this class still spell.
+    _READ_ACCESS = ProcessManager.READ_ACCESS
+    _READ_ACCESS_LIMITED = ProcessManager.READ_ACCESS_LIMITED
+    _NEED_VM_WRITE = ProcessManager.NEED_VM_WRITE
+    _NEED_TERMINATE = ProcessManager.NEED_TERMINATE
 
     def _get_process_handle(self, pid=None, need=0):
-        """Return a process handle for the main target, a debug child, or a
-        process already opened by pid via open_process().
-
-        Deliberately strict: a pid that was never opened is an error here.
-        This is the handle used by the paths that *write* to a process
-        (write_memory, protect_memory) and by terminate_process, where
-        opening an arbitrary pid on request would turn 'terminate the thing I
-        am debugging' into 'terminate whatever pid was passed'. Reading keeps
-        a separate, more permissive path — see _get_read_handle.
-
-        'need' is the access mask a handle opened by open_process() must carry
-        for this operation. The target's own handle and a debug child's are
-        taken as having it: they come from create_process/DEBUG_PROCESS, not
-        from a mask this class chose.
-        """
-        if pid is None or pid == self._session.pid:
-            return self._session.process_handle
-        child = self._session.child_processes.get(pid)
-        if child is not None:
-            return child.process_handle
-        opened = self._session.foreign_handles.get(pid)
-        if opened is None:
-            raise ProcessError(f"Unknown process pid={pid}")
-        have = self._session.foreign_access.get(pid, 0)
-        if need and (have & need) != need:
-            raise ProcessError(
-                f"pid {pid} was opened with access 0x{have:X}, which does not "
-                f"include 0x{need:X} needed here. close_process({pid}) and "
-                f"reopen it with open_process({pid}, access=0x{have | need:X}).")
-        return opened
+        """Strict resolution: the target, a debug child, or an opened pid."""
+        return self.process.handle(pid, need)
 
     def _get_read_handle(self, pid=None):
-        """Handle for reading: as _get_process_handle, but a pid that is
-        neither the target nor a debug child is opened on demand.
-
-        This is the nested-debugging case. After attach() to a debugger, the
-        memory that matters usually belongs to the process *it* is debugging:
-        that process is not our debug child, it produces no CREATE_PROCESS
-        event for us, so get_child_processes() stays empty and read_memory()
-        used to answer ProcessError("Unknown process pid"). Reaching it meant
-        OpenProcess + ReadProcessMemory through ctypes in the caller.
-        """
-        if pid is None or pid == self._session.pid:
-            return self._session.process_handle
-        child = self._session.child_processes.get(pid)
-        if child is not None:
-            return child.process_handle
-        return self.open_process(pid)
+        """Permissive resolution: opens an unknown pid on demand."""
+        return self.process.read_handle(pid)
 
     def open_process(self, pid, access=None):
-        """Open a handle to any process by pid so its memory can be read.
-
-        Not a debugging relationship: nothing is attached, the process is not
-        suspended, and no debug events will arrive for it. The handle is
-        cached on the session (so repeated read_memory(pid=) calls reuse it)
-        and released by close_process() or detach().
-
-        The default access mask is read-only, and that is what the rest of
-        this class then allows: read_memory, read_memory_safe, query_memory,
-        enum_regions, enum_modules and module_at work by pid, while
-        write_memory, protect_memory, set_breakpoint and terminate_process
-        keep requiring either the debug target, a debug child, or a handle
-        opened here with a mask that grants it. Pass access=0x1F0FFF
-        (PROCESS_ALL_ACCESS) when the caller really does mean to patch or
-        breakpoint a process it is not debugging.
-
-        Args:
-            pid: Process id.
-            access: Win32 access mask. Defaults to PROCESS_VM_READ |
-                PROCESS_QUERY_INFORMATION, retried with
-                PROCESS_QUERY_LIMITED_INFORMATION.
-
-        Returns:
-            The process handle.
-
-        Raises:
-            ProcessError: the process could not be opened — it does not
-                exist, or it exists but refuses this process the read rights.
-        """
-        cached = self._session.foreign_handles.get(pid)
-        if cached is not None:
-            # A cached handle is only good for the rights it carries. Handing
-            # it back for a wider request would fail later at the first write,
-            # as ERROR_NOACCESS from VirtualProtectEx — which names none of
-            # this. Reopen instead when the caller asks for different rights.
-            if access is None or self._session.foreign_access.get(pid) == access:
-                return cached
-            self.close_process(pid)
-
-        masks = ((access,) if access is not None
-                 else (self._READ_ACCESS, self._READ_ACCESS_LIMITED))
-        last = None
-        for mask in masks:
-            try:
-                handle = _pydbg.open_process(pid, mask)
-            except OSError as e:
-                last = e
-                continue
-            self._session.foreign_handles[pid] = handle
-            self._session.foreign_access[pid] = mask
-            return handle
-
-        raise ProcessError(
-            f"cannot open pid {pid} for reading: {last} (tried access mask(s) "
-            f"{', '.join(f'0x{m:X}' for m in masks)}). The pid may not exist, "
-            f"or it may be a process this one is not allowed to read.")
+        """Open a handle to a process by pid. See ProcessManager.open()."""
+        return self.process.open(pid, access)
 
     def close_process(self, pid):
         """Close a handle opened by open_process(). No-op if never opened."""
-        handle = self._session.foreign_handles.pop(pid, None)
-        self._session.foreign_access.pop(pid, None)
-        if handle is None:
-            return
-        try:
-            _pydbg.close_handle(handle)
-        except OSError as e:
-            raise ProcessError(f"CloseHandle for pid {pid}: {e}")
+        return self.process.close(pid)
 
     def _close_foreign_handles(self):
         """Release every handle open_process() handed out. Never raises."""
-        for pid in list(self._session.foreign_handles):
-            try:
-                self.close_process(pid)
-            except ProcessError:
-                pass
+        self.process.release_all()
 
     # ── lifecycle ──────────────────────────────────────────────
 
