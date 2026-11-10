@@ -36,6 +36,18 @@ class SymbolResolver:
             raise PydbgError(f"SymCleanup failed: {e}")
         self._initialized = False
 
+    def teardown(self):
+        """End the dbghelp session. Returns [(what, why)] on failure."""
+        try:
+            self.cleanup()
+        except PydbgError as exc:
+            return [("dbghelp session", str(exc))]
+        return []
+
+    def discard(self):
+        """Drop the initialized flag without calling SymCleanup (target gone)."""
+        self._initialized = False
+
     def from_name(self, name):
         if not self._initialized:
             raise PydbgError("SymbolResolver not initialized. Call initialize() first.")

@@ -34,6 +34,7 @@ from .exceptions import (
     MemError,
     ProcessError,
     PydbgError,
+    TeardownError,
     ThreadError,
     TimeoutError,
 )
@@ -61,6 +62,7 @@ __all__ = [
     "ThreadError",
     "BreakpointError",
     "TimeoutError",
+    "TeardownError",
     "EXCEPTION_ACCESS_VIOLATION",
     "EXCEPTION_BREAKPOINT",
     "EXCEPTION_SINGLE_STEP",

@@ -79,6 +79,27 @@ class InlineHook:
         del self._hooks[target_addr]
         self._free(mem, trampoline.addr, trampoline.size)
 
+    def teardown(self):
+        """Restore every detoured function and free its trampoline.
+
+        Returns [(what, why)]; a detour that could not be undone stays in
+        _hooks so list_active() keeps telling the truth.
+        """
+        problems = []
+        for target_addr in list(self._hooks):
+            try:
+                self.restore(self._hooks[target_addr])
+            except PydbgError as exc:
+                problems.append((f"inline hook at 0x{target_addr:X}", str(exc)))
+        return problems
+
+    def discard(self):
+        """Forget the detours without touching the target (it is gone)."""
+        self._hooks.clear()
+
+    def list_active(self):
+        return dict(self._hooks)
+
     @staticmethod
     def _build_abs_jmp(from_addr, to_addr):
         """Build a 5-byte near JMP (E9 rel32) to an absolute address.
