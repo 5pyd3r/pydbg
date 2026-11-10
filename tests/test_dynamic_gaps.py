@@ -158,7 +158,9 @@ class TestSafeReadAndRegions(DynamicGapTestCase):
         a read per region across the address space. It has to fail where the
         number entered, not halfway through the address space.
         """
-        with self.assertRaises(ValueError) as caught:
+        from pydbg.exceptions import MemError
+
+        with self.assertRaises(MemError) as caught:
             self.dbg.read_memory_safe(0, 0x40000000)          # 1 GiB
         self.assertIn("max_bytes", str(caught.exception))
 

@@ -110,9 +110,15 @@ class MemoryManager:
         Returns a list of region dicts (base_address, allocation_base,
         allocation_protect, region_size, state, protect, type), ascending.
         Unlike query_handle this walks the whole chain, and reaching the end
-        of the address space is not an error.
+        of the address space is not an error. A failing VirtualQueryEx is not
+        an answer either — it becomes a MemError like every other memory
+        operation, instead of a raw OSError escaping the public API.
         """
-        return _pydbg.virtual_query_all(h_process, start, max_addr)
+        try:
+            return _pydbg.virtual_query_all(h_process, start, max_addr)
+        except OSError as e:
+            raise MemError(
+                f"VirtualQueryEx walk from 0x{start:X}: {e}") from e
 
     def read_safe_handle(self, h_process, addr, size, max_bytes=DEFAULT_MAX_READ):
         """Read [addr, addr+size) without losing the readable parts.
@@ -137,7 +143,7 @@ class MemoryManager:
         if size <= 0:
             return MemoryRead(addr, size, b"", [])
         if max_bytes is not None and size > max_bytes:
-            raise ValueError(
+            raise MemError(
                 f"refusing a {size}-byte read at 0x{addr:X}: over the "
                 f"{max_bytes}-byte limit (pass max_bytes= to raise it)")
 

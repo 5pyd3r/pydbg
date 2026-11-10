@@ -236,7 +236,7 @@ class TestRunLoop(unittest.TestCase):
 
     def test_run_with_callback(self):
         """Verify run() dispatches events to callback and returns exit code."""
-        from pydbg import Debugger
+        from pydbg import Debugger, ExitStatus
 
         dbg = Debugger()
         pid, tid = dbg.create_process(TEST_TARGET_PATH)
@@ -246,10 +246,10 @@ class TestRunLoop(unittest.TestCase):
         def on_event(event):
             events.append(event.type)
 
-        exit_code = dbg.run(on_event, timeout_ms=5000)
+        status = dbg.run(on_event, timeout_ms=5000)
 
         self.assertIn("CREATE_PROCESS", events)
-        self.assertIsInstance(exit_code, int)
+        self.assertIsInstance(status, ExitStatus)
 
 
 class TestThreadEnumeration(unittest.TestCase):
@@ -425,7 +425,7 @@ class TestFailureIsVisible(unittest.TestCase):
         """Without max_idle_timeouts, idling is tolerated (old behaviour)."""
         from unittest import mock
 
-        from pydbg import Debugger
+        from pydbg import Debugger, ExitReason
 
         dbg = Debugger()
         calls = {"n": 0}
@@ -446,10 +446,12 @@ class TestFailureIsVisible(unittest.TestCase):
 
         with mock.patch.object(Debugger, "wait_event", side_effect=fake_wait):
             with mock.patch.object(Debugger, "continue_event", return_value=None):
-                code = dbg.run(lambda e: None, timeout_ms=10, max_idle_timeouts=None)
+                status = dbg.run(lambda e: None, timeout_ms=10,
+                                 max_idle_timeouts=None)
 
         self.assertEqual(calls["n"], 5, "loop did not simply continue idling")
-        self.assertEqual(code, 7)
+        self.assertEqual(status.exit_code, 7)
+        self.assertEqual(status.reason, ExitReason.TARGET_EXITED)
 
     @unittest.skipUnless(_has_cython, "optional dependency: Cython extension")
     def test_get_registers_accepts_thread_id(self):
@@ -596,6 +598,46 @@ class TestAccessViolationPayload(unittest.TestCase):
                 dbg.terminate_process()
             except Exception:
                 pass
+
+
+class TestErrorContract(unittest.TestCase):
+    """A failure the caller can act on, or nothing at all."""
+
+    def test_continue_event_does_not_swallow_a_real_failure(self):
+        from unittest import mock
+
+        from pydbg import Debugger, ProcessError
+
+        dbg = Debugger()
+        with mock.patch("pydbg.core.debugger._pydbg.continue_debug_event",
+                        side_effect=OSError(5, "Access is denied")):
+            with self.assertRaises(ProcessError):
+                dbg.continue_event(1, 2)
+
+    def test_continue_event_tolerates_an_event_that_is_no_longer_paused(self):
+        from unittest import mock
+
+        from pydbg import Debugger
+
+        dbg = Debugger()
+        with mock.patch("pydbg.core.debugger._pydbg.continue_debug_event",
+                        side_effect=OSError(87, "The parameter is incorrect")):
+            dbg.continue_event(1, 2)      # the usual child-already-exited path
+
+    def test_a_callback_stop_is_not_reported_as_an_exit_code(self):
+        from unittest import mock
+
+        from pydbg import Debugger, ExitReason
+        from pydbg.core.event import DebugEvent
+
+        dbg = Debugger()
+        event = DebugEvent({"event_name": "LOAD_DLL", "pid": 1, "tid": 2})
+        with mock.patch.object(Debugger, "wait_event", side_effect=[event]):
+            with mock.patch.object(Debugger, "continue_event", return_value=None):
+                status = dbg.run(lambda e: False, timeout_ms=10)
+
+        self.assertIsNone(status.exit_code, "the target never exited")
+        self.assertEqual(status.reason, ExitReason.STOPPED_BY_CALLBACK)
 
 
 if __name__ == "__main__":

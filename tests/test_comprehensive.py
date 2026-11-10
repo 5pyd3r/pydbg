@@ -934,7 +934,7 @@ class TestDebuggerFullLifecycle(unittest.TestCase):
 
     @unittest.skipUnless(_has_cython, "optional dependency: Cython extension")
     def test_run_loop_returns_exit_code(self):
-        from pydbg import Debugger
+        from pydbg import Debugger, ExitStatus
         dbg = Debugger()
         pid, tid = dbg.create_process(TEST_TARGET_PATH)
 
@@ -943,8 +943,9 @@ class TestDebuggerFullLifecycle(unittest.TestCase):
         def on_event(event):
             events.append(event.type)
 
-        exit_code = dbg.run(on_event, timeout_ms=5000)
-        self.assertIsInstance(exit_code, int)
+        status = dbg.run(on_event, timeout_ms=5000)
+        self.assertIsInstance(status, ExitStatus)
+        self.assertIsNotNone(status.exit_code)
         self.assertIn("CREATE_PROCESS", events)
 
     @unittest.skipUnless(_has_cython, "optional dependency: Cython extension")
