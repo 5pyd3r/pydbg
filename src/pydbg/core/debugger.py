@@ -241,9 +241,8 @@ class Debugger:
         self._session.pid = pid
         self._session.tid = tid
         self._session.terminated = False
-        self._session.target_arch = self._detect_target_arch(h_proc)
-        self._session.register_pid_arch(pid, self._session.target_arch)
-        self._session.register_tid_arch(tid, self._session.target_arch)
+        self._session.register_pid_arch(pid, self._detect_target_arch(h_proc))
+        self._session.register_thread(tid, pid)
         return (pid, tid)
 
     def _detect_target_arch(self, h_process):
@@ -275,18 +274,17 @@ class Debugger:
         try:
             h_proc = _pydbg.open_process(pid)
             self._session.process_handle = h_proc
-            self._session.target_arch = self._detect_target_arch(h_proc)
+            self._session.register_pid_arch(pid, self._detect_target_arch(h_proc))
         except OSError:
             try:
                 q = _pydbg.open_process(pid, 0x1000)  # PROCESS_QUERY_LIMITED_INFORMATION
                 try:
-                    self._session.target_arch = self._detect_target_arch(q)
+                    self._session.register_pid_arch(
+                        pid, self._detect_target_arch(q))
                 finally:
                     _pydbg.close_handle(q)
             except OSError:
-                pass  # arch stays default; wait_event/continue_event still usable
-
-        self._session.register_pid_arch(pid, self._session.target_arch)
+                pass  # arch stays unknown; wait_event/continue_event still usable
 
         # create_process() leaves a session tid behind; attach() did not, so
         # anything relying on a default thread (the manual breakpoint helpers,
@@ -486,12 +484,10 @@ class Debugger:
             self._session.record_module(
                 event.pid, event.raw.get("dll_base", 0))
 
-        # Track per-thread architecture so cross-arch children resolve the
-        # correct register context.
-        if event.type == "CREATE_THREAD":
-            self._session.register_tid_arch(
-                event.tid, self._session.pid_arch.get(event.pid) or self._session.target_arch
-            )
+        # Every event names the process its thread belongs to. Recording it
+        # here (not only on CREATE_THREAD) covers threads that existed before
+        # attach and therefore never produce a creation event.
+        self._session.register_thread(event.tid, event.pid)
 
         # Replicate process-wide hardware breakpoints to newly created threads
         # of THIS process (DR registers are per-thread; child processes must
@@ -518,8 +514,7 @@ class Debugger:
         # The main process's CREATE_PROCESS (idempotent; covers attach mode
         # where create_process wasn't used).
         if event.type == "CREATE_PROCESS" and event.pid == self._session.pid:
-            self._session.register_pid_arch(event.pid, self._session.target_arch)
-            self._session.register_tid_arch(event.tid, self._session.target_arch)
+            self._session.register_thread(event.tid, event.pid)
 
         # Attach mode: open the main thread handle from the CREATE_PROCESS
         # event so hardware breakpoints work after attach().
@@ -627,13 +622,17 @@ class Debugger:
             base_of_image=event.raw.get("base_of_image", 0),
         )
         # Detect the child's architecture so its threads get the right
-        # register context even when it differs from the parent's.
+        # register context even when it differs from the parent's. A failed
+        # query leaves the child unregistered and arch_for_pid falls back to
+        # the parent's — wrong only for a cross-arch child whose header could
+        # not be read, and that is a read failure, not a silent 64-bit guess.
         if h_proc:
-            info.target_arch = self._detect_target_arch(h_proc) or self._session.target_arch
-        else:
-            info.target_arch = self._session.target_arch
-        self._session.register_pid_arch(event.pid, info.target_arch)
-        self._session.register_tid_arch(event.tid, info.target_arch)
+            try:
+                self._session.register_pid_arch(
+                    event.pid, self._detect_target_arch(h_proc))
+            except ProcessError:
+                pass
+        self._session.register_thread(event.tid, event.pid)
         self._session.child_processes[event.pid] = info
 
     def _unregister_child(self, event):

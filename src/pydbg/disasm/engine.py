@@ -158,31 +158,39 @@ class DisasmEngine:
         # that set of groups; see _group_names.
         self._group_cache = {}
 
-    def _init_capstone(self):
-        if self._cs is not None:
-            return
-        if capstone is None:
-            raise PydbgError("capstone is not installed")
-        if self._requested_mode == "auto":
-            # Use session's target architecture if available, else host arch
-            if self._session is not None and hasattr(self._session, 'target_arch'):
-                self._arch_mode = "x64" if self._session.target_arch == 64 else "x86"
-            else:
-                import struct
-                self._arch_mode = "x64" if struct.calcsize("P") == 8 else "x86"
-        elif self._requested_mode in ("x86", "x64"):
-            self._arch_mode = self._requested_mode
-        else:
+    def _mode(self):
+        """The mode to disassemble in, decided now rather than at first use.
+
+        'auto' follows the session's target architecture on every call. The
+        engine used to latch the mode the first time it decoded anything, and
+        a Debugger builds its engine before any target exists — so a WOW64
+        target reached through attach() was disassembled as 64-bit for the rest
+        of the session, silently.
+        """
+        if self._requested_mode in ("x86", "x64"):
+            return self._requested_mode
+        if self._requested_mode != "auto":
             raise PydbgError(
                 f"Unknown mode '{self._requested_mode}'. Expected 'auto', 'x86', or 'x64'."
             )
-        cs_mode = capstone.CS_MODE_64 if self._arch_mode == "x64" else capstone.CS_MODE_32
+        if self._session is not None:
+            return "x64" if self._session.target_arch == 64 else "x86"
+        import struct
+        return "x64" if struct.calcsize("P") == 8 else "x86"
+
+    def _init_capstone(self):
+        if capstone is None:
+            raise PydbgError("capstone is not installed")
+        mode = self._mode()
+        if self._cs is not None and self._arch_mode == mode:
+            return
+        self._arch_mode = mode
+        cs_mode = capstone.CS_MODE_64 if mode == "x64" else capstone.CS_MODE_32
         self._cs = capstone.Cs(capstone.CS_ARCH_X86, cs_mode)
         self._cs.detail = True
 
     def mode(self):
-        if self._cs is None:
-            self._init_capstone()
+        self._init_capstone()
         return self._arch_mode
 
     def disasm(self, addr, data):

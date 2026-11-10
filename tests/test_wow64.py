@@ -504,15 +504,53 @@ class TestWow64Attach(unittest.TestCase):
 
 
 class TestWow64ArchMapping(unittest.TestCase):
-    def test_arch_for_tid_falls_back_to_main(self):
+    def test_a_thread_has_its_process_architecture(self):
         from pydbg.core.session import DebugSession
 
         s = DebugSession()
-        s.target_arch = 32
+        s.target_arch = 32              # the answer before any target exists
         s.register_pid_arch(100, 32)
-        s.register_tid_arch(200, 64)
-        self.assertEqual(s.arch_for_tid(200), 64)
-        self.assertEqual(s.arch_for_tid(999), 32)  # fallback to main
+        s.register_pid_arch(200, 64)    # a 64-bit child
+        s.register_thread(300, 100)
+        s.register_thread(400, 200)
+
+        self.assertEqual(s.arch_for_tid(300), 32)
+        self.assertEqual(s.arch_for_tid(400), 64)
+        self.assertEqual(s.arch_for_tid(999), 32)  # unknown -> main target
+
+    def test_target_arch_is_derived_not_copied(self):
+        """One store: rewriting the pid's entry moves target_arch with it."""
+        from pydbg.core.session import DebugSession
+
+        s = DebugSession()
+        s.pid = 100
+        s.register_pid_arch(100, 32)
+        self.assertEqual(s.target_arch, 32)
+        s.register_pid_arch(100, 64)
+        self.assertEqual(s.target_arch, 64)
+        self.assertNotIn('target_arch', s.__dict__)
+
+    def test_disassembler_follows_the_target_after_it_appears(self):
+        """A Debugger builds its engine before any target exists.
+
+        The engine used to latch the host's mode on first use, so a WOW64
+        target reached later was decoded as 64-bit for the rest of the session.
+        """
+        import struct
+        from pydbg.core.session import DebugSession
+        from pydbg.disasm.engine import DisasmEngine
+
+        host_mode = "x64" if struct.calcsize("P") == 8 else "x86"
+        other_mode = "x86" if host_mode == "x64" else "x64"
+        other_arch = 32 if other_mode == "x86" else 64
+
+        s = DebugSession()
+        engine = DisasmEngine(session=s)
+        self.assertEqual(engine.mode(), host_mode)
+
+        s.pid = 100
+        s.register_pid_arch(100, other_arch)
+        self.assertEqual(engine.mode(), other_mode)
 
 
 @unittest.skipUnless(_wow64_available(), "environment: 64-bit host")

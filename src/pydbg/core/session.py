@@ -13,7 +13,6 @@ class ChildProcessInfo:
     thread_handle: int          # 主线程句柄
     base_of_image: int = 0      # 加载基址
     exit_code: int | None = None  # 退出后填入
-    target_arch: int = 0        # 32/64, 检测到后填入
 
 
 @dataclass
@@ -25,7 +24,6 @@ class DebugSession:
     pid: int | None = None
     tid: int | None = None
     host_arch: int = struct.calcsize("P") * 8  # 32 or 64
-    target_arch: int = struct.calcsize("P") * 8  # 32 or 64, auto-detected
     bp_counter: int = 0
     breakpoints: dict = field(default_factory=dict)  # id -> (type, addr, extra)
     # Breakpoint lifecycle: tid -> (bp_id, addr, original_bytes)
@@ -47,9 +45,13 @@ class DebugSession:
     foreign_handles: dict = field(default_factory=dict)
     foreign_access: dict = field(default_factory=dict)
 
-    # Per-process/per-thread architecture for child-process dispatch.
-    pid_arch: dict = field(default_factory=dict)   # pid -> target_arch (32/64)
-    tid_arch: dict = field(default_factory=dict)   # tid -> target_arch
+    # The one place a process's architecture lives: pid -> 32 | 64. A thread
+    # has no architecture of its own, only its process's — see tid_pid below.
+    # The key None holds the answer used before any target exists, which is
+    # also what target_arch answers then.
+    pid_arch: dict = field(default_factory=dict)
+    # tid -> pid, so arch_for_tid can reach the process a thread belongs to.
+    tid_pid: dict = field(default_factory=dict)
 
     # Modules observed through debug events: pid -> {base_address: record}.
     # CREATE_PROCESS and LOAD_DLL name every image the loader maps, with no
@@ -90,16 +92,51 @@ class DebugSession:
             return []
         return [mods[base] for base in sorted(mods)]
 
+    @property
+    def target_arch(self):
+        """The main target's architecture: 32 or 64.
+
+        Derived from pid_arch every time, so there is no second copy to drift
+        out of step. With no target yet this answers the architecture recorded
+        before one existed, or the host's — what an unattached disassembler
+        should assume.
+        """
+        if self.pid is not None:
+            arch = self.pid_arch.get(self.pid)
+            if arch:
+                return arch
+        return self.pid_arch.get(None) or self.host_arch
+
+    @target_arch.setter
+    def target_arch(self, arch):
+        """Record the architecture. Keyed by pid, or None before there is one."""
+        self.pid_arch[self.pid] = arch
+
     def register_pid_arch(self, pid, arch):
         """Record the architecture (32/64) of a process by pid."""
+        if pid is None:
+            return
         self.pid_arch[pid] = arch
 
-    def register_tid_arch(self, tid, arch):
-        """Record the architecture of a thread by tid."""
-        self.tid_arch[tid] = arch
+    def register_thread(self, tid, pid):
+        """Record which process a thread belongs to (threads have no arch)."""
+        if tid is None or pid is None:
+            return
+        self.tid_pid[tid] = pid
+
+    def arch_for_pid(self, pid):
+        """Architecture of 'pid', falling back to the main target's."""
+        if pid is not None:
+            arch = self.pid_arch.get(pid)
+            if arch:
+                return arch
+        return self.target_arch
 
     def arch_for_tid(self, tid):
-        """Return the architecture for a thread id, falling back to the main
-        target architecture when the thread is not tracked (e.g. a thread
-        created before attach, or one not yet observed via a debug event)."""
-        return self.tid_arch.get(tid) or self.target_arch
+        """Architecture of the process 'tid' belongs to.
+
+        A thread created before attach, or one never seen in a debug event, is
+        not in tid_pid; the main target's architecture is the only honest
+        answer left, and it is the right one for every single-process session.
+        """
+        return self.arch_for_pid(self.tid_pid.get(tid))
