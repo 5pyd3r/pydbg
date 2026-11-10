@@ -30,6 +30,9 @@ class DebugSession:
     breakpoints: dict = field(default_factory=dict)  # id -> (type, addr, extra)
     # Breakpoint lifecycle: tid -> (bp_id, addr, original_bytes)
     pending_single_step: dict = field(default_factory=dict)
+    # Set once the main target has been terminated: the handles stay open so
+    # get_exit_code() still answers, but nothing is left to detach from.
+    terminated: bool = False
 
     # Child process debugging
     debug_children: bool = False

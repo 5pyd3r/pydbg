@@ -67,6 +67,26 @@ class IATHook:
         ptr_sz = self._ptr_size()
         return int.from_bytes(mem.read(iat_addr, ptr_sz), 'little')
 
+    def teardown(self):
+        """Put every original import address back. Returns [(what, why)].
+
+        Entries that could not be restored are left in _hooks so a later
+        teardown() can retry, and so list_hooks() keeps telling the truth.
+        """
+        problems = []
+        for key in list(self._hooks):
+            iat_addr = self._hooks[key][0]
+            try:
+                self.restore(*key)
+            except PydbgError as exc:
+                problems.append((f"IAT {key[0]}!{key[1]} at 0x{iat_addr:X}",
+                                 str(exc)))
+        return problems
+
+    def discard(self):
+        """Forget the hooks without touching the target (it is gone)."""
+        self._hooks.clear()
+
     def list_hooks(self):
         return dict(self._hooks)
 

@@ -230,6 +230,43 @@ class SoftwareBreakpointManager:
 
         return True
 
+    def teardown(self):
+        """Put every displaced byte back. Returns [(what, why)] for failures.
+
+        Never raises: close() has to keep walking the chain, so a breakpoint
+        whose page is gone comes back as a reported problem instead of
+        aborting the rest of the cleanup.
+        """
+        problems = []
+        for bp_id in sorted(self._s.breakpoints):
+            bp_info = self._s.breakpoints[bp_id]
+            if bp_info[0] != "int3":
+                continue
+            addr = bp_info[1]
+            original = bp_info[2]
+            h_process = bp_info[3] if len(bp_info) > 3 else self._s.process_handle
+            try:
+                self._restore_byte_handle(h_process, addr, original)
+            except BreakpointError as exc:
+                problems.append((f"breakpoint {bp_id} at 0x{addr:X}", str(exc)))
+        self.discard()
+        return problems
+
+    def discard(self):
+        """Forget every breakpoint without touching the target.
+
+        For the terminate path: the process is gone, so there is no byte to put
+        back, but the records must not outlive it and pretend to be armed.
+        """
+        for bp_id in [bid for bid, info in self._s.breakpoints.items()
+                      if info[0] == "int3"]:
+            self._s.breakpoints.pop(bp_id, None)
+        self.lost.clear()
+        self.hits.clear()
+        self.last_error = None
+        self.degraded_hits = 0
+        self._s.pending_single_step.clear()
+
     def find(self, addr, h_process=None):
         """bp_id of the software breakpoint at addr, or None.
 

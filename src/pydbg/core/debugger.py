@@ -15,9 +15,11 @@ from ..breakpoint.software import SoftwareBreakpointManager
 from ..exceptions import (
     BreakpointError,
     ProcessError,
+    TeardownError,
     ThreadError,
     TimeoutError,
 )
+from ..instrument.instrumenter import Instrumenter
 from ..memory.manager import MemoryManager
 from ..module.resolver import ModuleResolver
 from ..symbol.resolver import SymbolResolver
@@ -62,6 +64,7 @@ class Debugger:
         self.step_tracer = StepTracer(self._session)
         self.hook_iat = IATHook(self._session)
         self.hook_inline = InlineHook(self._session)
+        self.instrumenter = Instrumenter(self._session)
         self.stack_walker = StackWalker(self._session)
 
     # Access rights for a process opened by pid that we are not debugging.
@@ -237,6 +240,7 @@ class Debugger:
         self._session.thread_handle = h_thr
         self._session.pid = pid
         self._session.tid = tid
+        self._session.terminated = False
         self._session.target_arch = self._detect_target_arch(h_proc)
         self._session.register_pid_arch(pid, self._session.target_arch)
         self._session.register_tid_arch(tid, self._session.target_arch)
@@ -262,6 +266,7 @@ class Debugger:
         except OSError as e:
             raise ProcessError(f"Failed to attach to pid {pid}: {e}")
         self._session.pid = pid
+        self._session.terminated = False
 
         # Open process handle so memory/thread operations work immediately.
         # If full access fails, still detect the target architecture via a
@@ -294,36 +299,128 @@ class Debugger:
         except (OSError, ProcessError):
             pass
 
-    def detach(self, pid=None):
-        target = pid or self._session.pid
-        if target is None:
-            raise ProcessError("No process to detach from")
+    # What close() undoes, in the order it undoes it. Hooks go first because
+    # they redirect control flow into memory that later steps release; the
+    # INT3s go after the debug registers, because a single-step that still has
+    # a stale DR slot fires inside the code that was just restored.
+    _TEARDOWN_ORDER = (
+        "hook_iat", "hook_inline", "instrumenter",
+        "brk_hw", "brk_sw", "symbols",
+    )
+
+    def close(self):
+        """Undo everything this session installed, then let go of the target.
+
+        Each manager undoes its own work (ADR-0004). Every step is attempted
+        even when an earlier one fails, and what could not be undone comes back
+        as one TeardownError: stopping at the first failure is how a target is
+        left with a detour pointing into freed memory and nobody looking.
+
+        Idempotent — managers forget what they already undid.
+        """
+        problems = []
+        for name in self._TEARDOWN_ORDER:
+            teardown = getattr(getattr(self, name, None), "teardown", None)
+            if teardown is None:
+                continue
+            try:
+                problems.extend(teardown() or [])
+            except Exception as exc:      # a teardown must not abort the chain
+                problems.append((name, str(exc)))
         try:
-            _pydbg.debug_active_process_stop(target)
+            self._stop_debugging(self._session.pid)
+        except ProcessError as exc:
+            problems.append(("DebugActiveProcessStop", str(exc)))
+        finally:
+            self._release_handles()
+        if problems:
+            raise TeardownError(problems)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        try:
+            self.close()
+        except TeardownError:
+            # Never mask the exception that brought us here; on a clean exit
+            # the failure is the thing to report.
+            if exc_type is None:
+                raise
+        return False
+
+    def _stop_debugging(self, pid):
+        """Stop being the debugger of 'pid'. No-op once the target is gone."""
+        if pid is None or self._session.terminated:
+            return
+        if pid == self._session.pid and self._session.process_handle is None:
+            return  # the main target is already released; nothing to detach
+        try:
+            _pydbg.debug_active_process_stop(pid)
         except OSError as e:
-            raise ProcessError(f"Failed to detach from pid {target}: {e}")
-        # Close handles opened by pid too, whichever process is being detached:
-        # they belong to this session, not to the process that was detached.
+            raise ProcessError(f"Failed to detach from pid {pid}: {e}")
+
+    def _release_handles(self):
+        """Close every handle this session opened. Never raises."""
         self._close_foreign_handles()
-        # Close main-session handles so repeated attach/detach cycles don't leak.
-        if target == self._session.pid:
-            for name in ("thread_handle", "process_handle"):
-                h = getattr(self._session, name, None)
+        for child in self._session.child_processes.values():
+            for attr in ("thread_handle", "process_handle"):
+                h = getattr(child, attr, None)
                 if h:
                     try:
                         _pydbg.close_handle(h)
                     except OSError:
                         pass
-                    setattr(self._session, name, None)
+                    setattr(child, attr, None)
+        self._session.child_processes.clear()
+        for name in ("thread_handle", "process_handle"):
+            h = getattr(self._session, name, None)
+            if h:
+                try:
+                    _pydbg.close_handle(h)
+                except OSError:
+                    pass
+                setattr(self._session, name, None)
+
+    def detach(self, pid=None):
+        """Stop debugging. Detaching the main target is close()."""
+        if pid is None and self._session.pid is None:
+            raise ProcessError("No process to detach from")
+        if pid is None or pid == self._session.pid:
+            self.close()
+            return
+        self._stop_debugging(pid)
+        child = self._session.child_processes.pop(pid, None)
+        if child is not None:
+            for attr in ("thread_handle", "process_handle"):
+                h = getattr(child, attr, None)
+                if h:
+                    try:
+                        _pydbg.close_handle(h)
+                    except OSError:
+                        pass
 
     def terminate_process(self, exit_code=1, pid=None):
+        """Kill the target and forget what was installed in it.
+
+        The bytes cannot be put back after a kill, so this discards the records
+        instead of pretending to undo them. The process handle stays open —
+        reading the exit code is the one thing it is still good for; call
+        close() to release it.
+        """
         h = self._get_process_handle(pid, need=self._NEED_TERMINATE)
         try:
             _pydbg.terminate_process(h, exit_code)
         except OSError as e:
             raise ProcessError(f"TerminateProcess failed: {e}")
-        # Drain events only for main process
-        if pid is None or pid == self._session.pid:
+        main = pid is None or pid == self._session.pid
+        if main:
+            self._session.terminated = True
+            for name in self._TEARDOWN_ORDER:
+                discard = getattr(getattr(self, name, None), "discard", None)
+                if discard is not None:
+                    discard()
+            # Drain events only for main process
             for _ in range(50):
                 try:
                     event_dict = _pydbg.wait_for_debug_event(2000)

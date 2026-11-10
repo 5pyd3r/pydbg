@@ -20,3 +20,18 @@ class BreakpointError(PydbgError):
 
 class TimeoutError(PydbgError):
     """Timeout waiting for debug event."""
+
+
+class TeardownError(PydbgError):
+    """Something installed into the target could not be undone.
+
+    close() finishes every step regardless and reports the failures together:
+    stopping at the first one is how a target ends up with an INT3 in it while
+    nobody is looking.
+    """
+
+    def __init__(self, problems):
+        self.problems = list(problems)
+        detail = "; ".join(f"{where}: {why}" for where, why in self.problems)
+        super().__init__(
+            f"{len(self.problems)} step(s) could not be undone: {detail}")

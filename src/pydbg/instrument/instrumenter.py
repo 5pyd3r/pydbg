@@ -55,6 +55,25 @@ class Instrumenter:
     def active(self) -> dict:
         return {addr: info.to_dict() for addr, info in self._hooks.items()}
 
+    def teardown(self):
+        """Remove every probe: original bytes back, then stub memory released.
+
+        Returns [(what, why)]; a probe that could not be undone stays in
+        _hooks so active keeps telling the truth.
+        """
+        problems = []
+        for target_addr in list(self._hooks):
+            try:
+                self.restore(target_addr)
+            except PydbgError as exc:
+                problems.append((f"instrumentation at 0x{target_addr:X}",
+                                 str(exc)))
+        return problems
+
+    def discard(self):
+        """Forget the probes without touching the target (it is gone)."""
+        self._hooks.clear()
+
     def install(self, target_addr, c_source=None, template=None, symbols=None):
         """Install an instrumentation probe at target_addr.
 

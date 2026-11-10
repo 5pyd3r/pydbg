@@ -165,6 +165,32 @@ class HardwareBreakpointManager:
         self._s.breakpoints[bp_id] = ("hw", addr, slot, scope, condition, length)
         return bp_id
 
+    def teardown(self):
+        """Disarm every debug-register slot on every thread.
+
+        Returns [(what, why)] for slots that could not be cleared. Never
+        raises: the rest of the cleanup still has to run.
+        """
+        problems = []
+        for bp_id in sorted(self._s.breakpoints):
+            bp_info = self._s.breakpoints[bp_id]
+            if bp_info[0] != "hw":
+                continue
+            slot, scope = bp_info[2], bp_info[3]
+            try:
+                self._disarm_scope(scope, slot)
+            except Exception as exc:      # a dead thread must not abort teardown
+                problems.append(
+                    (f"hardware breakpoint {bp_id} slot {slot}", str(exc)))
+        self.discard()
+        return problems
+
+    def discard(self):
+        """Forget hardware breakpoints without touching the target."""
+        for bp_id in [bid for bid, info in self._s.breakpoints.items()
+                      if info[0] == "hw"]:
+            self._s.breakpoints.pop(bp_id, None)
+
     def clear(self, slot):
         """Disarm a slot on all threads. The bp record is left for remove()."""
         self._disarm_scope(None, slot)
