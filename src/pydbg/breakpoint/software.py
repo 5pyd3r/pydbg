@@ -2,6 +2,7 @@
 
 from .. import _pydbg
 from ..exceptions import BreakpointError
+from .outcome import HandleOutcome
 
 
 class SoftwareBreakpointManager:
@@ -14,9 +15,9 @@ class SoftwareBreakpointManager:
 
     def __init__(self, session):
         self._s = session
-        # Diagnostics for hits we could not complete (see handle_breakpoint_hit).
+        # Why the last hit could not be completed (read when handle_breakpoint_hit
+        # answers DEGRADED).
         self.last_error = None
-        self.degraded_hits = 0
         # bp_ids whose INT3 is no longer in the target (see verify()).
         self.lost = set()
         # bp_id -> times the breakpoint was delivered to us since it was set.
@@ -155,11 +156,14 @@ class SoftwareBreakpointManager:
     def handle_breakpoint_hit(self, tid, addr):
         """Handle breakpoint lifecycle: remove INT3, set single-step, schedule restore.
 
-        Returns True if a breakpoint was handled, False otherwise.
+        Returns a HandleOutcome: NOT_MINE when the address is not one of our
+        breakpoints, HANDLED when the thread is ready to be continued, and
+        DEGRADED when the INT3 was re-armed but the thread could not be
+        prepared (last_error says why).
         """
         bp_id = self.find(addr)
         if bp_id is None:
-            return False
+            return HandleOutcome.NOT_MINE
 
         # Count the hit here, before the rewind is attempted. The exception
         # was delivered for one of our breakpoints, so the site DID run —
@@ -197,27 +201,26 @@ class SoftwareBreakpointManager:
             # Cannot set TF — re-arm the breakpoint so the code is not left
             # with a permanently-removed INT3.
             #
-            # The re-arm is kept, but the failure is now *recorded*: this path
-            # leaves the instruction pointer one byte past the breakpoint, so
-            # the thread cannot execute correctly, and the caller had no way to
-            # find that out. run() turns a rising degraded_hits into a raised
-            # error instead of continuing as if the hit had been handled.
+            # The re-arm keeps the breakpoint alive, but this path leaves the
+            # instruction pointer one byte past it, so the thread cannot
+            # execute correctly. The answer says so (DEGRADED) instead of
+            # leaving the caller to compare a counter before and after.
             self._write_int3_handle(h_process, bp_addr)
             self.last_error = exc
-            self.degraded_hits += 1
-            return True
+            return HandleOutcome.DEGRADED
 
         # Schedule restore on next single-step event
         self._s.pending_single_step[tid] = (bp_id, bp_addr, original, h_process)
-        return True
+        return HandleOutcome.HANDLED
 
     def handle_single_step(self, tid):
         """Handle single-step event: restore INT3 if pending.
 
-        Returns True if a pending single-step was handled.
+        Returns HANDLED if a pending single-step was consumed, NOT_MINE if the
+        single-step belongs to somebody else.
         """
         if tid not in self._s.pending_single_step:
-            return False
+            return HandleOutcome.NOT_MINE
 
         entry = self._s.pending_single_step.pop(tid)
         bp_id = entry[0]
@@ -228,7 +231,7 @@ class SoftwareBreakpointManager:
         if bp_id in self._s.breakpoints:
             self._write_int3_handle(h_process, addr)
 
-        return True
+        return HandleOutcome.HANDLED
 
     def teardown(self):
         """Put every displaced byte back. Returns [(what, why)] for failures.
@@ -264,7 +267,6 @@ class SoftwareBreakpointManager:
         self.lost.clear()
         self.hits.clear()
         self.last_error = None
-        self.degraded_hits = 0
         self._s.pending_single_step.clear()
 
     def find(self, addr, h_process=None):

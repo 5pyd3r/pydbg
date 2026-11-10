@@ -480,15 +480,16 @@ class TestFailureIsVisible(unittest.TestCase):
             teardown(dbg)
 
     def test_breakpoint_degraded_hit_is_recorded(self):
-        """A hit whose IP cannot be rewound must be recorded, not just retried.
+        """A hit whose IP cannot be rewound must say so, not just retry.
 
         The INT3 is still re-armed (that contract is deliberate and tested
-        elsewhere), but the failure must leave a trace: previously it was
-        indistinguishable from a normal handled hit.
+        elsewhere), but the answer must be DEGRADED: previously the call
+        returned True and left a counter to be compared by whoever remembered.
         """
         from unittest import mock
 
         from pydbg import _pydbg
+        from pydbg.breakpoint.outcome import HandleOutcome
         from pydbg.breakpoint.software import SoftwareBreakpointManager
         from pydbg.core.session import DebugSession
 
@@ -503,12 +504,14 @@ class TestFailureIsVisible(unittest.TestCase):
                     with mock.patch.object(mgr, "_restore_byte_handle", return_value=None):
                         # Synthetic address/handle: nothing real to patch, and
                         # the re-arm must not be what the test is measuring.
-                        with mock.patch.object(mgr, "_write_int3_handle", return_value=None):
+                        with mock.patch.object(mgr, "_write_int3_handle",
+                                               return_value=None) as rearm:
                             with mock.patch.object(mgr, "find", return_value=1):
-                                handled = mgr.handle_breakpoint_hit(4242, 0x401000)
+                                outcome = mgr.handle_breakpoint_hit(4242, 0x401000)
 
-        self.assertTrue(handled, "the re-arm contract must be preserved")
-        self.assertEqual(mgr.degraded_hits, 1, "the failure left no trace")
+        self.assertIs(outcome, HandleOutcome.DEGRADED,
+                      "a hit that cannot be completed must say so")
+        rearm.assert_called_once()   # the breakpoint stays armed
         self.assertIsNotNone(mgr.last_error)
 
     def test_run_raises_when_a_breakpoint_degrades(self):
@@ -516,16 +519,12 @@ class TestFailureIsVisible(unittest.TestCase):
         from unittest import mock
 
         from pydbg import BreakpointError, Debugger
+        from pydbg.breakpoint.outcome import HandleOutcome
+        from pydbg.core.debugger import _Dispatch
         from pydbg.core.event import DebugEvent
 
         dbg = Debugger()
-        dbg.brk_sw.degraded_hits = 0
-
-        def degrade(tid, addr):
-            # Emulate the OSError path: reports handled, but records a failure.
-            dbg.brk_sw.degraded_hits += 1
-            dbg.brk_sw.last_error = OSError(6, "GetThreadContext failed")
-            return True
+        dbg.brk_sw.last_error = OSError(6, "GetThreadContext failed")
 
         event = DebugEvent({
             "event_name": "EXCEPTION",
@@ -536,10 +535,25 @@ class TestFailureIsVisible(unittest.TestCase):
         })
 
         with mock.patch.object(Debugger, "wait_event", side_effect=[event, None]):
-            with mock.patch.object(dbg.brk_sw, "handle_breakpoint_hit",
-                                   side_effect=degrade):
+            with mock.patch.object(dbg, "_dispatch_exception",
+                                   return_value=_Dispatch(
+                                       HandleOutcome.DEGRADED, deliver=False)):
                 with self.assertRaises(BreakpointError):
                     dbg.run(lambda e: None, timeout_ms=10)
+
+    def test_handle_bp_manual_raises_on_a_degraded_hit(self):
+        """The manual path used to answer True and leave the IP mid-instruction."""
+        from unittest import mock
+
+        from pydbg import BreakpointError, Debugger
+        from pydbg.breakpoint.outcome import HandleOutcome
+
+        dbg = Debugger()
+        dbg.brk_sw.last_error = OSError(6, "GetThreadContext failed")
+        with mock.patch.object(dbg.brk_sw, "handle_breakpoint_hit",
+                               return_value=HandleOutcome.DEGRADED):
+            with self.assertRaises(BreakpointError):
+                dbg.handle_bp_manual(4242, 0x401000)
 
 
 class TestAccessViolationPayload(unittest.TestCase):

@@ -251,7 +251,6 @@ class TestBreakpointHitCounts(unittest.TestCase):
             self.skipTest("environment: could not allocate scratch memory in the target")
         bp_id = self.dbg.set_breakpoint(self.scratch)
         self.assertEqual(self.dbg.verify_breakpoints(), [])
-        self.assertEqual(self.dbg.brk_sw.degraded_hits, 0)
         self.assertIsNone(self.dbg.brk_sw.last_error)
 
         self.dbg.write_memory(self.scratch, b"\x90")
