@@ -13,6 +13,7 @@ except ImportError:
 
 from pydbg.breakpoint.hardware import HardwareBreakpointManager
 from pydbg.breakpoint.software import SoftwareBreakpointManager
+from pydbg.breakpoint.model import Breakpoint
 from pydbg.core.session import DebugSession
 from pydbg.exceptions import TeardownError
 from pydbg.hook.iat import IATHook
@@ -25,9 +26,9 @@ class TestManagerTeardown(unittest.TestCase):
     def test_software_teardown_puts_every_byte_back(self):
         session = DebugSession()
         mgr = SoftwareBreakpointManager(session)
-        session.breakpoints[1] = ("int3", 0x1000, b"\x90", 123)
-        session.breakpoints[2] = ("int3", 0x2000, b"\x55", 123)
-        session.breakpoints[3] = ("hw", 0x3000, 0, None, "x", 1)
+        session.breakpoints[1] = Breakpoint(kind="int3", addr=0x1000, original=b"\x90", h_process=123)
+        session.breakpoints[2] = Breakpoint(kind="int3", addr=0x2000, original=b"\x55", h_process=123)
+        session.breakpoints[3] = Breakpoint(kind="hw", addr=0x3000, slot=0, condition="x", length=1)
 
         restored = []
         mgr._restore_byte_handle = (
@@ -41,8 +42,8 @@ class TestManagerTeardown(unittest.TestCase):
     def test_software_teardown_reports_and_keeps_walking(self):
         session = DebugSession()
         mgr = SoftwareBreakpointManager(session)
-        session.breakpoints[1] = ("int3", 0x1000, b"\x90", 123)
-        session.breakpoints[2] = ("int3", 0x2000, b"\x55", 123)
+        session.breakpoints[1] = Breakpoint(kind="int3", addr=0x1000, original=b"\x90", h_process=123)
+        session.breakpoints[2] = Breakpoint(kind="int3", addr=0x2000, original=b"\x55", h_process=123)
 
         def restore(h, addr, original):
             if addr == 0x1000:
@@ -57,11 +58,12 @@ class TestManagerTeardown(unittest.TestCase):
     def test_hardware_teardown_disarms_every_recorded_slot(self):
         session = DebugSession()
         mgr = HardwareBreakpointManager(session)
-        session.breakpoints[7] = ("hw", 0x1000, 2, None, "x", 1)
-        session.breakpoints[8] = ("int3", 0x2000, b"\x90", 123)
+        session.breakpoints[7] = Breakpoint(kind="hw", addr=0x1000, slot=2, condition="x", length=1)
+        session.breakpoints[8] = Breakpoint(kind="int3", addr=0x2000, original=b"\x90", h_process=123)
 
         disarmed = []
-        mgr._disarm_scope = lambda scope, slot: disarmed.append((scope, slot))
+        mgr._disarm_scope = (
+            lambda scope, slot, pid=None: disarmed.append((scope, slot)))
 
         self.assertEqual(mgr.teardown(), [])
         self.assertEqual(disarmed, [(None, 2)])

@@ -281,12 +281,13 @@ class TestSoftwareBreakpointManagerFixes(unittest.TestCase):
 
     def test_remove_does_not_pop_on_type_mismatch(self):
         """remove() must not mutate breakpoints dict when type is wrong."""
+        from pydbg.breakpoint.model import Breakpoint
         from pydbg.core.session import DebugSession
         from pydbg.breakpoint.software import SoftwareBreakpointManager
         from pydbg.exceptions import BreakpointError
 
         session = DebugSession()
-        session.breakpoints[7] = ("hw", 0x1000, 0)  # a hardware entry
+        session.breakpoints[7] = Breakpoint(kind="hw", addr=0x1000, slot=0)  # a hardware entry
         mgr = SoftwareBreakpointManager(session)
         with self.assertRaises(BreakpointError):
             mgr.remove(7)
@@ -306,12 +307,13 @@ class TestSoftwareBreakpointManagerFixes(unittest.TestCase):
 
     def test_hw_remove_does_not_pop_on_type_mismatch(self):
         """HardwareBreakpointManager.remove must not pop on type mismatch."""
+        from pydbg.breakpoint.model import Breakpoint
         from pydbg.core.session import DebugSession
         from pydbg.breakpoint.hardware import HardwareBreakpointManager
         from pydbg.exceptions import BreakpointError
 
         session = DebugSession()
-        session.breakpoints[8] = ("int3", 0x2000, b"\x90")
+        session.breakpoints[8] = Breakpoint(kind="int3", addr=0x2000, original=b"\x90")
         mgr = HardwareBreakpointManager(session)
         with self.assertRaises(BreakpointError):
             mgr.remove(8)
@@ -416,7 +418,7 @@ class TestBPDeliveryAPI(unittest.TestCase):
                              "the same address must answer with one bp_id")
             self.assertEqual(len(dbg._session.breakpoints), 1)
             self.assertEqual(dbg.read_memory(entry, 1), b"\xcc")
-            self.assertEqual(dbg._session.breakpoints[first][2], original,
+            self.assertEqual(dbg._session.breakpoints[first].original, original,
                              "the displaced byte must still be the target's own")
 
             dbg.remove_breakpoint(first)

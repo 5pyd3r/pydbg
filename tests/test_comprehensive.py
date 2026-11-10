@@ -135,13 +135,14 @@ class TestDebugSession(unittest.TestCase):
         self.assertEqual(s.target_arch, HOST_ARCH)
 
     def test_breakpoint_dict_operations(self):
+        from pydbg.breakpoint.model import Breakpoint
         from pydbg.core.session import DebugSession
         s = DebugSession()
-        s.breakpoints[1] = ("int3", 0x1000, b"\x90")
-        s.breakpoints[2] = ("hw", 0x2000, 0)
+        s.breakpoints[1] = Breakpoint(kind="int3", addr=0x1000, original=b"\x90")
+        s.breakpoints[2] = Breakpoint(kind="hw", addr=0x2000, slot=0)
         self.assertEqual(len(s.breakpoints), 2)
-        self.assertEqual(s.breakpoints[1][0], "int3")
-        self.assertEqual(s.breakpoints[2][0], "hw")
+        self.assertEqual(s.breakpoints[1].kind, "int3")
+        self.assertEqual(s.breakpoints[2].kind, "hw")
 
     def test_pending_single_step_operations(self):
         from pydbg.core.session import DebugSession

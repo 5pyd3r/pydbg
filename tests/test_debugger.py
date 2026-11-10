@@ -489,13 +489,14 @@ class TestFailureIsVisible(unittest.TestCase):
         from unittest import mock
 
         from pydbg import _pydbg
+        from pydbg.breakpoint.model import Breakpoint
         from pydbg.breakpoint.outcome import HandleOutcome
         from pydbg.breakpoint.software import SoftwareBreakpointManager
         from pydbg.core.session import DebugSession
 
         session = DebugSession()
         mgr = SoftwareBreakpointManager(session)
-        session.breakpoints[1] = ("int3", 0x401000, b"\x90", 0x1234)
+        session.breakpoints[1] = Breakpoint(kind="int3", addr=0x401000, original=b"\x90", h_process=0x1234)
 
         with mock.patch.object(_pydbg, "open_thread", return_value=0xBEEF):
             with mock.patch.object(_pydbg, "close_handle", return_value=None):
