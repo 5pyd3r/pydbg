@@ -8,6 +8,7 @@ DR slots (0-3) are globally unique across hardware breakpoints.
 
 from .. import _pydbg
 from ..exceptions import BreakpointError
+from .model import Breakpoint
 
 
 class HardwareBreakpointManager:
@@ -23,15 +24,18 @@ class HardwareBreakpointManager:
         """Architecture (32/64) for a thread id, using per-thread tracking."""
         return self._s.arch_for_tid(tid)
 
-    def _all_thread_ids(self):
-        """TIDs of the target process's current threads (plus main thread)."""
+    def _all_thread_ids(self, pid=None):
+        """TIDs of 'pid's current threads (plus the main thread when it is
+        that process). 'pid' None means the main target."""
+        target = pid if pid is not None else self._s.pid
         tids = []
-        if self._s.pid is not None:
+        if target is not None:
             try:
-                tids = [t["tid"] for t in _pydbg.enumerate_threads(self._s.pid)]
+                tids = [t["tid"] for t in _pydbg.enumerate_threads(target)]
             except OSError:
                 raise BreakpointError("enumerate_threads failed")
-        if self._s.tid is not None and self._s.tid not in tids:
+        if (target == self._s.pid and self._s.tid is not None
+                and self._s.tid not in tids):
             tids.append(self._s.tid)
         return tids
 
@@ -76,8 +80,8 @@ class HardwareBreakpointManager:
                 except OSError:
                     pass
 
-    def _arm_scope(self, scope, addr, slot, condition, length):
-        tids = self._all_thread_ids() if scope is None else [scope]
+    def _arm_scope(self, scope, addr, slot, condition, length, pid=None):
+        tids = self._all_thread_ids(pid) if scope is None else [scope]
         armed = []
         try:
             for th_tid in tids:
@@ -101,8 +105,8 @@ class HardwareBreakpointManager:
                     pass
             raise BreakpointError(f"arm hardware breakpoint: {e}")
 
-    def _disarm_scope(self, scope, slot):
-        tids = self._all_thread_ids() if scope is None else [scope]
+    def _disarm_scope(self, scope, slot, pid=None):
+        tids = self._all_thread_ids(pid) if scope is None else [scope]
         for th_tid in tids:
             try:
                 h = _pydbg.open_thread(th_tid)
@@ -116,16 +120,18 @@ class HardwareBreakpointManager:
                 except OSError:
                     pass
 
-    def set(self, addr, condition="x", length=1, slot=0, tid=None):
+    def set(self, addr, condition="x", length=1, slot=0, tid=None, pid=None):
         """Set a hardware breakpoint.
 
         Args:
             addr: Breakpoint address.
             condition: 'x' (execute), 'w' (write), 'rw' (read/write).
-            length: 1, 2, 4, or 8 bytes (8 only on x64 targets).
+            length: 1, 2, 4, or 8 bytes (8 only on 64-bit targets).
             slot: Debug register slot 0-3 (globally unique across hw breakpoints).
             tid: If given, arm only that thread; otherwise process-wide (all
                 threads + new threads via CREATE_THREAD replication).
+            pid: Which process to arm (None = the main target). Its
+                architecture decides the 8-byte limit — not the main target's.
 
         Note:
             Slots are globally unique across hardware breakpoints (a slot must
@@ -141,7 +147,7 @@ class HardwareBreakpointManager:
             raise BreakpointError(f"Invalid length {length}, use 1/2/4/8")
         if condition == "x" and length != 1:
             raise BreakpointError("execute breakpoints must be 1 byte")
-        if self._s.target_arch == 32 and length == 8:
+        if self._s.arch_for_pid(pid) == 32 and length == 8:
             raise BreakpointError(
                 "8-byte hardware breakpoints are not supported on x86/WOW64 targets"
             )
@@ -149,20 +155,22 @@ class HardwareBreakpointManager:
             raise BreakpointError(f"slot must be 0-3, got {slot}")
 
         # Slot is globally unique across hardware breakpoints.
-        for bp_id, bp_info in self._s.breakpoints.items():
-            if bp_info[0] == "hw" and bp_info[2] == slot:
+        for bp_id, bp in self._s.breakpoints.items():
+            if bp.kind == "hw" and bp.slot == slot:
                 raise BreakpointError(
                     f"hardware breakpoint slot {slot} already in use (bp {bp_id})"
                 )
 
         scope = None if tid is None else tid
-        if scope is not None and scope not in self._all_thread_ids():
+        if scope is not None and scope not in self._all_thread_ids(pid):
             raise BreakpointError(f"tid {scope} is not a thread of the target process")
-        self._arm_scope(scope, addr, slot, condition, length)
+        self._arm_scope(scope, addr, slot, condition, length, pid)
 
         self._s.bp_counter += 1
         bp_id = self._s.bp_counter
-        self._s.breakpoints[bp_id] = ("hw", addr, slot, scope, condition, length)
+        self._s.breakpoints[bp_id] = Breakpoint(
+            kind="hw", addr=addr, pid=pid, slot=slot, scope=scope,
+            condition=condition, length=length)
         return bp_id
 
     def teardown(self):
@@ -173,22 +181,21 @@ class HardwareBreakpointManager:
         """
         problems = []
         for bp_id in sorted(self._s.breakpoints):
-            bp_info = self._s.breakpoints[bp_id]
-            if bp_info[0] != "hw":
+            bp = self._s.breakpoints[bp_id]
+            if bp.kind != "hw":
                 continue
-            slot, scope = bp_info[2], bp_info[3]
             try:
-                self._disarm_scope(scope, slot)
+                self._disarm_scope(bp.scope, bp.slot, bp.pid)
             except Exception as exc:      # a dead thread must not abort teardown
                 problems.append(
-                    (f"hardware breakpoint {bp_id} slot {slot}", str(exc)))
+                    (f"hardware breakpoint {bp_id} slot {bp.slot}", str(exc)))
         self.discard()
         return problems
 
     def discard(self):
         """Forget hardware breakpoints without touching the target."""
-        for bp_id in [bid for bid, info in self._s.breakpoints.items()
-                      if info[0] == "hw"]:
+        for bp_id in [bid for bid, bp in self._s.breakpoints.items()
+                      if bp.kind == "hw"]:
             self._s.breakpoints.pop(bp_id, None)
 
     def clear(self, slot):
@@ -196,8 +203,8 @@ class HardwareBreakpointManager:
         self._disarm_scope(None, slot)
 
     def find(self, addr):
-        for bp_id, bp_info in self._s.breakpoints.items():
-            if bp_info[0] == "hw" and bp_info[1] == addr:
+        for bp_id, bp in self._s.breakpoints.items():
+            if bp.kind == "hw" and bp.addr == addr:
                 return bp_id
         return None
 
@@ -205,11 +212,10 @@ class HardwareBreakpointManager:
         if bp_id not in self._s.breakpoints:
             raise BreakpointError(f"Breakpoint {bp_id} not found")
 
-        bp_info = self._s.breakpoints[bp_id]
-        if bp_info[0] != "hw":
+        bp = self._s.breakpoints[bp_id]
+        if bp.kind != "hw":
             raise BreakpointError(
-                f"Breakpoint {bp_id} is not a hardware breakpoint (type={bp_info[0]})"
+                f"Breakpoint {bp_id} is not a hardware breakpoint (type={bp.kind})"
             )
-        slot, scope = bp_info[2], bp_info[3]
-        self._disarm_scope(scope, slot)
+        self._disarm_scope(bp.scope, bp.slot, bp.pid)
         del self._s.breakpoints[bp_id]

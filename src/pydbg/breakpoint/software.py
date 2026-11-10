@@ -2,6 +2,7 @@
 
 from .. import _pydbg
 from ..exceptions import BreakpointError
+from .model import Breakpoint
 from .outcome import HandleOutcome
 
 
@@ -20,11 +21,6 @@ class SoftwareBreakpointManager:
         self.last_error = None
         # bp_ids whose INT3 is no longer in the target (see verify()).
         self.lost = set()
-        # bp_id -> times the breakpoint was delivered to us since it was set.
-        # A breakpoint at an address that never executes keeps its entry at 0,
-        # which is the fact that was previously unaskable: "armed and never
-        # hit" and "never armed at all" both produced nothing at all.
-        self.hits = {}
 
     def armed_state(self, bp_id):
         """Is the INT3 still in the target? True, False, or None.
@@ -37,14 +33,13 @@ class SoftwareBreakpointManager:
 
         Raises BreakpointError if bp_id is not a software breakpoint.
         """
-        bp_info = self._s.breakpoints.get(bp_id)
-        if bp_info is None or bp_info[0] != "int3":
+        bp = self._s.breakpoints.get(bp_id)
+        if bp is None or bp.kind != "int3":
             raise BreakpointError(f"No software breakpoint {bp_id} to verify")
 
-        addr = bp_info[1]
-        h_process = bp_info[3] if len(bp_info) > 3 else self._s.process_handle
+        h_process = bp.h_process or self._s.process_handle
         try:
-            found = _pydbg.read_process_memory(h_process, addr, 1)
+            found = _pydbg.read_process_memory(h_process, bp.addr, 1)
         except OSError as e:
             self.last_error = e
             return None
@@ -72,8 +67,8 @@ class SoftwareBreakpointManager:
         were created.
         """
         lost = []
-        for bp_id, bp_info in list(self._s.breakpoints.items()):
-            if bp_info[0] != "int3":
+        for bp_id, bp in list(self._s.breakpoints.items()):
+            if bp.kind != "int3":
                 continue
             if not self.verify(bp_id):
                 lost.append(bp_id)
@@ -83,22 +78,19 @@ class SoftwareBreakpointManager:
         if bp_id not in self._s.breakpoints:
             raise BreakpointError(f"Breakpoint {bp_id} not found")
 
-        bp_info = self._s.breakpoints[bp_id]
-        if bp_info[0] != "int3":
+        bp = self._s.breakpoints[bp_id]
+        if bp.kind != "int3":
             raise BreakpointError(
-                f"Breakpoint {bp_id} is not a software breakpoint (type={bp_info[0]})"
+                f"Breakpoint {bp_id} is not a software breakpoint (type={bp.kind})"
             )
         del self._s.breakpoints[bp_id]
         self.lost.discard(bp_id)
-        self.hits.pop(bp_id, None)
 
-        addr = bp_info[1]
-        original = bp_info[2]
-        h_process = bp_info[3] if len(bp_info) > 3 else self._s.process_handle
+        h_process = bp.h_process or self._s.process_handle
         # Restoring the original byte is right even if the target overwrote it
         # in the meantime: the caller asked for the breakpoint to be gone, and
         # the byte we put back is the one we displaced.
-        self._restore_byte_handle(h_process, addr, original)
+        self._restore_byte_handle(h_process, bp.addr, bp.original)
 
     def set_handle(self, h_process, addr):
         """Set INT3 breakpoint using explicit process handle.
@@ -125,10 +117,8 @@ class SoftwareBreakpointManager:
 
         self._s.bp_counter += 1
         bp_id = self._s.bp_counter
-        self._s.breakpoints[bp_id] = ("int3", addr, original, h_process)
-        # Armed now, zero hits so far. Entering at 0 rather than leaving the
-        # entry absent is what makes "armed and never hit" answerable.
-        self.hits[bp_id] = 0
+        self._s.breakpoints[bp_id] = Breakpoint(
+            kind="int3", addr=addr, original=original, h_process=h_process)
         return bp_id
 
     def _restore_byte_handle(self, h_process, addr, original):
@@ -169,15 +159,14 @@ class SoftwareBreakpointManager:
         # was delivered for one of our breakpoints, so the site DID run —
         # that stays true on the degraded path below, where the rewind fails
         # but the code still reached this address.
-        self.hits[bp_id] = self.hits.get(bp_id, 0) + 1
+        bp = self._s.breakpoints[bp_id]
+        bp.hits += 1
 
-        bp_info = self._s.breakpoints[bp_id]
-        bp_addr = bp_info[1]
-        original = bp_info[2]
-        h_process = bp_info[3] if len(bp_info) > 3 else self._s.process_handle
+        bp_addr = bp.addr
+        h_process = bp.h_process or self._s.process_handle
 
         # Restore original byte (remove INT3)
-        self._restore_byte_handle(h_process, bp_addr, original)
+        self._restore_byte_handle(h_process, bp_addr, bp.original)
 
         # Set single-step flag (TF) on the thread and rewind the instruction
         # pointer one byte back onto the breakpoint address. After an INT3
@@ -210,7 +199,7 @@ class SoftwareBreakpointManager:
             return HandleOutcome.DEGRADED
 
         # Schedule restore on next single-step event
-        self._s.pending_single_step[tid] = (bp_id, bp_addr, original, h_process)
+        self._s.pending_single_step[tid] = (bp_id, bp_addr, bp.original, h_process)
         return HandleOutcome.HANDLED
 
     def handle_single_step(self, tid):
@@ -242,16 +231,14 @@ class SoftwareBreakpointManager:
         """
         problems = []
         for bp_id in sorted(self._s.breakpoints):
-            bp_info = self._s.breakpoints[bp_id]
-            if bp_info[0] != "int3":
+            bp = self._s.breakpoints[bp_id]
+            if bp.kind != "int3":
                 continue
-            addr = bp_info[1]
-            original = bp_info[2]
-            h_process = bp_info[3] if len(bp_info) > 3 else self._s.process_handle
+            h_process = bp.h_process or self._s.process_handle
             try:
-                self._restore_byte_handle(h_process, addr, original)
+                self._restore_byte_handle(h_process, bp.addr, bp.original)
             except BreakpointError as exc:
-                problems.append((f"breakpoint {bp_id} at 0x{addr:X}", str(exc)))
+                problems.append((f"breakpoint {bp_id} at 0x{bp.addr:X}", str(exc)))
         self.discard()
         return problems
 
@@ -261,11 +248,10 @@ class SoftwareBreakpointManager:
         For the terminate path: the process is gone, so there is no byte to put
         back, but the records must not outlive it and pretend to be armed.
         """
-        for bp_id in [bid for bid, info in self._s.breakpoints.items()
-                      if info[0] == "int3"]:
+        for bp_id in [bid for bid, bp in self._s.breakpoints.items()
+                      if bp.kind == "int3"]:
             self._s.breakpoints.pop(bp_id, None)
         self.lost.clear()
-        self.hits.clear()
         self.last_error = None
         self._s.pending_single_step.clear()
 
@@ -277,10 +263,10 @@ class SoftwareBreakpointManager:
         at 0x401000, and an address-only search would answer with whichever
         record came first — arming the wrong process, or none at all.
         """
-        for bp_id, bp_info in self._s.breakpoints.items():
-            if bp_info[0] != "int3" or bp_info[1] != addr:
+        for bp_id, bp in self._s.breakpoints.items():
+            if bp.kind != "int3" or bp.addr != addr:
                 continue
-            if h_process is not None and len(bp_info) > 3 and bp_info[3] != h_process:
+            if h_process is not None and bp.h_process not in (None, h_process):
                 continue
             return bp_id
         return None

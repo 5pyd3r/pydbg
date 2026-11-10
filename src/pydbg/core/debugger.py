@@ -508,17 +508,17 @@ class Debugger:
         # of THIS process (DR registers are per-thread; child processes must
         # not inherit the parent's process-wide breakpoints).
         if event.type == "CREATE_THREAD" and event.pid == self._session.pid:
-            for bp_id, bp_info in self._session.breakpoints.items():
-                if bp_info[0] == "hw" and bp_info[3] is None:
+            for bp_id, bp in self._session.breakpoints.items():
+                if bp.kind == "hw" and bp.scope is None and bp.pid is None:
                     try:
                         h = _pydbg.open_thread(event.tid)
                         try:
                             self.brk_hw._arm_thread(
                                 h,
-                                bp_info[1],
-                                bp_info[2],
-                                bp_info[4],
-                                bp_info[5],
+                                bp.addr,
+                                bp.slot,
+                                bp.condition,
+                                bp.length,
                                 self._session.arch_for_tid(event.tid),
                             )
                         finally:
@@ -989,9 +989,9 @@ class Debugger:
     def remove_all_breakpoints(self):
         """Remove all software breakpoints, restoring original bytes.
         Call before detach() to avoid leaving stale INT3 bytes in code."""
-        for bp_id in list(self._session.breakpoints.keys()):
-            bp_info = self._session.breakpoints.get(bp_id)
-            if bp_info and bp_info[0] == "int3":
+        for bp_id in list(self._session.breakpoints):
+            bp = self._session.breakpoints.get(bp_id)
+            if bp is not None and bp.kind == "int3":
                 self.remove_breakpoint(bp_id)
 
     # ── delegated: memory ──────────────────────────────────────
@@ -1219,21 +1219,22 @@ class Debugger:
         return self.brk_sw.set_handle(h, addr)
 
     def remove_breakpoint(self, bp_id):
-        bp_info = self._session.breakpoints.get(bp_id)
-        if bp_info is None:
+        bp = self._session.breakpoints.get(bp_id)
+        if bp is None:
             raise BreakpointError(f"Breakpoint {bp_id} not found")
 
-        if bp_info[0] == "int3":
+        if bp.kind == "int3":
             return self.brk_sw.remove(bp_id)
-        elif bp_info[0] == "hw":
+        elif bp.kind == "hw":
             return self.brk_hw.remove(bp_id)
         else:
             raise BreakpointError(
-                f"Unknown breakpoint type '{bp_info[0]}' for bp_id {bp_id}"
+                f"Unknown breakpoint type '{bp.kind}' for bp_id {bp_id}"
             )
 
-    def set_hw_breakpoint(self, addr, condition="x", length=1, slot=0, tid=None):
-        return self.brk_hw.set(addr, condition, length, slot, tid)
+    def set_hw_breakpoint(self, addr, condition="x", length=1, slot=0, tid=None,
+                          pid=None):
+        return self.brk_hw.set(addr, condition, length, slot, tid, pid)
 
     def find_breakpoint(self, addr):
         return self.brk_sw.find(addr) or self.brk_hw.find(addr)
@@ -1252,16 +1253,15 @@ class Debugger:
         """
         report = []
         for bp_id in self.brk_sw.verify_all():
-            bp_info = self._session.breakpoints.get(bp_id)
-            if bp_info is None:
+            bp = self._session.breakpoints.get(bp_id)
+            if bp is None:
                 continue
-            addr = bp_info[1]
-            h_process = bp_info[3] if len(bp_info) > 3 else self._session.process_handle
+            h_process = bp.h_process or self._session.process_handle
             try:
-                found = self.memory.read_handle(h_process, addr, 1)
+                found = self.memory.read_handle(h_process, bp.addr, 1)
             except Exception:
                 found = None
-            report.append({'bp_id': bp_id, 'addr': addr, 'found': found})
+            report.append({'bp_id': bp_id, 'addr': bp.addr, 'found': found})
         return report
 
     def breakpoint_report(self):
@@ -1299,8 +1299,8 @@ class Debugger:
         brk_sw.lost the same way verify_breakpoints() does.
         """
         report = []
-        for bp_id, bp_info in sorted(self._session.breakpoints.items()):
-            if bp_info[0] != "int3":
+        for bp_id, bp in sorted(self._session.breakpoints.items()):
+            if bp.kind != "int3":
                 continue
             armed = self.brk_sw.armed_state(bp_id)
             if armed is True:
@@ -1309,8 +1309,8 @@ class Debugger:
                 self.brk_sw.lost.add(bp_id)
             report.append({
                 'bp_id': bp_id,
-                'addr': bp_info[1],
-                'hits': self.brk_sw.hits.get(bp_id, 0),
+                'addr': bp.addr,
+                'hits': bp.hits,
                 'armed': armed,
             })
         return report
