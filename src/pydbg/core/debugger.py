@@ -2,9 +2,11 @@
 
 import struct
 import time
+from dataclasses import dataclass
 
 from .. import _pydbg
 from ..breakpoint.hardware import HardwareBreakpointManager
+from ..breakpoint.outcome import HandleOutcome
 from ..disasm.engine import DisasmEngine
 from ..dump.stackwalk import StackWalker
 from ..hook.iat import IATHook
@@ -46,6 +48,19 @@ def _timeout(message, probe=None):
 
 def _caveat(probe):
     return f" {probe.caveat}." if probe.caveat else ""
+
+
+@dataclass(frozen=True)
+class _Dispatch:
+    """What one EXCEPTION event means for the debugger loop.
+
+    'deliver' says whether the event belongs to the caller's callback: a
+    breakpoint we own is the user's event, the single-step that follows it is
+    ours and never leaves this class.
+    """
+
+    outcome: HandleOutcome
+    deliver: bool
 
 
 class Debugger:
@@ -650,6 +665,33 @@ class Debugger:
             # Non-fatal: process may have already exited (common with children)
             pass
 
+    def _dispatch_exception(self, event):
+        """Run the breakpoint/single-step lifecycle for one EXCEPTION event.
+
+        run(), run_until() and the manual helpers all need this answer, and
+        each used to spell it out again — including the "compare a counter
+        before and after" step that the manual path quietly left out, so a
+        failed IP rewind there still answered True.
+        """
+        code = event.exception_code
+        if code in (_pydbg.EXCEPTION_BREAKPOINT, _pydbg.STATUS_WX86_BREAKPOINT):
+            outcome = self.brk_sw.handle_breakpoint_hit(
+                event.tid, event.exception_addr)
+            return _Dispatch(outcome, deliver=outcome is HandleOutcome.HANDLED)
+        if code in (_pydbg.EXCEPTION_SINGLE_STEP,
+                    _pydbg.STATUS_WX86_SINGLE_STEP):
+            outcome = self.brk_sw.handle_single_step(event.tid)
+            return _Dispatch(outcome, deliver=False)
+        return _Dispatch(HandleOutcome.NOT_MINE, deliver=True)
+
+    def _degraded_message(self, tid, addr):
+        """The one sentence both loops and the manual path raise."""
+        return (
+            f"breakpoint at 0x{addr:X} (tid {tid}) could not be completed: "
+            f"{self.brk_sw.last_error}. The instruction pointer was not "
+            f"rewound, so resuming would execute from the middle of an "
+            f"instruction.")
+
     def run(self, callback, timeout_ms=10000, max_idle_timeouts=None,
             probe_on_idle=True):
         """Event-driven debug loop. Runs until process exits or callback returns False.
@@ -699,35 +741,18 @@ class Debugger:
                 continue
             idle = 0
 
-            # Auto-handle breakpoint lifecycle
+            # Auto-handle breakpoint lifecycle (one implementation, shared with
+            # run_until() and the manual helpers; see _dispatch_exception).
             if event.type == "EXCEPTION":
-                code = event.exception_code
-                addr = event.exception_addr
-
-                if code == _pydbg.EXCEPTION_BREAKPOINT or code == _pydbg.STATUS_WX86_BREAKPOINT:
-                    # Remove INT3, rewind IP, set TF for single-step.
-                    degraded = self.brk_sw.degraded_hits
-                    handled = self.brk_sw.handle_breakpoint_hit(event.tid, addr)
-                    if self.brk_sw.degraded_hits != degraded:
-                        # Our breakpoint, but the IP could not be rewound onto
-                        # it. The thread would resume mid-instruction; surface
-                        # it rather than continuing as though nothing is wrong.
-                        raise BreakpointError(
-                            f"breakpoint at 0x{addr:X} (tid {event.tid}) could not "
-                            f"be completed: {self.brk_sw.last_error}. The "
-                            f"instruction pointer was not rewound, so resuming "
-                            f"would execute from the middle of an instruction.")
-                    if handled:
-                        result = callback(event)
-                        if result is False:
-                            break
-                        self.continue_event(event.pid, event.tid)
-                        continue
-                elif code == _pydbg.EXCEPTION_SINGLE_STEP or code == _pydbg.STATUS_WX86_SINGLE_STEP:
-                    # Restore INT3 if this was from our breakpoint lifecycle
-                    if self.brk_sw.handle_single_step(event.tid):
-                        self.continue_event(event.pid, event.tid)
-                        continue  # Don't deliver internal single-step to user
+                dispatch = self._dispatch_exception(event)
+                if dispatch.outcome is HandleOutcome.DEGRADED:
+                    raise BreakpointError(
+                        self._degraded_message(event.tid, event.exception_addr))
+                if dispatch.outcome is HandleOutcome.HANDLED:
+                    if dispatch.deliver and callback(event) is False:
+                        break
+                    self.continue_event(event.pid, event.tid)
+                    continue  # the re-arming single-step is ours, not the user's
 
             result = callback(event)
             if result is False:
@@ -899,31 +924,16 @@ class Debugger:
                 idle = 0
 
                 if event.type == "EXCEPTION":
-                    code = event.exception_code
-                    hit_addr = event.exception_addr
-
-                    if code in (_pydbg.EXCEPTION_BREAKPOINT,
-                                _pydbg.STATUS_WX86_BREAKPOINT):
-                        degraded = self.brk_sw.degraded_hits
-                        handled = self.brk_sw.handle_breakpoint_hit(
-                            event.tid, hit_addr)
-                        if self.brk_sw.degraded_hits != degraded:
-                            raise BreakpointError(
-                                f"breakpoint at 0x{hit_addr:X} (tid {event.tid}) "
-                                f"could not be completed: "
-                                f"{self.brk_sw.last_error}. The instruction "
-                                f"pointer was not rewound, so resuming would "
-                                f"execute from the middle of an instruction.")
-                        if handled:
-                            if hit_addr == addr:
-                                return event
-                            self.continue_event(event.pid, event.tid)
-                            continue
-                    elif code in (_pydbg.EXCEPTION_SINGLE_STEP,
-                                  _pydbg.STATUS_WX86_SINGLE_STEP):
-                        if self.brk_sw.handle_single_step(event.tid):
-                            self.continue_event(event.pid, event.tid)
-                            continue
+                    dispatch = self._dispatch_exception(event)
+                    if dispatch.outcome is HandleOutcome.DEGRADED:
+                        raise BreakpointError(
+                            self._degraded_message(
+                                event.tid, event.exception_addr))
+                    if dispatch.outcome is HandleOutcome.HANDLED:
+                        if dispatch.deliver and event.exception_addr == addr:
+                            return event
+                        self.continue_event(event.pid, event.tid)
+                        continue
 
                 if event.type == "EXIT_PROCESS":
                     code = event.raw.get("exit_code", 1)
@@ -947,6 +957,11 @@ class Debugger:
 
         Returns True if the breakpoint was one of ours and was handled.
 
+        Raises:
+            BreakpointError: it was ours but could not be completed. The manual
+                path used to answer True here as well, which made a failed IP
+                rewind indistinguishable from a good hit.
+
         Note: WOW64 (32-bit target on a 64-bit host) reports breakpoints as
         STATUS_WX86_BREAKPOINT (0x4000001F) instead of EXCEPTION_BREAKPOINT;
         check for either code (or for the single-step counterpart
@@ -962,11 +977,14 @@ class Debugger:
                     # Continue — single-step + re-arm happens automatically
                 dbg.continue_event(event.pid, event.tid)
         """
-        return self.brk_sw.handle_breakpoint_hit(tid, addr)
+        outcome = self.brk_sw.handle_breakpoint_hit(tid, addr)
+        if outcome is HandleOutcome.DEGRADED:
+            raise BreakpointError(self._degraded_message(tid, addr))
+        return outcome is HandleOutcome.HANDLED
 
     def handle_ss_manual(self, tid):
         """Manually handle single-step after breakpoint. Call after EXCEPTION_SINGLE_STEP."""
-        return self.brk_sw.handle_single_step(tid)
+        return self.brk_sw.handle_single_step(tid) is HandleOutcome.HANDLED
 
     def remove_all_breakpoints(self):
         """Remove all software breakpoints, restoring original bytes.

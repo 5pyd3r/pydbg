@@ -208,8 +208,10 @@ class TestBreakpointLifecycle(unittest.TestCase):
         self.assertEqual(dbg.read_memory(base, 1), b"\xcc")
 
         # Simulate breakpoint hit lifecycle
-        handled = dbg.brk_sw.handle_breakpoint_hit(self.tid, base)
-        self.assertTrue(handled, "breakpoint hit should be handled")
+        from pydbg.breakpoint.outcome import HandleOutcome
+
+        outcome = dbg.brk_sw.handle_breakpoint_hit(self.tid, base)
+        self.assertIs(outcome, HandleOutcome.HANDLED)
 
         # INT3 should be removed — original byte restored
         self.assertEqual(dbg.read_memory(base, 1), original_byte)
@@ -236,8 +238,10 @@ class TestBreakpointLifecycle(unittest.TestCase):
         # INT3 is now removed, pending single-step is set
 
         # Simulate single-step event
-        handled = dbg.brk_sw.handle_single_step(self.tid)
-        self.assertTrue(handled, "single-step should be handled")
+        from pydbg.breakpoint.outcome import HandleOutcome
+
+        outcome = dbg.brk_sw.handle_single_step(self.tid)
+        self.assertIs(outcome, HandleOutcome.HANDLED)
 
         # INT3 should be restored
         self.assertEqual(dbg.read_memory(base, 1), b"\xcc")
@@ -326,8 +330,11 @@ class TestSoftwareBreakpointManagerFixes(unittest.TestCase):
             self.assertEqual(dbg.read_memory(entry, 1), b"\xcc")
             with mock.patch("pydbg.breakpoint.software._pydbg.open_thread",
                             side_effect=OSError(5, "mock")):
-                handled = dbg.brk_sw.handle_breakpoint_hit(tid, entry)
-            self.assertTrue(handled)
+                from pydbg.breakpoint.outcome import HandleOutcome
+
+                outcome = dbg.brk_sw.handle_breakpoint_hit(tid, entry)
+            self.assertIs(outcome, HandleOutcome.DEGRADED,
+                          "a re-armed hit that could not rewind must say so")
             # INT3 must be restored even though TF could not be set
             self.assertEqual(dbg.read_memory(entry, 1), b"\xcc")
             dbg.remove_breakpoint(bp_id)
