@@ -350,7 +350,7 @@ class TestFindBreakpoint(unittest.TestCase):
 class TestRunLoopDeliverBP(unittest.TestCase):
     """run() delivers user BP hits to the callback (GDB-style, always on)."""
 
-    @unittest.skipUnless(_has_cython, "requires Cython extension")
+    @unittest.skipUnless(_has_cython, "optional dependency: Cython extension")
     def test_user_breakpoint_delivered_by_default(self):
         from pydbg.exceptions import BreakpointError
         from tests.helpers import create_debugger, teardown, entry_point
@@ -451,7 +451,7 @@ class TestFailureIsVisible(unittest.TestCase):
         self.assertEqual(calls["n"], 5, "loop did not simply continue idling")
         self.assertEqual(code, 7)
 
-    @unittest.skipUnless(_has_cython, "requires Cython extension")
+    @unittest.skipUnless(_has_cython, "optional dependency: Cython extension")
     def test_get_registers_accepts_thread_id(self):
         """A tid works where a handle is expected - the mistake callers make."""
         from tests.helpers import create_debugger, teardown
@@ -466,7 +466,7 @@ class TestFailureIsVisible(unittest.TestCase):
         finally:
             teardown(dbg)
 
-    @unittest.skipUnless(_has_cython, "requires Cython extension")
+    @unittest.skipUnless(_has_cython, "optional dependency: Cython extension")
     def test_set_register_accepts_thread_id(self):
         from tests.helpers import create_debugger, teardown
 

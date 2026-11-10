@@ -29,6 +29,10 @@ try {
            "if errorlevel 1 exit /b %errorlevel%`n" +
            "link /nologo /subsystem:console /machine:x86 /OUT:$outDir\instrument_target32.exe $outDir\instrument_target32.obj`n" +
            "if errorlevel 1 exit /b %errorlevel%`n" +
+           "cl /nologo /O2 /W3 /utf-8 /c tests\target\child_target.c /Fo$outDir\child_target32.obj`n" +
+           "if errorlevel 1 exit /b %errorlevel%`n" +
+           "link /nologo /subsystem:console /machine:x86 /OUT:$outDir\child_target32.exe $outDir\child_target32.obj`n" +
+           "if errorlevel 1 exit /b %errorlevel%`n" +
            "echo BUILD_OK"
     Set-Content -Path $tmp -Value $bat -Encoding ascii
     & cmd /c "`"$tmp`""
@@ -36,4 +40,4 @@ try {
 } finally {
     Remove-Item $tmp -Force -ErrorAction SilentlyContinue
 }
-Write-Host "[ok] built $outDir\simple_target32.exe, $outDir\spawn_child.exe, $outDir\threaded_target32.exe, $outDir\instrument_target32.exe"
+Write-Host "[ok] built $outDir\simple_target32.exe, $outDir\spawn_child.exe, $outDir\threaded_target32.exe, $outDir\instrument_target32.exe, $outDir\child_target32.exe"

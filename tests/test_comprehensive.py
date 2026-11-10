@@ -16,6 +16,7 @@ Test categories:
 
 import os
 import struct
+import subprocess
 import unittest
 
 from tests import HOST_ARCH, IP_REG, SP_REG, GP_REG
@@ -210,7 +211,7 @@ class TestFileSource(unittest.TestCase):
             "System32", "kernel32.dll"
         )
         if not os.path.exists(path):
-            self.skipTest("kernel32.dll not found")
+            self.skipTest("environment: kernel32.dll not found")
 
         with FileSource(path) as src:
             data = src.read(0, 2)
@@ -224,7 +225,7 @@ class TestFileSource(unittest.TestCase):
             "System32", "kernel32.dll"
         )
         if not os.path.exists(path):
-            self.skipTest("kernel32.dll not found")
+            self.skipTest("environment: kernel32.dll not found")
 
         with FileSource(path) as src:
             self.assertIsNotNone(src.read(0, 2))
@@ -355,7 +356,7 @@ class TestNoBuildOutputInThePackage(unittest.TestCase):
                 self.repo_root = candidate
                 break
         if self.repo_root is None:
-            self.skipTest("pydbg is not running from a source checkout")
+            self.skipTest("environment: pydbg is not running from a source checkout")
 
     def test_no_extension_beside_the_package_sources(self):
         strays = sorted(name for name in os.listdir(self.package_dir)
@@ -371,6 +372,30 @@ class TestNoBuildOutputInThePackage(unittest.TestCase):
             os.path.exists(os.path.join(self.repo_root, "scripts",
                                         "build_venv.py")),
             "scripts/build_venv.py copied the built extension into src/pydbg/")
+
+    def test_no_build_output_is_under_version_control(self):
+        """A file may exist in the working tree; it must not be tracked.
+
+        tests/target/*.exe used to be force-added, so the tests they back could
+        not be reproduced from a clean checkout — no build rule produced them.
+        What the build writes into the tree is fine; what git carries is not.
+        """
+        if not os.path.exists(os.path.join(self.repo_root, ".git")):
+            self.skipTest("environment: not a git checkout")
+        try:
+            out = subprocess.run(
+                ["git", "-C", self.repo_root, "ls-files", "src", "tests"],
+                capture_output=True, text=True, check=True).stdout
+        except (OSError, subprocess.CalledProcessError) as exc:
+            self.skipTest(f"environment: git unavailable: {exc}")
+        suffixes = (".exe", ".obj", ".lib", ".exp", ".pyd", ".dll")
+        tracked = [line for line in out.splitlines()
+                   if line.lower().endswith(suffixes)]
+        self.assertEqual(
+            tracked, [],
+            "build outputs are under version control; no build rule can "
+            "regenerate them, so every test that needs one depends on a "
+            "binary that a clean checkout cannot produce")
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -491,7 +516,7 @@ class TestSymbolResolver(unittest.TestCase):
 class TestModuleResolver(unittest.TestCase):
     """Tests for ModuleResolver."""
 
-    @unittest.skipUnless(_has_cython, "requires Cython extension")
+    @unittest.skipUnless(_has_cython, "optional dependency: Cython extension")
     def test_enumerate_returns_list(self):
         from pydbg import Debugger
 
@@ -518,7 +543,7 @@ class TestModuleResolver(unittest.TestCase):
         dbg.close_handle(dbg._session.process_handle)
         dbg.close_handle(dbg._session.thread_handle)
 
-    @unittest.skipUnless(_has_cython, "requires Cython extension")
+    @unittest.skipUnless(_has_cython, "optional dependency: Cython extension")
     def test_get_module_filename(self):
         from pydbg import Debugger
 
@@ -682,7 +707,7 @@ class TestIATHookFullFlow(unittest.TestCase):
         self.assertEqual(hook._ptr_size(), 8)
 
 
-@unittest.skipUnless(_has_capstone, "requires capstone")
+@unittest.skipUnless(_has_capstone, "optional dependency: capstone")
 class TestInlineHookEdgeCases(unittest.TestCase):
     """Tests for InlineHook edge cases."""
 
@@ -772,7 +797,7 @@ class TestStackWalkerEdgeCases(unittest.TestCase):
 # 9. Assembler Edge Cases
 # ═══════════════════════════════════════════════════════════════════
 
-@unittest.skipUnless(_has_keystone, "requires keystone-engine")
+@unittest.skipUnless(_has_keystone, "optional dependency: keystone-engine")
 class TestAssemblerEdgeCases(unittest.TestCase):
     """Tests for Assembler edge cases."""
 
@@ -841,7 +866,7 @@ class TestAssemblerEdgeCases(unittest.TestCase):
 class TestDebuggerFullLifecycle(unittest.TestCase):
     """Integration tests for Debugger full lifecycle."""
 
-    @unittest.skipUnless(_has_cython, "requires Cython extension")
+    @unittest.skipUnless(_has_cython, "optional dependency: Cython extension")
     def test_create_process_returns_valid_ids(self):
         from pydbg import Debugger
         dbg = Debugger()
@@ -852,7 +877,7 @@ class TestDebuggerFullLifecycle(unittest.TestCase):
         dbg.close_handle(dbg._session.process_handle)
         dbg.close_handle(dbg._session.thread_handle)
 
-    @unittest.skipUnless(_has_cython, "requires Cython extension")
+    @unittest.skipUnless(_has_cython, "optional dependency: Cython extension")
     def test_create_invalid_path_raises(self):
         from pydbg import Debugger
         from pydbg.exceptions import ProcessError
@@ -860,7 +885,7 @@ class TestDebuggerFullLifecycle(unittest.TestCase):
         with self.assertRaises(ProcessError):
             dbg.create_process("nonexistent_program_xyz.exe")
 
-    @unittest.skipUnless(_has_cython, "requires Cython extension")
+    @unittest.skipUnless(_has_cython, "optional dependency: Cython extension")
     def test_detach_nonexistent_raises(self):
         from pydbg import Debugger
         from pydbg.exceptions import ProcessError
@@ -868,7 +893,7 @@ class TestDebuggerFullLifecycle(unittest.TestCase):
         with self.assertRaises(ProcessError):
             dbg.detach(999999)
 
-    @unittest.skipUnless(_has_cython, "requires Cython extension")
+    @unittest.skipUnless(_has_cython, "optional dependency: Cython extension")
     def test_wait_event_returns_debug_event(self):
         from pydbg import Debugger, DebugEvent
         dbg = Debugger()
@@ -882,7 +907,7 @@ class TestDebuggerFullLifecycle(unittest.TestCase):
         dbg.close_handle(dbg._session.process_handle)
         dbg.close_handle(dbg._session.thread_handle)
 
-    @unittest.skipUnless(_has_cython, "requires Cython extension")
+    @unittest.skipUnless(_has_cython, "optional dependency: Cython extension")
     def test_wait_event_timeout_returns_none(self):
         from pydbg import Debugger
         dbg = Debugger()
@@ -906,7 +931,7 @@ class TestDebuggerFullLifecycle(unittest.TestCase):
         dbg.close_handle(dbg._session.process_handle)
         dbg.close_handle(dbg._session.thread_handle)
 
-    @unittest.skipUnless(_has_cython, "requires Cython extension")
+    @unittest.skipUnless(_has_cython, "optional dependency: Cython extension")
     def test_run_loop_returns_exit_code(self):
         from pydbg import Debugger
         dbg = Debugger()
@@ -921,7 +946,7 @@ class TestDebuggerFullLifecycle(unittest.TestCase):
         self.assertIsInstance(exit_code, int)
         self.assertIn("CREATE_PROCESS", events)
 
-    @unittest.skipUnless(_has_cython, "requires Cython extension")
+    @unittest.skipUnless(_has_cython, "optional dependency: Cython extension")
     def test_run_loop_callback_false_stops(self):
         from pydbg import Debugger
         dbg = Debugger()
@@ -937,7 +962,7 @@ class TestDebuggerFullLifecycle(unittest.TestCase):
         dbg.run(on_event, timeout_ms=5000)
         self.assertGreaterEqual(call_count, 1)
 
-    @unittest.skipUnless(_has_cython, "requires Cython extension")
+    @unittest.skipUnless(_has_cython, "optional dependency: Cython extension")
     def test_terminate_drains_events(self):
         from pydbg import Debugger
         dbg = Debugger()
@@ -951,7 +976,7 @@ class TestDebuggerFullLifecycle(unittest.TestCase):
         dbg.close_handle(dbg._session.process_handle)
         dbg.close_handle(dbg._session.thread_handle)
 
-    @unittest.skipUnless(_has_cython, "requires Cython extension")
+    @unittest.skipUnless(_has_cython, "optional dependency: Cython extension")
     def test_get_exit_code_running(self):
         from pydbg import Debugger
         dbg = Debugger()
@@ -970,7 +995,7 @@ class TestDebuggerFullLifecycle(unittest.TestCase):
 class TestBreakpointInRunLoop(unittest.TestCase):
     """Integration tests for breakpoints in the run loop."""
 
-    @unittest.skipUnless(_has_cython, "requires Cython extension")
+    @unittest.skipUnless(_has_cython, "optional dependency: Cython extension")
     def test_software_breakpoint_lifecycle(self):
         """Set BP, run loop, verify BP is hit and restored."""
         from pydbg import Debugger
@@ -1011,7 +1036,7 @@ class TestBreakpointInRunLoop(unittest.TestCase):
         dbg.close_handle(dbg._session.process_handle)
         dbg.close_handle(dbg._session.thread_handle)
 
-    @unittest.skipUnless(_has_cython, "requires Cython extension")
+    @unittest.skipUnless(_has_cython, "optional dependency: Cython extension")
     def test_multiple_breakpoints(self):
         """Set multiple breakpoints."""
         from pydbg import Debugger
@@ -1056,7 +1081,7 @@ class TestBreakpointInRunLoop(unittest.TestCase):
         dbg.close_handle(dbg._session.process_handle)
         dbg.close_handle(dbg._session.thread_handle)
 
-    @unittest.skipUnless(_has_cython, "requires Cython extension")
+    @unittest.skipUnless(_has_cython, "optional dependency: Cython extension")
     def test_hardware_breakpoint_all_slots(self):
         """Test hardware breakpoints in all 4 slots."""
         from pydbg import Debugger
@@ -1095,7 +1120,7 @@ class TestBreakpointInRunLoop(unittest.TestCase):
         dbg.close_handle(dbg._session.process_handle)
         dbg.close_handle(dbg._session.thread_handle)
 
-    @unittest.skipUnless(_has_cython, "requires Cython extension")
+    @unittest.skipUnless(_has_cython, "optional dependency: Cython extension")
     def test_remove_nonexistent_breakpoint_raises(self):
         from pydbg import Debugger
         from pydbg.exceptions import BreakpointError
@@ -1104,7 +1129,7 @@ class TestBreakpointInRunLoop(unittest.TestCase):
         with self.assertRaises(BreakpointError):
             dbg.remove_breakpoint(999)
 
-    @unittest.skipUnless(_has_cython, "requires Cython extension")
+    @unittest.skipUnless(_has_cython, "optional dependency: Cython extension")
     def test_hw_breakpoint_invalid_condition(self):
         from pydbg import Debugger
         from pydbg.exceptions import BreakpointError
@@ -1126,7 +1151,7 @@ class TestBreakpointInRunLoop(unittest.TestCase):
 class TestMemoryIntegration(unittest.TestCase):
     """Integration tests for memory operations."""
 
-    @unittest.skipUnless(_has_cython, "requires Cython extension")
+    @unittest.skipUnless(_has_cython, "optional dependency: Cython extension")
     def test_read_write_cycle(self):
         from pydbg import Debugger
 
@@ -1159,7 +1184,7 @@ class TestMemoryIntegration(unittest.TestCase):
         dbg.close_handle(dbg._session.process_handle)
         dbg.close_handle(dbg._session.thread_handle)
 
-    @unittest.skipUnless(_has_cython, "requires Cython extension")
+    @unittest.skipUnless(_has_cython, "optional dependency: Cython extension")
     def test_read_memory_invalid_raises(self):
         from pydbg import Debugger
         from pydbg.exceptions import MemError
@@ -1189,7 +1214,7 @@ class TestMemoryIntegration(unittest.TestCase):
 class TestThreadIntegration(unittest.TestCase):
     """Integration tests for thread operations."""
 
-    @unittest.skipUnless(_has_cython, "requires Cython extension")
+    @unittest.skipUnless(_has_cython, "optional dependency: Cython extension")
     def test_open_and_get_registers(self):
         from pydbg import Debugger
 
@@ -1211,7 +1236,7 @@ class TestThreadIntegration(unittest.TestCase):
         dbg.close_handle(dbg._session.process_handle)
         dbg.close_handle(dbg._session.thread_handle)
 
-    @unittest.skipUnless(_has_cython, "requires Cython extension")
+    @unittest.skipUnless(_has_cython, "optional dependency: Cython extension")
     def test_suspend_resume_thread(self):
         from pydbg import Debugger
 
@@ -1233,7 +1258,7 @@ class TestThreadIntegration(unittest.TestCase):
         dbg.close_handle(dbg._session.process_handle)
         dbg.close_handle(dbg._session.thread_handle)
 
-    @unittest.skipUnless(_has_cython, "requires Cython extension")
+    @unittest.skipUnless(_has_cython, "optional dependency: Cython extension")
     def test_enumerate_threads(self):
         from pydbg import Debugger
 
@@ -1259,7 +1284,7 @@ class TestThreadIntegration(unittest.TestCase):
         dbg.close_handle(dbg._session.process_handle)
         dbg.close_handle(dbg._session.thread_handle)
 
-    @unittest.skipUnless(_has_cython, "requires Cython extension")
+    @unittest.skipUnless(_has_cython, "optional dependency: Cython extension")
     def test_set_register(self):
         from pydbg import Debugger
 
@@ -1286,7 +1311,7 @@ class TestThreadIntegration(unittest.TestCase):
         dbg.close_handle(dbg._session.thread_handle)
 
 
-@unittest.skipUnless(_has_capstone, "requires capstone")
+@unittest.skipUnless(_has_capstone, "optional dependency: capstone")
 class TestDisasmEngineIntegration(unittest.TestCase):
     """Integration tests for DisasmEngine."""
 
@@ -1476,7 +1501,7 @@ class TestPEParserEdgeCases(unittest.TestCase):
             "System32", "kernel32.dll"
         )
         if not os.path.exists(path):
-            self.skipTest("kernel32.dll not found")
+            self.skipTest("environment: kernel32.dll not found")
 
         pe = PE.from_file(path)
         self.assertEqual(pe.dos_header.e_magic, 0x5A4D)
@@ -1492,7 +1517,7 @@ class TestPEParserEdgeCases(unittest.TestCase):
             "System32", "ntdll.dll"
         )
         if not os.path.exists(path):
-            self.skipTest("ntdll.dll not found")
+            self.skipTest("environment: ntdll.dll not found")
 
         pe = PE.from_file(path)
         self.assertEqual(pe.dos_header.e_magic, 0x5A4D)
@@ -1606,7 +1631,7 @@ class TestDebugEventEdgeCases(unittest.TestCase):
 class TestExceptionHelpers(unittest.TestCase):
     """Tests for exception code helpers."""
 
-    @unittest.skipUnless(_has_cython, "requires Cython extension")
+    @unittest.skipUnless(_has_cython, "optional dependency: Cython extension")
     def test_all_known_codes(self):
         codes = {
             0xC0000005: "EXCEPTION_ACCESS_VIOLATION",
@@ -1620,12 +1645,12 @@ class TestExceptionHelpers(unittest.TestCase):
             result = _pydbg.exception_code_to_str(code)
             self.assertEqual(result, expected, f"Failed for 0x{code:08X}")
 
-    @unittest.skipUnless(_has_cython, "requires Cython extension")
+    @unittest.skipUnless(_has_cython, "optional dependency: Cython extension")
     def test_unknown_code_format(self):
         result = _pydbg.exception_code_to_str(0x12345678)
         self.assertEqual(result, "UNKNOWN_EXCEPTION(0x12345678)")
 
-    @unittest.skipUnless(_has_cython, "requires Cython extension")
+    @unittest.skipUnless(_has_cython, "optional dependency: Cython extension")
     def test_get_exception_info_av(self):
         info = _pydbg.get_exception_info(0xC0000005, 0xDEAD, 1, [1, 0xBEEF])
         self.assertEqual(info["name"], "EXCEPTION_ACCESS_VIOLATION")
@@ -1633,7 +1658,7 @@ class TestExceptionHelpers(unittest.TestCase):
         self.assertEqual(info["access_addr"], 0xBEEF)
         self.assertTrue(info["first_chance"])
 
-    @unittest.skipUnless(_has_cython, "requires Cython extension")
+    @unittest.skipUnless(_has_cython, "optional dependency: Cython extension")
     def test_get_exception_info_breakpoint(self):
         info = _pydbg.get_exception_info(0x80000003, 0x1000, 1, [])
         self.assertEqual(info["name"], "EXCEPTION_BREAKPOINT")

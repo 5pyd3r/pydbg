@@ -165,7 +165,7 @@ class TestInlineHook(unittest.TestCase):
 class TestInlineHookLive(unittest.TestCase):
     """Live inline hook on a safe allocated stub (never executed)."""
 
-    @unittest.skipUnless(_has_cython, "requires Cython extension")
+    @unittest.skipUnless(_has_cython, "optional dependency: Cython extension")
     def test_set_and_restore_live(self):
         from pydbg.hook.inline import Trampoline
         from pydbg.exceptions import PydbgError
@@ -185,7 +185,7 @@ class TestInlineHookLive(unittest.TestCase):
             except PydbgError as exc:
                 # Relocation-range failure if VirtualAllocEx placed regions
                 # >2GB apart (JMP rel32). This is environment-dependent.
-                self.skipTest(f"inline hook relocation failed: {exc}")
+                self.skipTest(f"environment: inline hook relocation failed: {exc}")
 
             self.assertIsInstance(tramp, Trampoline)
             self.assertNotEqual(tramp.addr, 0)
@@ -199,7 +199,7 @@ class TestInlineHookLive(unittest.TestCase):
         finally:
             teardown(dbg)
 
-    @unittest.skipUnless(_has_cython, "requires Cython extension")
+    @unittest.skipUnless(_has_cython, "optional dependency: Cython extension")
     def test_set_close_range_hook(self):
         from tests.helpers import create_debugger, teardown, alloc_writable
 

@@ -313,7 +313,7 @@ class TestSoftwareBreakpointManagerFixes(unittest.TestCase):
             mgr.remove(8)
         self.assertIn(8, session.breakpoints)
 
-    @unittest.skipUnless(_has_cython, "requires Cython extension")
+    @unittest.skipUnless(_has_cython, "optional dependency: Cython extension")
     def test_handle_bp_hit_tf_failure_rearms_int3(self):
         """If TF cannot be set, INT3 must be re-armed (no permanent removal)."""
         from unittest import mock
@@ -338,7 +338,7 @@ class TestSoftwareBreakpointManagerFixes(unittest.TestCase):
 class TestBPDeliveryAPI(unittest.TestCase):
     """Live coverage for the branch's new BP delivery API."""
 
-    @unittest.skipUnless(_has_cython, "requires Cython extension")
+    @unittest.skipUnless(_has_cython, "optional dependency: Cython extension")
     def test_manual_bp_lifecycle(self):
         """wait_event/continue_event + handle_bp_manual/handle_ss_manual."""
         from pydbg.exceptions import BreakpointError
@@ -385,7 +385,7 @@ class TestBPDeliveryAPI(unittest.TestCase):
         finally:
             teardown(dbg)
 
-    @unittest.skipUnless(_has_cython, "requires Cython extension")
+    @unittest.skipUnless(_has_cython, "optional dependency: Cython extension")
     def test_set_same_address_twice_does_not_corrupt(self):
         """Re-arming an address answers with the same bp_id and removes cleanly.
 
@@ -418,7 +418,7 @@ class TestBPDeliveryAPI(unittest.TestCase):
         finally:
             teardown(dbg)
 
-    @unittest.skipUnless(_has_cython, "requires Cython extension")
+    @unittest.skipUnless(_has_cython, "optional dependency: Cython extension")
     def test_remove_all_breakpoints_restores_bytes(self):
         from tests.helpers import create_debugger, teardown, entry_point
 
@@ -438,7 +438,7 @@ class TestBPDeliveryAPI(unittest.TestCase):
         finally:
             teardown(dbg)
 
-    @unittest.skipUnless(_has_cython, "requires Cython extension")
+    @unittest.skipUnless(_has_cython, "optional dependency: Cython extension")
     def test_handle_bp_manual_unknown_addr_returns_false(self):
         from tests.helpers import create_debugger, teardown
 

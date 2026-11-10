@@ -160,7 +160,7 @@ class TestOverlapAttribution(unittest.TestCase):
     def test_no_overlap_means_nothing_to_attribute(self):
         result = analyze()
         if result.stats.overlap_bytes:
-            self.skipTest("fixture produced overlap")
+            self.skipTest("environment: fixture produced overlap")
         self.assertEqual(result.attribution().overlap_by_origin, {})
 
 
@@ -210,14 +210,14 @@ class TestRealImageAttribution(unittest.TestCase):
         path = os.path.join(os.environ.get("SystemRoot", r"C:\Windows"),
                             "System32", "kernel32.dll")
         if not os.path.exists(path):
-            raise unittest.SkipTest(f"no system DLL at {path}")
+            raise unittest.SkipTest(f"environment: no system DLL at {path}")
         from pydbg.analysis import analyze_file
         cls.result = analyze_file(path)
         cls.attribution = cls.result.attribution()
 
     def setUp(self):
         if not hasattr(self.__class__, "attribution"):
-            self.skipTest("no system DLL to analyse")
+            self.skipTest("environment: no system DLL to analyse")
 
     def test_the_breakdown_accounts_for_every_uncovered_byte(self):
         """It must not silently drop the bytes it could not classify."""

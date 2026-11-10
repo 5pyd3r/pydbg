@@ -86,7 +86,7 @@ def _build_synthetic_minidump():
 class TestMinidumpReaderLive(unittest.TestCase):
     """Live dbghelp read of a synthetic in-memory dump."""
 
-    @unittest.skipUnless(_has_cython, "requires Cython extension")
+    @unittest.skipUnless(_has_cython, "optional dependency: Cython extension")
     def test_get_stream_synthetic_dump(self):
         import os
         import tempfile
@@ -104,7 +104,7 @@ class TestMinidumpReaderLive(unittest.TestCase):
         self.assertEqual(stream, b"\x00\x00\x00\x00")
         self.assertEqual(stream2, b"\x00\x00\x00\x00")
 
-    @unittest.skipUnless(_has_cython, "requires Cython extension")
+    @unittest.skipUnless(_has_cython, "optional dependency: Cython extension")
     def test_get_stream_wraps_oserror(self):
         import os
         import tempfile
@@ -129,14 +129,14 @@ class TestMinidumpReaderLive(unittest.TestCase):
 class TestMinidumpReaderStreams(unittest.TestCase):
     """The four named stream accessors the dump design specifies."""
 
-    @unittest.skipUnless(_has_cython, "requires Cython extension")
+    @unittest.skipUnless(_has_cython, "optional dependency: Cython extension")
     def test_a_dump_can_be_opened_from_bytes(self):
         from pydbg.dump.minidump import MinidumpReader
 
         reader = MinidumpReader(_build_synthetic_minidump())
         self.assertEqual(reader.get_module_list(), b"\x00\x00\x00\x00")
 
-    @unittest.skipUnless(_has_cython, "requires Cython extension")
+    @unittest.skipUnless(_has_cython, "optional dependency: Cython extension")
     def test_a_stream_the_dump_does_not_have_raises(self):
         """Absent must not read as empty: b'' is a dump with zero threads."""
         from pydbg.dump.minidump import MinidumpReader
@@ -150,7 +150,7 @@ class TestMinidumpReaderStreams(unittest.TestCase):
 class TestStackWalkerCoverage(unittest.TestCase):
     """StackWalker.walk loop via mocks + a live smoke test."""
 
-    @unittest.skipUnless(_has_cython, "requires Cython extension")
+    @unittest.skipUnless(_has_cython, "optional dependency: Cython extension")
     def _patched_walk(self, frames, max_frames=64, regs=None):
         from unittest import mock
         from pydbg.core.session import DebugSession
@@ -166,7 +166,7 @@ class TestStackWalkerCoverage(unittest.TestCase):
                 result = sw.walk(0x1234, b"\x00" * 0x100, max_frames=max_frames)
         return result, m
 
-    @unittest.skipUnless(_has_cython, "requires Cython extension")
+    @unittest.skipUnless(_has_cython, "optional dependency: Cython extension")
     def test_walk_stops_on_ip_zero(self):
         frames = [
             {"frame_ip": 0x1000, "frame_sp": 0x2000, "frame_fp": 0x3000},
@@ -178,7 +178,7 @@ class TestStackWalkerCoverage(unittest.TestCase):
         self.assertEqual(result[0]["frame_ip"], 0x1000)
         self.assertEqual(m.call_count, 3)
 
-    @unittest.skipUnless(_has_cython, "requires Cython extension")
+    @unittest.skipUnless(_has_cython, "optional dependency: Cython extension")
     def test_walk_stops_on_none(self):
         frames = [
             {"frame_ip": 0x1000, "frame_sp": 0x2000, "frame_fp": 0x3000},
@@ -188,7 +188,7 @@ class TestStackWalkerCoverage(unittest.TestCase):
         self.assertEqual(len(result), 1)
         self.assertEqual(m.call_count, 2)
 
-    @unittest.skipUnless(_has_cython, "requires Cython extension")
+    @unittest.skipUnless(_has_cython, "optional dependency: Cython extension")
     def test_walk_respects_max_frames(self):
         frames = [
             {"frame_ip": 0x1000 + i, "frame_sp": 0x2000, "frame_fp": 0x3000}
@@ -198,7 +198,7 @@ class TestStackWalkerCoverage(unittest.TestCase):
         self.assertEqual(len(result), 4)
         self.assertEqual(m.call_count, 4)
 
-    @unittest.skipUnless(_has_cython, "requires Cython extension")
+    @unittest.skipUnless(_has_cython, "optional dependency: Cython extension")
     def test_walk_live_smoke(self):
         from tests.helpers import create_debugger, teardown
 

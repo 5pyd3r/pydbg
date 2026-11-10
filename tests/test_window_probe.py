@@ -193,7 +193,7 @@ class TestAgainstRealWindows(unittest.TestCase):
     def setUp(self):
         if not _desktop_has_windows():
             self.skipTest(
-                "no windows visible on this desktop (session 0 / headless): "
+                "environment: no windows visible on this desktop (session 0 / headless): "
                 "the probe cannot be exercised here, and passing on an empty "
                 "list is the defect this module exists to prevent")
 
@@ -238,7 +238,7 @@ class TestTheModalCase(unittest.TestCase):
 
     def setUp(self):
         if not _desktop_has_windows():
-            self.skipTest("no windows visible on this desktop "
+            self.skipTest("environment: no windows visible on this desktop "
                           "(session 0 / headless)")
 
     def test_a_message_box_is_modal_and_not_hung(self):
@@ -275,7 +275,7 @@ class TestTheSameZeroGetsTwoDiagnoses(unittest.TestCase):
 
     def setUp(self):
         if not _desktop_has_windows():
-            self.skipTest("no windows visible on this desktop "
+            self.skipTest("environment: no windows visible on this desktop "
                           "(session 0 / headless)")
 
     def _idle_timeout_for(self, path, wanted):
@@ -405,7 +405,7 @@ class TestTheWedgeCase(unittest.TestCase):
 
     def setUp(self):
         if not _desktop_has_windows():
-            self.skipTest("no windows visible on this desktop "
+            self.skipTest("environment: no windows visible on this desktop "
                           "(session 0 / headless)")
 
     def test_a_target_that_stops_pumping_is_not_reported_as_running(self):
@@ -430,7 +430,7 @@ class TestTheWedgeCase(unittest.TestCase):
                 time.sleep(0.25)
             else:
                 self.skipTest(
-                    f"the OS did not mark the window hung within "
+                    f"environment: the OS did not mark the window hung within "
                     f"{time.monotonic() - started:.1f}s "
                     f"(state was {probe.state.value}); IsHungAppWindow's "
                     f"threshold is not published, so this is an environment "

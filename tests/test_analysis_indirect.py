@@ -210,7 +210,7 @@ class TestRealImageIndirectSites(unittest.TestCase):
         path = os.path.join(os.environ.get("SystemRoot", r"C:\Windows"),
                             "System32", "kernel32.dll")
         if not os.path.exists(path):
-            raise unittest.SkipTest(f"no system DLL at {path}")
+            raise unittest.SkipTest(f"environment: no system DLL at {path}")
         # Once for the class: a full sweep of a real binary is seconds, and
         # doing it per test made this module the slowest in the suite.
         from pydbg.analysis import analyze_file
@@ -218,7 +218,7 @@ class TestRealImageIndirectSites(unittest.TestCase):
 
     def setUp(self):
         if not hasattr(self.__class__, "result"):
-            self.skipTest("no system DLL to analyse")
+            self.skipTest("environment: no system DLL to analyse")
 
     def test_some_indirect_branches_resolve(self):
         self.assertGreater(self.result.stats.indirect_resolved, 0)

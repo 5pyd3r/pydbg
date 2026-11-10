@@ -79,7 +79,7 @@ class TestCodegen(unittest.TestCase):
         try:
             codegen._backend()
         except PydbgError:
-            self.skipTest("LLVM backend not built")
+            self.skipTest("optional dependency: LLVM backend (-Denable-llvm-instrument=true)")
         with self.assertRaises(PydbgError) as ctx:
             codegen.compile_payload(
                 'extern void Missing_Func(int x);'
@@ -147,7 +147,7 @@ class TestAllocNear(unittest.TestCase):
         try:
             from pydbg import _pydbg     # noqa: F401
         except ImportError:
-            self.skipTest("requires the Cython extension")
+            self.skipTest("optional dependency: Cython extension")
         from tests.helpers import create_debugger, module_base
         self.dbg, _pid, _tid = create_debugger()
         self.near = module_base(self.dbg)
@@ -321,7 +321,7 @@ def _backend_available():
 
 @unittest.skipUnless(
     os.path.isfile(_TEST_TARGET) and _backend_available(),
-    "requires instrument_target.exe and LLVM backend")
+    "optional dependency: LLVM backend and instrument_target.exe")
 class TestInstrumentLive(unittest.TestCase):
 
     @property
@@ -421,7 +421,7 @@ def _wow64_available():
 
 @unittest.skipUnless(
     os.path.isfile(_TEST_TARGET32) and _wow64_available() and _backend_available(),
-    "requires 32-bit instrument target, WOW64 host, and LLVM backend")
+    "optional dependency: LLVM backend, 32-bit instrument target, WOW64 host")
 class TestInstrumentLive32(TestInstrumentLive):
     """32 位 WOW64 live 往返；复用 TestInstrumentLive 的断言逻辑。"""
 

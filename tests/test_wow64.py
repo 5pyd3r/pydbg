@@ -115,7 +115,7 @@ def _export_address(dbg, exe_path, base, name):
 
 
 @unittest.skipUnless(_HAS_TARGET and _wow64_available(),
-                     "requires 32-bit target and 64-bit host")
+                     "environment: 32-bit target and 64-bit host")
 class TestWow64Registers(unittest.TestCase):
     def test_get_registers_returns_x86_names(self):
         from pydbg import Debugger
@@ -156,7 +156,7 @@ class TestWow64Registers(unittest.TestCase):
 
 
 @unittest.skipUnless(_HAS_TARGET and _wow64_available(),
-                     "requires 32-bit target and 64-bit host")
+                     "environment: 32-bit target and 64-bit host")
 class TestWow64SoftwareBreakpoint(unittest.TestCase):
     def test_run_auto_handles_wx86_breakpoint(self):
         from pydbg import Debugger
@@ -243,7 +243,7 @@ class TestWow64SoftwareBreakpoint(unittest.TestCase):
 
 
 @unittest.skipUnless(_HAS_TARGET and _wow64_available(),
-                     "requires 32-bit target and 64-bit host")
+                     "environment: 32-bit target and 64-bit host")
 class TestWow64HardwareBreakpoint(unittest.TestCase):
     def test_dr0_execute_breakpoint(self):
         from pydbg import Debugger
@@ -288,7 +288,7 @@ class TestWow64HardwareBreakpoint(unittest.TestCase):
 
 
 @unittest.skipUnless(_HAS_TARGET and _wow64_available(),
-                     "requires 32-bit target and 64-bit host")
+                     "environment: 32-bit target and 64-bit host")
 class TestWow64Modules(unittest.TestCase):
     def test_the_event_fallback_covers_what_psapi_cannot_see_yet(self):
         """The fallback on a real target, with no mock in the way.
@@ -355,7 +355,7 @@ class TestWow64Modules(unittest.TestCase):
 
 
 @unittest.skipUnless(_HAS_TARGET and _wow64_available(),
-                     "requires 32-bit target and 64-bit host")
+                     "environment: 32-bit target and 64-bit host")
 class TestWow64Attach(unittest.TestCase):
     def test_attach_to_running_x86_target(self):
         from pydbg import Debugger
@@ -515,16 +515,22 @@ class TestWow64ArchMapping(unittest.TestCase):
         self.assertEqual(s.arch_for_tid(999), 32)  # fallback to main
 
 
-@unittest.skipUnless(_wow64_available(), "requires 64-bit host")
+@unittest.skipUnless(_wow64_available(), "environment: 64-bit host")
 class TestWow64ChildProcess(unittest.TestCase):
     def test_cross_arch_child_gets_correct_machine(self):
         from pydbg import Debugger
         from tests.helpers import teardown
 
-        spawn = os.path.join(_TEST_DIR, "target", "spawn_child.exe")
-        child = os.path.join(_TEST_DIR, "target", "child_target_x64.exe")
+        spawn = os.environ.get(
+            "TEST_SPAWN_CHILD",
+            os.path.join(_TEST_DIR, "target", "spawn_child.exe"))
+        child = os.environ.get(
+            "TEST_CHILD_TARGET_X64",
+            os.path.join(_TEST_DIR, "target", "child_target_x64.exe"))
         if not (os.path.exists(spawn) and os.path.exists(child)):
-            self.skipTest("spawn_child.exe / child_target_x64.exe not built")
+            self.skipTest(
+                "target not built: spawn_child.exe (scripts/build-target32.ps1), "
+                "child_target (meson compile)")
         dbg = Debugger()
         dbg.set_debug_children(True)
         try:
@@ -571,7 +577,7 @@ class TestWow64ChildProcess(unittest.TestCase):
 
 
 @unittest.skipUnless(_HAS_THREADED and _wow64_available(),
-                     "requires threaded 32-bit target and 64-bit host")
+                     "environment: threaded 32-bit target and 64-bit host")
 class TestWow64ProcessWideHardwareBreakpoint(unittest.TestCase):
     """Process-wide (default) vs thread-specific hardware breakpoints."""
 

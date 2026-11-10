@@ -240,7 +240,7 @@ class TestRealImageSeeds(unittest.TestCase):
 
     def setUp(self):
         if not os.path.exists(self.KERNEL32):
-            self.skipTest(f"no system DLL at {self.KERNEL32}")
+            self.skipTest(f"environment: no system DLL at {self.KERNEL32}")
         from pydbg.analysis import AnalyzedImage
         from pydbg.analysis.seeds import SeedProvider
         self.seeds = SeedProvider(
