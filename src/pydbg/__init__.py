@@ -23,6 +23,7 @@ from .symbol.resolver import SymbolResolver
 from .trace.calltree import CallTree, CallNode
 from .patch.assembler import Assembler
 from .core.session import ChildProcessInfo
+from .core.status import ExitReason, ExitStatus
 from .core.event import DebugEvent
 from .core.window_probe import (
     MessageLoopState, WindowInfo, WindowProbe, WindowProbeQuery,
@@ -46,6 +47,8 @@ __all__ = [
     "Debugger",
     "HOST_ARCH",
     "ChildProcessInfo",
+    "ExitReason",
+    "ExitStatus",
     "DebugEvent",
     "MessageLoopState",
     "WindowInfo",

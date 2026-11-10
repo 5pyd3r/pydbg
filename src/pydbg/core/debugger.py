@@ -28,6 +28,7 @@ from ..symbol.resolver import SymbolResolver
 from ..thread.manager import ThreadManager
 from .event import DebugEvent
 from .session import DebugSession
+from .status import ExitReason, ExitStatus
 from .window_probe import MessageLoopState
 
 
@@ -657,13 +658,23 @@ class Debugger:
             child.exit_code = event.raw.get("exit_code")
 
     def continue_event(self, pid=None, tid=None):
+        """Continue a paused debug event.
+
+        Fails loudly unless the pid/tid pair is simply no longer a paused
+        event (ERROR_INVALID_PARAMETER) — which is what continuing after a
+        target, usually a child, has already exited looks like. Every other
+        failure used to vanish here as well.
+        """
         try:
             _pydbg.continue_debug_event(
                 pid or self._session.pid, tid or self._session.tid
             )
-        except OSError:
-            # Non-fatal: process may have already exited (common with children)
-            pass
+        except OSError as e:
+            if getattr(e, "errno", None) == 87:      # ERROR_INVALID_PARAMETER
+                return
+            raise ProcessError(
+                f"ContinueDebugEvent(pid={pid or self._session.pid}, "
+                f"tid={tid or self._session.tid}): {e}") from e
 
     def _dispatch_exception(self, event):
         """Run the breakpoint/single-step lifecycle for one EXCEPTION event.
@@ -729,8 +740,13 @@ class Debugger:
                 (see SoftwareBreakpointManager.handle_breakpoint_hit). Continuing
                 would leave the instruction pointer mid-instruction, so this is
                 surfaced rather than retried.
+
+        Returns:
+            ExitStatus: why the loop stopped, and the exit code when there was
+            one. A callback that returns False stops the loop while the target
+            is still running, so exit_code is None and the reason says so —
+            the old int return used 1 for that *and* for an exit code of 1.
         """
-        exit_code = 1
         idle = 0
         while True:
             event = self.wait_event(timeout_ms)
@@ -750,22 +766,20 @@ class Debugger:
                         self._degraded_message(event.tid, event.exception_addr))
                 if dispatch.outcome is HandleOutcome.HANDLED:
                     if dispatch.deliver and callback(event) is False:
-                        break
+                        return ExitStatus(None, ExitReason.STOPPED_BY_CALLBACK)
                     self.continue_event(event.pid, event.tid)
                     continue  # the re-arming single-step is ours, not the user's
 
             result = callback(event)
             if result is False:
-                break
+                return ExitStatus(None, ExitReason.STOPPED_BY_CALLBACK)
 
             if event.type == "EXIT_PROCESS":
                 exit_code = event.raw.get("exit_code", 1)
                 self.continue_event(event.pid, event.tid)
-                break
+                return ExitStatus(exit_code, ExitReason.TARGET_EXITED)
 
             self.continue_event(event.pid, event.tid)
-
-        return exit_code
 
     def _current_ip(self):
         """Best-effort instruction pointer of the session's default thread."""

@@ -41,7 +41,7 @@ pip install -e . --no-build-isolation
 ## 快速开始
 
 ```python
-from pydbg import Debugger
+from pydbg import Debugger, ExitReason
 
 dbg = Debugger()
 
@@ -54,7 +54,12 @@ def on_event(event):
     if event.type == "EXCEPTION":
         print(f"  异常: {event.exception_name} at 0x{event.exception_addr:X}")
 
-exit_code = dbg.run(on_event)
+# run() 返回 ExitStatus：为什么停下，以及有没有退出码
+status = dbg.run(on_event)
+if status.reason is ExitReason.TARGET_EXITED:
+    print(f"进程退出，code={status.exit_code}")
+else:                       # STOPPED_BY_CALLBACK：目标还在跑，没有退出码
+    print("回调叫停了循环")
 
 # 或手动控制事件循环
 event = dbg.wait_event(timeout_ms=5000)
@@ -223,7 +228,7 @@ while True:
 | `close_handle(h)` | 关闭 Win32 句柄 |
 | `wait_event(timeout_ms)` | 等待下一个调试事件，返回 `DebugEvent` 或 `None` |
 | `continue_event(pid, tid)` | 继续已暂停的调试事件 |
-| `run(callback, timeout_ms, max_idle_timeouts=None)` | 事件驱动调试循环，直到进程退出或回调返回 `False`；`max_idle_timeouts` 超限抛 `TimeoutError` |
+| `run(callback, timeout_ms, max_idle_timeouts=None)` | 事件驱动调试循环，直到进程退出或回调返回 `False`，返回 `ExitStatus`（`reason` 说明是哪种）；`max_idle_timeouts` 超限抛 `TimeoutError` |
 | `run_until(addr, timeout_ms, max_wait_ms, max_idle_timeouts)` | 运行到指定地址；到达返回事件（目标停在该处），超预算抛 `TimeoutError` |
 | `set_debug_children(enabled=True)` | 开启/关闭子进程调试（必须在 create_process 前调用） |
 | `get_child_processes()` | 返回所有子进程信息 `dict[pid, ChildProcessInfo]` |
