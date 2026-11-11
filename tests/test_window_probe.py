@@ -22,6 +22,7 @@ from tests import (
     TEST_MODAL_TARGET_PATH, TEST_WEDGE_TARGET_PATH, TEST_WINDOW_TARGET_PATH,
 )
 from tests.helpers import teardown
+from pydbg.core.windows import Windows
 
 # Which of the two halves a test needs. The state table runs everywhere; the
 # integration tests need a desktop that actually has windows, and say so
@@ -284,8 +285,8 @@ class TestTheSameZeroGetsTwoDiagnoses(unittest.TestCase):
         from pydbg.core.debugger import Debugger
         with TargetProcess(path) as pid:
             probe = _wait_for_state(pid, wanted)
-            debugger = Debugger.__new__(Debugger)
-            with patch.object(Debugger, "window_probe", return_value=probe):
+            debugger = Debugger()   # needs windows; _idle_timeout does not use a session
+            with patch.object(Windows, "probe", return_value=probe):
                 return debugger._idle_timeout(3, 200, True)
 
     def test_the_two_messages_differ_and_name_the_cause(self):
@@ -344,8 +345,8 @@ class TestRunCarriesTheDiagnosis(unittest.TestCase):
         from unittest.mock import patch
 
         from pydbg.core.debugger import Debugger
-        debugger = Debugger.__new__(Debugger)
-        with patch.object(Debugger, "window_probe") as probe:
+        debugger = Debugger()   # needs windows; _idle_timeout does not use a session
+        with patch.object(Windows, "probe") as probe:
             error = debugger._idle_timeout(3, 200, False)
         probe.assert_not_called()
         self.assertIn("cannot rule out that the target is blocked", str(error))
@@ -358,8 +359,8 @@ class TestTheRefusalsAreLoud(unittest.TestCase):
         from unittest.mock import patch
 
         from pydbg.core.debugger import Debugger
-        debugger = Debugger.__new__(Debugger)
-        with patch.object(Debugger, "window_probe", return_value=None):
+        debugger = Debugger()   # needs windows; _idle_timeout does not use a session
+        with patch.object(Windows, "probe", return_value=None):
             error = debugger._idle_timeout(3, 200, True)
         self.assertIn("cannot rule out that the target is blocked",
                       str(error))
@@ -367,7 +368,7 @@ class TestTheRefusalsAreLoud(unittest.TestCase):
 
     def test_a_disabled_probe_is_also_declared(self):
         from pydbg.core.debugger import Debugger
-        debugger = Debugger.__new__(Debugger)
+        debugger = Debugger()   # needs windows; _idle_timeout does not use a session
         error = debugger._idle_timeout(3, 200, False)
         self.assertIn("cannot rule out that the target is blocked",
                       str(error))
@@ -377,12 +378,12 @@ class TestTheRefusalsAreLoud(unittest.TestCase):
 
         from pydbg.core.debugger import Debugger
         from pydbg.core.window_probe import MessageLoopState, WindowProbe
-        debugger = Debugger.__new__(Debugger)
+        debugger = Debugger()   # needs windows; _idle_timeout does not use a session
         undecided = WindowProbe(pid=7, state=MessageLoopState.UNKNOWN,
                                 evidence="the probe failed",
                                 caveat="cannot rule out that the target is "
                                        "blocked")
-        with patch.object(Debugger, "window_probe", return_value=undecided):
+        with patch.object(Windows, "probe", return_value=undecided):
             error = debugger._idle_timeout(3, 200, True)
         self.assertIn("cannot rule out that the target is blocked",
                       str(error))

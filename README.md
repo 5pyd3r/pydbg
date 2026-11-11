@@ -278,6 +278,28 @@ while True:
 | `exception_code_to_str(code)` | 异常码 → 名称 |
 | `get_exception_info(code, addr, ...)` | 解析异常详情 |
 
+### 能力对象（不挂在门面上）
+
+这些能力可以独立构造、独立测试，所以不再占用 `Debugger` 的方法（ADR-0002），通过属性访问：
+
+| 属性 | 用途 |
+|------|------|
+| `dbg.process` | `handle(pid, need)` / `read_handle(pid)` / `open(pid, access)` / `close(pid)`；进程快照用模块级 `pydbg.enumerate_processes()` |
+| `dbg.windows` | `probe(pid)` / `state(pid)` / `texts(pid)` —— 原来的 `window_probe` / `message_loop_state` / `read_window_texts` |
+| `dbg.symbols` | `initialize()` / `cleanup()` / `from_name()` / `from_addr()`（dbghelp） |
+| `dbg.hook_iat` / `dbg.hook_inline` | `set()` / `restore()` |
+| `dbg.instrumenter` | `install()` / `restore()` / `active` |
+| `dbg.step_tracer` | `step()` |
+| `dbg.disasm` / `dbg.assembler` | 反汇编 / 汇编 |
+| `dbg.stack_walker` | 栈回溯 |
+
+```python
+dbg.windows.state()                       # MessageLoopState 或 None
+dbg.symbols.initialize()
+name = dbg.symbols.from_addr(addr)
+handle = dbg.process.open(pid)            # 不是被调试进程时按需打开
+```
+
 ### DebugEvent
 
 | 属性 | 说明 |

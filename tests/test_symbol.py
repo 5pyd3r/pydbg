@@ -24,28 +24,28 @@ class TestSymbolResolverCoverage(unittest.TestCase):
         # process and skip SymCleanup, a later test whose process reuses the
         # same handle value gets SymInitializeW ERROR_INVALID_PARAMETER (87).
         try:
-            self.dbg.symbol_cleanup()
+            self.dbg.symbols.cleanup()
         except Exception:
             pass
         from tests.helpers import teardown
         teardown(self.dbg)
 
     def test_initialize_cleanup_live(self):
-        self.dbg.symbol_initialize()
+        self.dbg.symbols.initialize()
         self.assertTrue(self.dbg.symbols._initialized)
-        self.dbg.symbol_cleanup()
+        self.dbg.symbols.cleanup()
         self.assertFalse(self.dbg.symbols._initialized)
 
     def test_cleanup_twice_noop(self):
-        self.dbg.symbol_initialize()
-        self.dbg.symbol_cleanup()
-        self.dbg.symbol_cleanup()  # second cleanup must be a no-op
+        self.dbg.symbols.initialize()
+        self.dbg.symbols.cleanup()
+        self.dbg.symbols.cleanup()  # second cleanup must be a no-op
         self.assertFalse(self.dbg.symbols._initialized)
 
     def test_set_options_live(self):
-        self.dbg.symbol_initialize()
+        self.dbg.symbols.initialize()
         self.dbg.symbols.set_options(0x2)  # SYMOPT_UNDNAME
-        self.dbg.symbol_cleanup()
+        self.dbg.symbols.cleanup()
 
     def test_from_name_best_effort(self):
         """A resolution failure must name what failed; it must not skip.
@@ -54,9 +54,9 @@ class TestSymbolResolverCoverage(unittest.TestCase):
         were both a green run.
         """
         from pydbg.exceptions import PydbgError
-        self.dbg.symbol_initialize()
+        self.dbg.symbols.initialize()
         try:
-            info = self.dbg.symbol_from_name("ntdll.dll!NtCurrentTeb")
+            info = self.dbg.symbols.from_name("ntdll.dll!NtCurrentTeb")
         except PydbgError as e:
             self.assertIn("NtCurrentTeb", str(e),
                           "the error does not say which symbol failed")
@@ -67,9 +67,9 @@ class TestSymbolResolverCoverage(unittest.TestCase):
     def test_from_addr_best_effort(self):
         from pydbg.exceptions import PydbgError
         from tests.helpers import module_base
-        self.dbg.symbol_initialize()
+        self.dbg.symbols.initialize()
         try:
-            info = self.dbg.symbol_from_addr(module_base(self.dbg))
+            info = self.dbg.symbols.from_addr(module_base(self.dbg))
         except PydbgError as e:
             self.assertTrue(str(e),
                             "a resolution failure must carry a reason")

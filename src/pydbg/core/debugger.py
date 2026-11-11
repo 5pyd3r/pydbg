@@ -27,9 +27,10 @@ from ..module.resolver import ModuleResolver
 from ..symbol.resolver import SymbolResolver
 from ..thread.manager import ThreadManager
 from .event import DebugEvent
-from .process import ProcessManager
+from .process import ProcessManager, enumerate_processes
 from .session import DebugSession
 from .status import ExitReason, ExitStatus
+from .windows import Windows
 from .window_probe import MessageLoopState
 
 
@@ -71,6 +72,7 @@ class Debugger:
     def __init__(self):
         self._session = DebugSession()
         self.process = ProcessManager(self._session)
+        self.windows = Windows(self._session)
         self.memory = MemoryManager(self._session)
         self.thread = ThreadManager(self._session)
         self.brk_sw = SoftwareBreakpointManager(self._session)
@@ -99,14 +101,6 @@ class Debugger:
     def _get_read_handle(self, pid=None):
         """Permissive resolution: opens an unknown pid on demand."""
         return self.process.read_handle(pid)
-
-    def open_process(self, pid, access=None):
-        """Open a handle to a process by pid. See ProcessManager.open()."""
-        return self.process.open(pid, access)
-
-    def close_process(self, pid):
-        """Close a handle opened by open_process(). No-op if never opened."""
-        return self.process.close(pid)
 
     def _close_foreign_handles(self):
         """Release every handle open_process() handed out. Never raises."""
@@ -457,17 +451,7 @@ class Debugger:
         """
         return self._session.child_processes.get(pid)
 
-    def enumerate_processes(self):
-        """Every process on the system: a list of dicts, ascending as returned.
-
-        Each dict: 'pid', 'parent_pid', 'exe_name', 'thread_count'. Sourced
-        from a Toolhelp32 snapshot, so it describes the process tree whether
-        or not anything is being debugged.
-        """
-        try:
-            return _pydbg.enumerate_processes()
-        except OSError as e:
-            raise ProcessError(f"process snapshot failed: {e}")
+    # ── lifecycle: children ────────────────────────────────────
 
     def enumerate_child_processes(self, pid=None, recursive=False):
         """Children of 'pid' (default: the debug target) as the OS reports them.
@@ -498,7 +482,7 @@ class Debugger:
                 "no process to enumerate children of: pass pid=, or create or "
                 "attach to a process first")
 
-        snapshot = self.enumerate_processes()
+        snapshot = enumerate_processes()
         children = []
         frontier = [parent]
         seen = {parent}
@@ -704,7 +688,7 @@ class Debugger:
                 f"cannot rule out that the target is blocked: the window "
                 f"probe was disabled (probe_on_idle=False)", probe=None)
 
-        probe = self.window_probe()
+        probe = self.windows.probe()
         if probe is None:
             return _timeout(
                 f"{prefix}. cannot rule out that the target is blocked: the "
@@ -725,48 +709,6 @@ class Debugger:
             detail = (f"cannot rule out that the target is blocked "
                       f"({probe.evidence})")
         return _timeout(f"{prefix}. {detail}.{_caveat(probe)}", probe=probe)
-
-    def window_probe(self, pid=None):
-        """What the target's message loop is doing, or None if unavailable.
-
-        None means the probe could not be built — no Cython extension, or not
-        Windows — and is deliberately distinct from a probe whose answer is
-        UNKNOWN. Both are refusals, but only one of them is a refusal this
-        package can do anything about, and a caller reporting a zero result
-        needs to say which.
-        """
-        try:
-            from .window_probe import WindowProbeQuery
-        except ImportError:
-            return None
-        target = self._session.pid if pid is None else pid
-        if target is None:
-            return None
-        try:
-            return WindowProbeQuery().probe(target)
-        except Exception:                              # noqa: BLE001
-            return None
-
-    def message_loop_state(self, pid=None):
-        """`MessageLoopState`, or None when the probe is unavailable."""
-        probe = self.window_probe(pid)
-        return None if probe is None else probe.state
-
-    def read_window_texts(self, pid=None):
-        """(class name, text) for every window of the target, top level first."""
-        probe = self.window_probe(pid)
-        if probe is None:
-            return ()
-        found = []
-
-        def walk(window):
-            found.append((window.class_name, window.text))
-            for child in window.children:
-                walk(child)
-
-        for window in probe.windows:
-            walk(window)
-        return tuple(found)
 
     def run_until(self, addr, timeout_ms=10000, max_wait_ms=60000,
                   max_idle_timeouts=None):
@@ -1006,22 +948,6 @@ class Debugger:
 
     # ── delegated: symbols ──────────────────────────────────────
 
-    def symbol_initialize(self, search_path=None, invade=True):
-        """Initialize dbghelp symbol handler. Call before symbol lookups."""
-        self.symbols.initialize(search_path, invade)
-
-    def symbol_cleanup(self):
-        """Release dbghelp symbol resources."""
-        self.symbols.cleanup()
-
-    def symbol_from_name(self, name):
-        """Look up symbol address by name."""
-        return self.symbols.from_name(name)
-
-    def symbol_from_addr(self, address):
-        """Look up symbol name by address."""
-        return self.symbols.from_addr(address)
-
     # ── delegated: thread ──────────────────────────────────────
 
     def open_thread(self, tid):
@@ -1217,33 +1143,6 @@ class Debugger:
                 'armed': armed,
             })
         return report
-
-    # ── delegated: disasm ───────────────────────────────────────
-
-    def disasm_at(self, addr, size):
-        return self.disasm.disasm(addr, self.memory.read(addr, size))
-
-    # ── delegated: patch ────────────────────────────────────────
-
-    def assemble(self, code, addr=0):
-        return self.assembler.assemble(code, addr)
-
-    def step_trace(self, h_thread):
-        self.step_tracer.step(h_thread)
-
-    # ── delegated: hook ─────────────────────────────────────────
-
-    def iat_hook(self, module, func, new_addr):
-        return self.hook_iat.set(module, func, new_addr)
-
-    def iat_unhook(self, module, func, original_addr=None):
-        return self.hook_iat.restore(module, func, original_addr)
-
-    def inline_hook(self, target_addr, hook_addr):
-        return self.hook_inline.set(target_addr, hook_addr)
-
-    def inline_unhook(self, trampoline):
-        return self.hook_inline.restore(trampoline)
 
     # ── exception helpers ──────────────────────────────────────
 

@@ -13,6 +13,19 @@ from .. import _pydbg
 from ..exceptions import ProcessError
 
 
+def enumerate_processes():
+    """Every process on the system: a list of dicts, ascending as returned.
+
+    Each dict: 'pid', 'parent_pid', 'exe_name', 'thread_count'. Sourced from a
+    Toolhelp32 snapshot, so it describes the process tree whether or not
+    anything is being debugged. A module-level function because it answers a
+    question about the system, not about this session (ADR-0002)."""
+    try:
+        return _pydbg.enumerate_processes()
+    except OSError as e:
+        raise ProcessError(f"process snapshot failed: {e}")
+
+
 class ProcessManager:
     """Handles for the debug target, its debug children, and foreign pids."""
 
