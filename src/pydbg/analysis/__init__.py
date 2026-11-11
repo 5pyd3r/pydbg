@@ -2,12 +2,17 @@
 
 pydbg's other layers want a target running: the debugger obviously, and the
 disassembler needs someone to hand it bytes. This package is the one that works
-from an image on disk, which is what makes bulk analysis possible at all.
+from an image on disk, which is what makes bulk analysis possible at all —
+and it must stay importable without the Windows extension (ADR-0001).
 
     from pydbg.analysis import analyze_file
     result = analyze_file("target.exe")
     result.stats.func_starts
     result.callers_of(0x401000)
+
+`analyze_process` is the one entry point that wants a live session; it reaches
+the debugger through ProcessSource, whose MemoryManager import is lazy, so the
+rest of the package never touches it.
 
 Coverage is reported with its overlap, because the two together are the only
 honest form: the count of decoded bytes alone reads high whenever the decode
