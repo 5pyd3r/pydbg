@@ -353,7 +353,7 @@ class TestForeignProcessReads(unittest.TestCase):
         with self.assertRaises(ProcessError):
             self.dbg.write_memory(addr, b"\x00", pid=pid)
 
-        self.dbg.open_process(pid, PROCESS_ALL_ACCESS)
+        self.dbg.process.open(pid, PROCESS_ALL_ACCESS)
         self.assertEqual(self.dbg._session.foreign_access[pid],
                          PROCESS_ALL_ACCESS)
         self.dbg.write_memory(addr, b"\x00", pid=pid)
@@ -361,12 +361,12 @@ class TestForeignProcessReads(unittest.TestCase):
 
     def test_close_process_is_idempotent_and_releases_the_handle(self):
         pid = os.getpid()
-        self.dbg.open_process(pid)
+        self.dbg.process.open(pid)
         self.assertIn(pid, self.dbg._session.foreign_handles)
-        self.dbg.close_process(pid)
+        self.dbg.process.close(pid)
         self.assertNotIn(pid, self.dbg._session.foreign_handles)
         self.assertNotIn(pid, self.dbg._session.foreign_access)
-        self.dbg.close_process(pid)                   # nothing to close
+        self.dbg.process.close(pid)                   # nothing to close
 
 
 @unittest.skipUnless(_has_cython, "optional dependency: Cython extension")
@@ -378,7 +378,9 @@ class TestProcessTreeEnumeration(unittest.TestCase):
         self.dbg = Debugger()
 
     def test_snapshot_sees_this_process_and_its_parent(self):
-        procs = self.dbg.enumerate_processes()
+        from pydbg import enumerate_processes
+
+        procs = enumerate_processes()
         mine = [p for p in procs if p["pid"] == os.getpid()]
         self.assertEqual(len(mine), 1)
         self.assertTrue(mine[0]["exe_name"], "exe name should be populated")
@@ -496,8 +498,8 @@ class TestNestedDebugging(unittest.TestCase):
             # explicit wider open is what makes terminating it possible — the
             # same split the API documents.
             try:
-                self.dbg.close_process(self.child["pid"])
-                self.dbg.open_process(self.child["pid"], PROCESS_ALL_ACCESS)
+                self.dbg.process.close(self.child["pid"])
+                self.dbg.process.open(self.child["pid"], PROCESS_ALL_ACCESS)
                 self.dbg.terminate_process(0, pid=self.child["pid"])
             except Exception:
                 pass
@@ -583,7 +585,7 @@ class TestNestedDebugging(unittest.TestCase):
 
         # The child's list must be the child's: exactly what PSAPI reports,
         # with nothing merged in from the attached process's event table.
-        handle = self.dbg.open_process(child["pid"])
+        handle = self.dbg.process.open(child["pid"])
         raw = self.dbg.modules.enumerate_handle(handle,
                                                 allow_event_fallback=False)
         self.assertEqual(sorted(m["base_address"] for m in modules),
