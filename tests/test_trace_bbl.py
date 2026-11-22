@@ -18,7 +18,10 @@ import os
 import tempfile
 import unittest
 
-from pydbg.trace import BblTracer, TraceSummary
+from pydbg.trace import (
+    BblTracer, TraceSummary,
+    STOP_IDLE_TIMEOUT, STOP_MAX_EVENTS, STOP_NO_BLOCKS, STOP_TARGET_EXITED,
+)
 from pydbg.trace.format import BLOCK, TraceWriter, read_trace
 
 try:
@@ -27,6 +30,35 @@ try:
     _has_cython = True
 except ImportError:
     _has_cython = False
+
+
+class TestTraceSummary(unittest.TestCase):
+    """The summary must not be able to contradict itself."""
+
+    def summary(self, reason):
+        return TraceSummary(events=0, blocks=0, reason=reason, elapsed_ns=0)
+
+    def test_truncated_is_derived_from_the_stop_reason(self):
+        """One field, so 'complete' and 'cut off' cannot both be true."""
+        self.assertTrue(self.summary(STOP_MAX_EVENTS).truncated)
+        self.assertTrue(self.summary(STOP_IDLE_TIMEOUT).truncated)
+        self.assertFalse(self.summary(STOP_TARGET_EXITED).truncated)
+        self.assertFalse(self.summary(STOP_NO_BLOCKS).truncated)
+        self.assertFalse(self.summary(None).truncated)
+
+    def test_there_is_no_stored_truncated_flag_to_disagree_with(self):
+        with self.assertRaises(TypeError):
+            TraceSummary(events=0, blocks=0, truncated=True, reason=None,
+                         elapsed_ns=0)
+
+    def test_the_stop_reasons_are_exported_as_distinct_constants(self):
+        reasons = (STOP_MAX_EVENTS, STOP_TARGET_EXITED,
+                   STOP_IDLE_TIMEOUT, STOP_NO_BLOCKS)
+        self.assertEqual(len(set(reasons)), len(reasons))
+        self.assertEqual(STOP_MAX_EVENTS, "max_events")
+        self.assertEqual(STOP_IDLE_TIMEOUT, "idle_timeout")
+        for reason in reasons:
+            self.assertIsInstance(reason, str)
 
 
 class _LiveTestCase(unittest.TestCase):
@@ -76,8 +108,8 @@ class TestBblTracerPlanning(_LiveTestCase):
         self.assertEqual(summary.events, 0)
         self.assertEqual(summary.blocks, 0)
         self.assertFalse(summary.truncated)
-        self.assertIsNotNone(summary.reason,
-                             "an untraceable module must state why, not be silent")
+        self.assertEqual(summary.reason, STOP_NO_BLOCKS,
+                         "an untraceable module must state why, not be silent")
 
 
 @unittest.skipUnless(_has_cython, "optional dependency: Cython extension")
@@ -101,7 +133,7 @@ class TestBblTracerRun(_LiveTestCase):
         self.assertIsInstance(summary, TraceSummary)
         self.assertGreaterEqual(summary.events, 1, "the target ran no planned block")
         self.assertFalse(summary.truncated)
-        self.assertIsNone(summary.reason)
+        self.assertEqual(summary.reason, STOP_TARGET_EXITED)
         self.assertEqual(len(recorded), summary.events)
         self.assertEqual(summary.blocks, len({event.rva for event in recorded}))
         for event in recorded:
@@ -126,7 +158,7 @@ class TestBblTracerRun(_LiveTestCase):
         summary = tracer.run()
 
         self.assertTrue(summary.truncated, "the event budget did not truncate the run")
-        self.assertEqual(summary.reason, "max_events")
+        self.assertEqual(summary.reason, STOP_MAX_EVENTS)
         self.assertEqual(summary.events, 1)
         self.assertEqual(self.dbg.verify_breakpoints(), [])
 

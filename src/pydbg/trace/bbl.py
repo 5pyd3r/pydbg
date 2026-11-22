@@ -35,15 +35,29 @@ from ..core.status import ExitReason
 from ..exceptions import BreakpointError, PydbgError
 from .format import BLOCK, TraceEvent
 
+# Why a run stopped. These are exported so callers compare against a name and
+# not a string literal that can drift. Two of them mean the trace is partial.
+STOP_MAX_EVENTS = "max_events"
+STOP_TARGET_EXITED = "target_exited"
+STOP_IDLE_TIMEOUT = "idle_timeout"
+STOP_NO_BLOCKS = "no traceable blocks"
+
+# The reasons that mean "a budget cut this run short". `TraceSummary.truncated`
+# is derived from this set, so it cannot disagree with `reason`.
+TRUNCATED_REASONS = frozenset((STOP_MAX_EVENTS, STOP_IDLE_TIMEOUT))
+
 
 @dataclass(frozen=True)
 class TraceSummary:
     """What one `BblTracer.run()` saw, and why it stopped.
 
-    'events' counts BLOCK events recorded; 'blocks' counts the distinct block
+    'events' counts BLOCK events recorded; 'blocks' counts the *distinct* block
     starts among them, because a loop can execute one block a thousand times.
-    'truncated' and 'reason' are the honest half of a budget: a trace cut at
-    `max_events` must not read as a complete one.
+
+    'reason' is the stop reason, one of the STOP_* constants or None when the
+    loop ended without setting one. 'truncated' is not stored: it is derived
+    from 'reason', so a summary cannot claim to be complete while its reason
+    says a budget stopped it.
 
     'elapsed_ns' is wall time for the whole run, the target's own execution
     included — it is what a caller measures, not the tracer's overhead alone.
@@ -51,9 +65,13 @@ class TraceSummary:
 
     events: int
     blocks: int
-    truncated: bool
     reason: str | None
     elapsed_ns: int
+
+    @property
+    def truncated(self):
+        """True when a budget stopped the run, not the target."""
+        return self.reason in TRUNCATED_REASONS
 
 
 class BblTracer:
@@ -96,7 +114,6 @@ class BblTracer:
         self._addresses = {}
         self._events = 0
         self._seen = set()
-        self._truncated = False
         self._reason = None
 
     # ── planning ───────────────────────────────────────────────
@@ -197,13 +214,16 @@ class BblTracer:
                 self.plan()
 
             if not self._blocks:
-                self._reason = 'no traceable blocks'
+                self._reason = STOP_NO_BLOCKS
             else:
                 self._addresses = {self._base + rva: rva
                                    for rva in self._blocks}
                 for address in sorted(self._addresses):
                     armed.append(self.dbg.set_breakpoint(address))
                 status = self.dbg.run(self._on_event)
+                if (status is not None
+                        and status.reason is ExitReason.TARGET_EXITED):
+                    self._reason = STOP_TARGET_EXITED
         finally:
             unrestored = self._remove_breakpoints(armed)
             if self.dbg.verify_breakpoints():
@@ -219,7 +239,6 @@ class BblTracer:
         return TraceSummary(
             events=self._events,
             blocks=len(self._seen),
-            truncated=self._truncated,
             reason=self._reason,
             elapsed_ns=time.perf_counter_ns() - started,
         )
@@ -233,7 +252,6 @@ class BblTracer:
         self._addresses = {}
         self._events = 0
         self._seen = set()
-        self._truncated = False
         self._reason = None
 
     def _on_event(self, event):
@@ -261,8 +279,7 @@ class BblTracer:
         self._seen.add(rva)
 
         if self._events >= self.max_events:
-            self._truncated = True
-            self._reason = 'max_events'
+            self._reason = STOP_MAX_EVENTS
             return False
         return None
 
