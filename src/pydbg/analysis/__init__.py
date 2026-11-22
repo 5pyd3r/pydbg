@@ -40,8 +40,8 @@ from .model import (
 )
 from .owners import (
     DETERMINED_FACTS, BOUNDARY_KINDS, RECEIVER_FACTS, Boundary,
-    ReceiverNote, RegionOwnership, boundary_of, classify_range,
-    memory_base_registers, receiver_of,
+    ReceiverNote, RegionOwnership, boundary_of, classify_range, container_of,
+    function_of, memory_base_registers, receiver_of,
 )
 from .names import Name, NameTable, auto_names, import_names
 from .workspace import Workspace, WorkspaceError, image_fingerprint
@@ -81,7 +81,7 @@ __all__ = [
     'scan_section',
     'SlotTable', 'OWNER_KINDS',
     'Boundary', 'BOUNDARY_KINDS', 'boundary_of',
-    'RegionOwnership', 'classify_range',
+    'RegionOwnership', 'classify_range', 'container_of', 'function_of',
     'ReceiverNote', 'RECEIVER_FACTS', 'DETERMINED_FACTS', 'receiver_of',
     'memory_base_registers',
     'Bound', 'ValueSet', 'DECIDED', 'UNDECIDED', 'writes_to', 'value_set_of',

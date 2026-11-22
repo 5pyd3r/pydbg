@@ -189,7 +189,8 @@ def cmd_owners(args):
         print(f"{args.at:#x}: owned by nothing ({kind})")
     else:
         print(f"{args.at:#x}: {kind} of the function at {owner:#x}")
-    container = result.container_of(args.at)
+    from pydbg.analysis import container_of
+    container = container_of(result, args.at)
     if container is not None:
         table, index = container
         where = "entry %d" % index if index is not None else "not slot-aligned"
@@ -200,8 +201,9 @@ def cmd_owners(args):
 
 def cmd_boundary(args):
     """Whether an address starts an instruction, sits inside one, or neither."""
+    from pydbg.analysis import boundary_of
     result = analyze_file(args.image)
-    print(result.boundary_of(args.at).render())
+    print(boundary_of(result, args.at).render())
     return 0
 
 
@@ -236,11 +238,12 @@ def cmd_tables(args):
 
 def cmd_values(args):
     """What a fixed memory address can hold, and the evidence for saying so."""
+    from pydbg.analysis import narrow_by_guards, value_set_of
     result = analyze_file(args.image)
     if args.guarded:
-        value = result.narrow_value_set(args.at)
+        value = narrow_by_guards(result, args.at)
     else:
-        value = result.value_set_of(args.at)
+        value = value_set_of(result, args.at)
     print(value.render())
     return 0
 

@@ -15,6 +15,7 @@ displacement and never becomes a boundary of its own.
 
 import unittest
 
+from pydbg.analysis import owners
 from tests.pe_builder import PEBuilder
 
 IMAGE_BASE = 0x400000
@@ -137,7 +138,7 @@ class TestTheFixture(unittest.TestCase):
         result.scan(TABLE_RVA, TABLE_END + 8)
         self.assertFalse(result.decoder.is_decoded(TABLE_END))
         self.assertIsNotNone(result.decoder.enclosing_instruction(TABLE_END))
-        found = result.boundary_of(TABLE_END)
+        found = owners.boundary_of(result, TABLE_END)
         self.assertEqual(found.kind, "instruction_interior")
         self.assertEqual(found.offset, TABLE_END - found.start)
 
@@ -151,7 +152,7 @@ class TestBoundaryOf(unittest.TestCase):
     def test_an_instruction_start_says_so(self):
         """The positive control. Without it every interior assertion below
         would also pass on a boundary_of that never reports a start."""
-        edge = self.result.boundary_of(ENTRY_RVA)
+        edge = owners.boundary_of(self.result, ENTRY_RVA)
         self.assertEqual(edge.kind, "instruction_start")
         self.assertEqual(edge.offset, 0)
         self.assertEqual(edge.start, ENTRY_RVA)
@@ -159,14 +160,14 @@ class TestBoundaryOf(unittest.TestCase):
 
     def test_a_byte_inside_an_instruction_is_interior(self):
         """The control that a broken walk-back kills."""
-        found = self.result.boundary_of(ENTRY_RVA + 1)
+        found = owners.boundary_of(self.result, ENTRY_RVA + 1)
         self.assertEqual(found.kind, "instruction_interior")
         self.assertEqual(found.start, ENTRY_RVA)
         self.assertEqual(found.offset, 1)
 
     def test_unmapped_and_undecoded_are_different_reasons(self):
         """Two causes, two strings — and neither is invented in this module."""
-        outside = self.result.boundary_of(IMAGE_BASE)
+        outside = owners.boundary_of(self.result, IMAGE_BASE)
         self.assertEqual(outside.kind, "never_decoded")
         self.assertEqual(outside.reason, "not in any mapped section")
 
@@ -174,19 +175,19 @@ class TestBoundaryOf(unittest.TestCase):
         # and it does not decode — a different finding from "not mapped at
         # all", which is why the reason travels rather than being a boolean.
         self.assertIsNone(self.result.decoder.decode_one(DATA_RVA))
-        inside = self.result.boundary_of(DATA_RVA)
+        inside = owners.boundary_of(self.result, DATA_RVA)
         self.assertEqual(inside.kind, "never_decoded")
         self.assertIsNotNone(inside.reason)
         self.assertNotEqual(inside.reason, outside.reason)
 
     def test_a_mapped_address_nobody_tried_has_no_reason(self):
         """The third cause: never attempted is not the same as failed."""
-        found = self.result.boundary_of(TEXT_RVA + 4)
+        found = owners.boundary_of(self.result, TEXT_RVA + 4)
         self.assertEqual(found.kind, "never_decoded")
         self.assertIsNone(found.reason)
 
     def test_boundary_names_the_owning_function(self):
-        found = self.result.boundary_of(ENTRY_RVA)
+        found = owners.boundary_of(self.result, ENTRY_RVA)
         self.assertEqual(found.owner, ENTRY_RVA)
         self.assertIn(found.owner_kind, ("start", "body"))
 
@@ -215,7 +216,7 @@ class TestOwnerOf(unittest.TestCase):
         self.assertEqual(self.result.functions.owner_of(tail), (None, "after"))
         self.assertIsNotNone(self.result.functions.containing(tail),
                              "containing is expected to stay unbounded")
-        self.assertIsNone(self.result.function_of(tail))
+        self.assertIsNone(owners.function_of(self.result, tail))
 
     def test_outside_the_image_is_unmapped_not_after(self):
         """Two ways of having no owner, and they are different findings."""
@@ -228,7 +229,7 @@ class TestOwnerOf(unittest.TestCase):
         """No address is owned by a function the public query disowns."""
         for rva in range(TEXT_RVA, TABLE_END):
             owner, kind = self.result.functions.owner_of(rva)
-            self.assertEqual(self.result.function_of(rva), owner, hex(rva))
+            self.assertEqual(owners.function_of(self.result, rva), owner, hex(rva))
             self.assertEqual(kind in ("start", "body", "gap"),
                              owner is not None, hex(rva))
 
@@ -250,7 +251,7 @@ class TestSlotTables(unittest.TestCase):
         self.assertFalse(table.truncated)
 
     def test_an_aligned_slot_reports_its_index(self):
-        table, index = self.result.container_of(TABLE_RVA + 2 * TABLE_STRIDE)
+        table, index = owners.container_of(self.result, TABLE_RVA + 2 * TABLE_STRIDE)
         self.assertEqual((table.base, index), (TABLE_RVA, 2))
 
     def test_an_unaligned_byte_names_the_table_without_inventing_an_index(self):
@@ -261,12 +262,12 @@ class TestSlotTables(unittest.TestCase):
         query, since a pseudo-instruction decoded out of a table starts where
         the walk happens to land rather than on a slot boundary.
         """
-        table, index = self.result.container_of(TABLE_RVA + 3)
+        table, index = owners.container_of(self.result, TABLE_RVA + 3)
         self.assertEqual(table.base, TABLE_RVA)
         self.assertIsNone(index)
 
     def test_an_address_outside_every_table_has_no_container(self):
-        self.assertIsNone(self.result.container_of(ENTRY_RVA))
+        self.assertIsNone(owners.container_of(self.result, ENTRY_RVA))
 
     def test_every_table_kind_is_declared_and_only_one_is_produced(self):
         """The bite test, stated as a denominator rather than as a shape.
@@ -316,20 +317,20 @@ class TestTheStraddledByte(unittest.TestCase):
         self.assertTrue(self.scan.is_complete())
 
     def test_the_byte_after_the_table_is_instruction_interior(self):
-        found = self.result.boundary_of(TABLE_END)
+        found = owners.boundary_of(self.result, TABLE_END)
         self.assertEqual(found.kind, "instruction_interior")
         self.assertLess(found.start, TABLE_END)
         self.assertGreaterEqual(found.start + found.size, TABLE_END)
 
     def test_that_instruction_is_attributed_to_the_table(self):
-        found = self.result.boundary_of(TABLE_END)
-        container = self.result.container_of(found.start)
+        found = owners.boundary_of(self.result, TABLE_END)
+        container = owners.container_of(self.result, found.start)
         self.assertIsNotNone(container)
         self.assertEqual(container[0].base, TABLE_RVA)
 
     def test_ownership_does_not_call_it_a_function_start(self):
         """The other half of the cost: a slot value is not an entry point."""
-        found = self.result.boundary_of(TABLE_END)
+        found = owners.boundary_of(self.result, TABLE_END)
         self.assertNotEqual(found.owner_kind, "start")
         self.assertNotIn(found.start, self.result.functions.starts)
 
@@ -342,7 +343,7 @@ class TestClassifyRange(unittest.TestCase):
 
     def test_a_range_of_real_code_is_fully_owned(self):
         end = ENTRY_RVA + len(CALL_SECOND) + len(SWITCH_JMP)
-        report = self.result.classify_range(ENTRY_RVA, end)
+        report = owners.classify_range(self.result, ENTRY_RVA, end)
         self.assertTrue(report.is_fully_owned(), report.render())
         self.assertEqual(report.instruction_starts, 2)
         self.assertEqual(report.unowned_after, 0)
@@ -350,12 +351,12 @@ class TestClassifyRange(unittest.TestCase):
 
     def test_the_unowned_tail_has_a_size(self):
         """`after` is a count, not an absence — that is the whole point."""
-        report = self.result.classify_range(DATA_RVA, DATA_RVA + 0x100)
+        report = owners.classify_range(self.result, DATA_RVA, DATA_RVA + 0x100)
         self.assertEqual(report.bytes_by_kind["after"], 0x100)
         self.assertFalse(report.is_fully_owned())
 
     def test_a_truncated_range_never_claims_full_ownership(self):
-        report = self.result.classify_range(ENTRY_RVA, ENTRY_RVA + 0x2000,
+        report = owners.classify_range(self.result, ENTRY_RVA, ENTRY_RVA + 0x2000,
                                             limit=16)
         self.assertTrue(report.truncated)
         self.assertFalse(report.is_fully_owned())
@@ -490,10 +491,10 @@ class TestTheDeclaredKindsHaveProducers(unittest.TestCase):
     def test_the_fixture_produces_every_boundary_kind(self):
         result = analyze()
         result.scan(TABLE_RVA, TABLE_END + 8)
-        seen = {result.boundary_of(rva).kind
+        seen = {owners.boundary_of(result, rva).kind
                 for rva in range(TEXT_RVA, TABLE_END + 8)}
-        seen.add(result.boundary_of(IMAGE_BASE).kind)
-        seen.add(result.boundary_of(DATA_RVA).kind)
+        seen.add(owners.boundary_of(result, IMAGE_BASE).kind)
+        seen.add(owners.boundary_of(result, DATA_RVA).kind)
         from pydbg.analysis import BOUNDARY_KINDS
         self.assertEqual(seen, set(BOUNDARY_KINDS))
 
