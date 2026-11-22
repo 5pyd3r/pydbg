@@ -73,8 +73,10 @@ class FunctionTable:
         """Adopt authoritative function sizes, keyed by function start.
 
         'mapping' is begin RVA -> size, the `.pdata` RUNTIME_FUNCTION ranges.
-        Only non-negative sizes are kept; a nonsense entry falls back to the
-        extent rule rather than describing a function that runs backwards.
+        Only positive sizes are kept: `end <= begin` describes no function,
+        and a nonsense entry must fall back to the extent rule rather than
+        describing a function that runs backwards or has no body. The check
+        lives here, once, so every caller gets the same answer.
 
         Installing this does not create starts: a begin that the analysis never
         decoded stays absent, because a range table says where functions are,
@@ -82,7 +84,7 @@ class FunctionTable:
         is built, before the sweep — `extents()` consults it, and a table that
         changes afterwards needs `invalidate()` (which this does itself).
         """
-        self._exact = {rva: size for rva, size in mapping.items() if size >= 0}
+        self._exact = {rva: size for rva, size in mapping.items() if size > 0}
         self.invalidate()
 
     def prune_starts_inside_functions(self):
