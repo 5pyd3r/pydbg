@@ -50,19 +50,15 @@ class RefKind(IntEnum):
     DATA = 5     # a pointer-valued slot the image holds, outside an operand
 
 
-# Membership test for the kind queries below. A kind value that is not in the
-# enum is not silently dropped from an answer; it is not something an analysis
-# produces at all, and `ref_kinds()` is a statement about producers.
-_ALL_KINDS = frozenset(RefKind)
-
 # What a walked address belongs to. Defined in this module — the lowest layer
 # of the analysis package — because functions.py, owners.py and model.py all
-# speak it, and it used to be repeated in three places with tests as the only
-# thing keeping the copies aligned.
+# speak it. `OWNED_KINDS` is the public subset that names a function; keeping
+# both here is what stops the two from being copied into the modules that use
+# them and kept aligned by a test.
 OWNER_KINDS = ("start", "body", "gap", "after", "before", "unmapped")
 
 # The OWNER_KINDS members that name a function.
-_OWNED_KINDS = frozenset(("start", "body", "gap"))
+OWNED_KINDS = frozenset(("start", "body", "gap"))
 
 
 @dataclass(frozen=True, slots=True)
@@ -74,10 +70,18 @@ class Xref:
     in the way that matters: a data slot is not a position in the code and has
     no instruction there, so a caller that needs a site it can disassemble has
     to filter by kind rather than assume one.
+
+    'kind' is a `RefKind`, not a bare int. Construction accepts the int form
+    and raises ValueError for a value outside the enum: an unknown kind used
+    to be filtered out of `ref_kinds_of` without a word, so a producer bug
+    looked exactly like an address nothing references.
     """
 
     source: int
-    kind: int
+    kind: RefKind
+
+    def __post_init__(self):
+        object.__setattr__(self, "kind", RefKind(self.kind))
 
 
 # Kinds of slot run. `jump_table` is the only one with a producer today;
@@ -197,7 +201,6 @@ class AnalysisStats:
     insns: int = 0
     func_starts: int = 0
     func_starts_confident: int = 0
-    nameable: int = 0          # function starts whose symbol dbghelp can name
     xref_targets: int = 0
     xrefs: int = 0
     # References of kind DATA, counted from the frozen index rather than from
@@ -314,12 +317,17 @@ class AnalysisResult:
         return tuple(sorted({xref.source for xref in self.xrefs.get(rva, ())}))
 
     def xrefs_of(self, rva, kind=None):
-        """Xrefs targeting 'rva', optionally only those of one kind."""
+        """Xrefs targeting 'rva', optionally only those of one kind.
+
+        A kind outside `RefKind` raises rather than returning an empty tuple:
+        "no references of that kind" is an answer, and it must not be the
+        automatic result of a caller passing a kind nothing can produce.
+        """
         found = self.xrefs.get(rva, ())
         if kind is None:
             return tuple(found)
-        want = int(kind)
-        return tuple(ref for ref in found if ref.kind == want)
+        want = RefKind(kind)
+        return tuple(ref for ref in found if ref.kind is want)
 
     def data_refs_of(self, rva):
         """RVAs of the data slots holding a pointer to 'rva', ascending.
@@ -340,7 +348,8 @@ class AnalysisResult:
         this is the cheapest way to write down which kinds were: a check that
         a DATA reference exists fails loudly when the data-pointer reader is
         not running, where `callers_of` returning () would not.
+
+        Nothing is filtered here. `Xref` already refuses a kind outside the
+        enum, so an answer cannot be narrowed by a producer that invented one.
         """
-        return tuple(sorted({RefKind(ref.kind)
-                             for ref in self.xrefs.get(rva, ())
-                             if ref.kind in _ALL_KINDS}))
+        return tuple(sorted({ref.kind for ref in self.xrefs.get(rva, ())}))

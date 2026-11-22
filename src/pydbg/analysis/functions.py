@@ -2,14 +2,12 @@
 
 from bisect import bisect_right
 
-from .model import OWNER_KINDS, _OWNED_KINDS, Function
+from .model import Function, OWNER_KINDS, OWNED_KINDS
 
-# What an address can turn out to be owned by. The vocabulary lives in
-# `model` because three modules speak it; re-exported here because that is
-# where callers have always imported it from.
+# `OWNER_KINDS` is re-exported for callers that imported it from here before
+# the vocabulary moved to model.py; the definition lives there and nowhere
+# else. The owned subset is imported for `is_owned` only, not re-exported.
 __all__ = ["FunctionTable", "OWNER_KINDS"]
-
-_OWNED = _OWNED_KINDS
 
 
 class FunctionTable:
@@ -193,7 +191,7 @@ class FunctionTable:
 
     def is_owned(self, rva):
         """Whether a function owns 'rva', without saying which or how."""
-        return self.owner_of(rva)[1] in _OWNED
+        return self.owner_of(rva)[1] in OWNED_KINDS
 
     def extent_of(self, rva):
         """Size of the function starting at 'rva', or 0 if unknown."""

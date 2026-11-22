@@ -34,11 +34,11 @@ from .consts import ConstantTracker
 from .engine import (
     StaticAnalyzer, analyze_bytes, analyze_file, analyze_pe, analyze_process,
 )
-from .functions import OWNER_KINDS, FunctionTable
+from .functions import FunctionTable
 from .image import AnalyzedImage
 from .model import (
     AnalysisResult, AnalysisStats, CoverageReport, Function, IndirectSite,
-    RefKind, SeedConfig, SlotTable, Xref,
+    OWNER_KINDS, OWNED_KINDS, RefKind, SeedConfig, SlotTable, Xref,
 )
 from .owners import (
     DETERMINED_FACTS, BOUNDARY_KINDS, RECEIVER_FACTS, Boundary,
@@ -81,7 +81,7 @@ __all__ = [
     'xrefs_are_complete',
     'LinearScan', 'Resync', 'Undecodable', 'linear_scan', 'scan_executable',
     'scan_section',
-    'SlotTable', 'OWNER_KINDS',
+    'SlotTable', 'OWNER_KINDS', 'OWNED_KINDS',
     'Boundary', 'BOUNDARY_KINDS', 'boundary_of',
     'RegionOwnership', 'classify_range', 'container_of', 'function_of',
     'ReceiverNote', 'RECEIVER_FACTS', 'DETERMINED_FACTS', 'receiver_of',
