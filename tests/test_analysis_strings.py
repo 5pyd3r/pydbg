@@ -8,6 +8,7 @@ both produce output that looks like a finding.
 """
 
 import os
+import struct
 import unittest
 
 from pydbg.analysis import (
@@ -19,6 +20,21 @@ from tests.pe_builder import PEBuilder, build_loaded_image_with_one_import
 
 TARGET_X64 = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                           "target", "simple_target_x64.exe")
+
+
+def widen_virtual_size(image, index, virtual_size):
+    """Give one section a virtual-only tail in an already-built image.
+
+    PEBuilder derives both size fields from the data, so a section whose
+    virtual_size exceeds size_of_raw_data — the uninitialised-tail shape — has
+    to be introduced after the fact.
+    """
+    image = bytearray(image)
+    e_lfanew = struct.unpack_from("<I", image, 0x3C)[0]
+    optional_size = struct.unpack_from("<H", image, e_lfanew + 20)[0]
+    header = e_lfanew + 24 + optional_size + index * 40
+    struct.pack_into("<I", image, header + 8, virtual_size)
+    return bytes(image)
 
 
 class TestStringsInBytes(unittest.TestCase):
@@ -137,6 +153,20 @@ class TestSectionEntropy(unittest.TestCase):
         self.assertEqual([(s.name, s.entropy, s.size) for s in found],
                          [(".text", 0.0, 0)])
 
+    def test_a_virtual_only_tail_does_not_hide_the_raw_bytes(self):
+        """FileView refuses a read that runs past size_of_raw_data.
+
+        Asking for the whole span would report 0.0 for a section whose
+        file-backed prefix is readable, which reads as "no entropy here"
+        rather than "most of this section was not measured".
+        """
+        builder = PEBuilder(magic=0x20B, image_base=0x140000000)
+        builder.add_section(".data", bytes(range(256)), 0x1000)
+        pe = PE(widen_virtual_size(builder.build(), 0, 0x8000))
+        found = section_entropy(pe)
+        self.assertEqual([(s.name, s.size) for s in found], [(".data", 256)])
+        self.assertAlmostEqual(found[0].entropy, 8.0, delta=1e-9)
+
 
 class TestPackingHints(unittest.TestCase):
     """Cheap evidence, reported as separate facts rather than a verdict.
@@ -239,6 +269,13 @@ class TestExtractStrings(unittest.TestCase):
         builder.add_section(".text", b"\x00hello\x00", 0x1000)
         pe = PE(builder.build()[:-1])
         self.assertEqual(extract_strings(pe), [])
+
+    def test_a_virtual_only_tail_still_yields_its_strings(self):
+        builder = PEBuilder(magic=0x20B, image_base=0x140000000)
+        builder.add_section(".data", b"\x00hello\x00", 0x1000)
+        pe = PE(widen_virtual_size(builder.build(), 0, 0x8000))
+        self.assertEqual([(s.rva, s.text) for s in extract_strings(pe)],
+                         [(0x1001, "hello")])
 
     @unittest.skipUnless(
         os.path.exists(TARGET_X64),

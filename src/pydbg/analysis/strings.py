@@ -151,20 +151,40 @@ def strings_in_bytes(data, base_rva=0, min_length=4):
     return found
 
 
+def _section_bytes(pe, section):
+    """The bytes of `section` this image can actually supply, or None.
+
+    `read_rva` refuses a range it cannot satisfy in full, and a section's span
+    can exceed what the file stores — the uninitialised tail. Asking for the
+    span would then return None even though the file-backed prefix is
+    readable, so retry with size_of_raw_data before giving up. Only a section
+    with no readable bytes at all comes back as None.
+    """
+    data = pe.read_rva(section.virtual_address, section.span)
+    if data is not None:
+        return data
+    if 0 < section.size_of_raw_data < section.span:
+        return pe.read_rva(section.virtual_address, section.size_of_raw_data)
+    return None
+
+
 def extract_strings(pe, min_length=4, sections=None):
     """Printable runs in the image's sections, in address order.
 
     `sections` is None for every section the file stores, or a list of section
-    names to limit the search. A section that cannot be read is skipped, which
-    is `read_rva`'s contract: a truncated image yields the strings before the
-    truncation and nothing else, rather than an exception.
+    names to limit the search. A section whose declared span is larger than
+    its file-backed data is read up to what exists — an uninitialised tail is
+    not a reason to drop the readable prefix. A section with no readable bytes
+    at all is skipped, which is `read_rva`'s contract: a truncated image
+    yields the strings before the truncation and nothing else, rather than an
+    exception.
     """
     wanted = None if sections is None else set(sections)
     found = []
     for section in pe.sections:
         if wanted is not None and section.name not in wanted:
             continue
-        data = pe.read_rva(section.virtual_address, section.span)
+        data = _section_bytes(pe, section)
         if not data:
             continue
         found.extend(strings_in_bytes(data, base_rva=section.virtual_address,
@@ -184,13 +204,16 @@ def _shannon_entropy(data):
 def section_entropy(pe):
     """Shannon entropy per section, in section-table order.
 
-    A section that cannot be read is reported at 0.0 with size 0 rather than
-    dropped: a section missing from the list and a clean section would look
-    alike to a caller wondering where the high-entropy evidence went.
+    Measured over the readable bytes, which for a section with a
+    virtual-only tail is its file-backed prefix rather than nothing. A section
+    with no readable bytes is reported at 0.0 with size 0 rather than dropped:
+    a section missing from the list and a clean section would look alike to a
+    caller wondering where the high-entropy evidence went, and `size` says
+    what the number was actually computed over.
     """
     found = []
     for section in pe.sections:
-        data = pe.read_rva(section.virtual_address, section.span)
+        data = _section_bytes(pe, section)
         if not data:
             found.append(SectionEntropy(section.name, 0.0, 0))
             continue
