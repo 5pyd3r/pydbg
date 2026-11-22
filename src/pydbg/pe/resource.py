@@ -23,6 +23,11 @@ MAX_DEPTH = 3
 # two directories that point at each other. The budget is what stops it.
 MAX_NODES = 4096
 
+# RT_VERSION: the type ID a version resource sits under. Defined here beside
+# the type table, which is the one place type IDs live; version.py imports it
+# rather than repeating the number.
+RT_VERSION = 16
+
 # Standard Win32 resource type IDs -> names
 RESOURCE_TYPES = {
     1: "RT_CURSOR",
@@ -38,7 +43,7 @@ RESOURCE_TYPES = {
     11: "RT_MESSAGETABLE",
     12: "RT_GROUP_CURSOR",
     14: "RT_GROUP_ICON",
-    16: "RT_VERSION",
+    RT_VERSION: "RT_VERSION",
     17: "RT_DLGINCLUDE",
     19: "RT_PLUGPLAY",
     20: "RT_VXD",

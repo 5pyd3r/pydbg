@@ -151,10 +151,12 @@ class LoadConfig:
     a field the declared version does not define — or a truncated directory
     does not reach — is None rather than a fabricated zero. A zero
     SecurityCookie and "this build predates SecurityCookie" are different
-    findings and must not be spelled the same way.
+    findings and must not be spelled the same way. 'size' itself is None only
+    when the file was cut inside the Size dword, which leaves nothing to
+    version the structure by.
     """
 
-    size: int
+    size: int | None
     timestamp: int
     major_version: int | None
     minor_version: int | None
@@ -176,12 +178,13 @@ class CLRHeader:
 
     'size' is the header's own cb field. A field a truncated directory does not
     reach is None; the managed tables this header points at are out of scope,
-    so nothing here is dereferenced.
+    so nothing here is dereferenced. 'size' and the runtime version words are
+    None only when the file was cut inside their bytes.
     """
 
-    size: int
-    major_runtime_version: int
-    minor_runtime_version: int
+    size: int | None
+    major_runtime_version: int | None
+    minor_runtime_version: int | None
     metadata_rva: int | None
     metadata_size: int | None
     flags: int | None

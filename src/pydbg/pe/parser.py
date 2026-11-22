@@ -97,6 +97,10 @@ _LOAD_CONFIG_LAYOUT = {
     0x10B: (_LOAD_CONFIG_32, 0x5C),
 }
 
+# A self-sized struct whose declared Size is below this holds only a fragment;
+# 8 is size + timestamp, the shortest prefix that versions anything.
+_MIN_DECLARED_STRUCT_SIZE = 8
+
 # IMAGE_COR20_HEADER. Only the header is read; the metadata directory it points
 # at is deliberately not followed — identifying a .NET image does not need it.
 CLR_HEADER_SIZE = 0x48
@@ -114,6 +118,38 @@ _CLR_HEADER_FIELDS = (
     ('strong_name_rva', 0x20, '<I'),
     ('strong_name_size', 0x24, '<I'),
 )
+
+
+def _declared_struct_values(raw, layout):
+    """Field values of a self-sized struct that 'raw' actually covers.
+
+    IMAGE_LOAD_CONFIG_DIRECTORY and IMAGE_COR20_HEADER both begin with their
+    own size, and that dword is the version marker: a field the declared size
+    or the readable bytes do not reach is None, not zero, because "this build
+    predates the field" and "the field is zero" are different findings.
+
+    Returns None when the declaration is unusable (no readable byte, or a
+    declared Size below the shortest meaningful prefix). Sharing this walk is
+    what keeps the truncation semantics of the two directories from drifting.
+    """
+    if not raw:
+        return None
+    if len(raw) >= 4:
+        declared = struct.unpack_from('<I', raw, 0)[0]
+        if declared < _MIN_DECLARED_STRUCT_SIZE:
+            return None                     # zero Size is no struct at all
+        end = min(declared, len(raw))
+    else:
+        end = len(raw)                      # the declared size itself is cut
+
+    values = {}
+    for name, offset, fmt in layout:
+        field_size = struct.calcsize(fmt)
+        if offset + field_size <= end:
+            values[name] = struct.unpack_from(fmt, raw, offset)[0]
+        else:
+            values[name] = None
+    return values
 
 
 def _format_guid(raw: bytes) -> str:
@@ -186,6 +222,34 @@ class PEParser:
         if offset is None:
             return None
         return self._src.try_read(offset, size)
+
+    def _read_rva_prefix(self, rva, size):
+        """Up to 'size' bytes at 'rva', stopping at the end of the source.
+
+        try_read answers all-or-nothing, but a file cut inside a structure is
+        not an absent structure: the fields before the cut are still readable
+        facts. Binary-search the longest prefix the source will supply (a
+        longer range cannot succeed where a shorter one failed), which keeps
+        this source-agnostic — BytesSource and FileSource both raise instead
+        of returning a short slice.
+        """
+        offset = self._view.rva_to_source_offset(rva)
+        if offset is None:
+            return None
+        data = self._src.try_read(offset, size)
+        if data is not None:
+            return data
+        low, high, readable = 0, size, 0
+        while low <= high:
+            middle = (low + high) // 2
+            if self._src.try_read(offset, middle) is not None:
+                readable = middle
+                low = middle + 1
+            else:
+                high = middle - 1
+        if not readable:
+            return b""
+        return self._src.try_read(offset, readable)
 
     def parse_dos_header(self) -> DosHeader:
         data = self._src.read(0, 64)
@@ -415,7 +479,7 @@ class PEParser:
     # below: most consumers want none of them.
 
     def parse_delay_imports(self, data_dirs: dict,
-                            image_base: int = 0) -> list:
+                            image_base: int) -> list:
         """Delay-load import descriptors (data directory 13).
 
         'image_base' is the optional header's ImageBase, needed only for the
@@ -423,6 +487,11 @@ class PEParser:
         than RVAs. Every address reported here is an RVA either way, and an
         entry whose VAs fall below ImageBase is skipped: the subtraction is the
         only definition of "out of bounds" this directory has.
+
+        The parameter has no default on purpose. A default of 0 subtracted
+        nothing and returned the stored VAs as RVAs — plausible-looking
+        addresses about 4GB off. A VA-based descriptor met without a base
+        raises ValueError instead of being reported wrongly.
         """
         imports = []
         dd = data_dirs.get(DIR_DELAY_IMPORT)
@@ -444,6 +513,10 @@ class PEParser:
 
             attributes = values[0]
             if attributes & 1 == 0:
+                if not image_base:
+                    raise ValueError(
+                        "VA-based delay-import descriptor at RVA "
+                        f"{dd.virtual_address:#x} needs the image base")
                 values[1:7] = [value - image_base for value in values[1:7]]
                 if any(value < 0 for value in values[1:7]):
                     continue                # VA below ImageBase: not addressable
@@ -526,31 +599,25 @@ class PEParser:
 
         The structure's first field is its own size, and that size is the
         version marker: a field whose offset the declared version — or the
-        readable bytes — does not cover comes back as None. The 64-bit and
-        32-bit layouts differ, so 'magic' selects the table to read by.
+        readable bytes — does not cover comes back as None. Truncation is read
+        as a prefix rather than as absence: only zero readable bytes is None.
+        The 64-bit and 32-bit layouts differ, so 'magic' selects the table to
+        read by; a magic with no table has no layout and is None rather than a
+        guessed 64-bit parse.
         """
         dd = data_dirs.get(DIR_LOAD_CONFIG)
         if dd is None or dd.virtual_address == 0 or dd.size == 0:
             return None
 
-        layout, full_size = _LOAD_CONFIG_LAYOUT.get(
-            magic, (_LOAD_CONFIG_64, 0x94))
-        raw = self._read_rva(dd.virtual_address, min(dd.size, full_size))
-        if raw is None or len(raw) < 8:
+        layout_entry = _LOAD_CONFIG_LAYOUT.get(magic)
+        if layout_entry is None:
+            return None                     # unknown magic: do not guess
+        layout, full_size = layout_entry
+        raw = self._read_rva_prefix(dd.virtual_address,
+                                    min(dd.size, full_size))
+        values = _declared_struct_values(raw, layout)
+        if values is None:
             return None
-
-        declared = struct.unpack_from('<I', raw, 0)[0]
-        if declared < 8:
-            return None                     # zero Size is no struct at all
-
-        end = min(declared, len(raw))
-        values = {}
-        for name, offset, fmt in layout:
-            field_size = struct.calcsize(fmt)
-            if offset + field_size <= end:
-                values[name] = struct.unpack_from(fmt, raw, offset)[0]
-            else:
-                values[name] = None
         return LoadConfig(**values)
 
     def parse_clr_header(self, data_dirs: dict):
@@ -558,28 +625,19 @@ class PEParser:
 
         Header only: the metadata directory it points at is not followed, so
         this answers "is this a .NET image and what does its header claim"
-        rather than duplicating a metadata reader.
+        rather than duplicating a metadata reader. A file cut inside the
+        header still reports every field the cut did not reach; only zero
+        readable bytes is None.
         """
         dd = data_dirs.get(DIR_CLR)
         if dd is None or dd.virtual_address == 0 or dd.size == 0:
             return None
 
-        raw = self._read_rva(dd.virtual_address, min(dd.size, CLR_HEADER_SIZE))
-        if raw is None or len(raw) < 8:
+        raw = self._read_rva_prefix(dd.virtual_address,
+                                    min(dd.size, CLR_HEADER_SIZE))
+        values = _declared_struct_values(raw, _CLR_HEADER_FIELDS)
+        if values is None:
             return None
-
-        declared = struct.unpack_from('<I', raw, 0)[0]
-        if declared < 8:
-            return None                     # zero cb is no header at all
-
-        end = min(declared, len(raw))
-        values = {}
-        for name, offset, fmt in _CLR_HEADER_FIELDS:
-            field_size = struct.calcsize(fmt)
-            if offset + field_size <= end:
-                values[name] = struct.unpack_from(fmt, raw, offset)[0]
-            else:
-                values[name] = None
         return CLRHeader(**values)
 
     def parse_security(self, data_dirs: dict):

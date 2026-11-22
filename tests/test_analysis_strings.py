@@ -73,12 +73,24 @@ class TestStringsInBytes(unittest.TestCase):
                          ["Hello"])
         self.assertEqual(strings_in_bytes(data, min_length=6), [])
 
-    def test_a_utf16_run_cannot_start_inside_an_ascii_run(self):
+    def test_the_longest_run_wins_even_when_it_starts_a_byte_later(self):
+        """b"A" + UTF-16 "Hello": the maximal run starts at offset 1.
+
+        The old rule could not start a UTF-16 run after a printable byte, so
+        it reported "ello" from offset 3 and silently lost the capital H (and
+        the 'A' that shares no encoding with the rest).
+        """
+        data = b"A" + "Hello".encode("utf-16-le")
+        self.assertEqual(
+            [(s.rva, s.encoding, s.text) for s in strings_in_bytes(data)],
+            [(1, "utf-16le", "Hello")])
+
+    def test_an_ascii_run_does_not_absorb_the_next_utf16_run(self):
         """The NUL terminating an ASCII string is a valid UTF-16 high byte.
 
-        Without a boundary rule the last character of "hello\\0" is read as
-        the first of the following UTF-16 run, yielding "hell" + "oWide"
-        over the same bytes.
+        Without the longest-run comparison the last character of "hello\\0"
+        is read as the first of the following UTF-16 run, yielding "hell" +
+        "oWide" over the same bytes.
         """
         found = strings_in_bytes(b"hello\x00" + "Wide".encode("utf-16-le"))
         self.assertEqual([(s.rva, s.encoding, s.text) for s in found],
@@ -112,7 +124,11 @@ class TestStringsInBytes(unittest.TestCase):
 
 
 class TestSectionEntropy(unittest.TestCase):
-    """Entropy is a claim about one section's bytes, so size travels with it."""
+    """Entropy is a claim about one section's bytes, so size travels with it.
+
+    `entropy=None` with `size=0` means "not measured". A measured all-zero
+    section is 0.0 with a non-zero size; the two must not look alike.
+    """
 
     def entropy_of(self, data, name=".data"):
         builder = PEBuilder(magic=0x10B, image_base=0x400000)
@@ -121,7 +137,8 @@ class TestSectionEntropy(unittest.TestCase):
 
     def test_one_repeated_byte_is_zero_entropy(self):
         """Both all-zero and all-'A' are legitimately zero, not a failure."""
-        self.assertEqual(self.entropy_of(b"\x00" * 4096).entropy, 0.0)
+        found = self.entropy_of(b"\x00" * 4096)
+        self.assertEqual((found.entropy, found.size), (0.0, 4096))
         self.assertEqual(self.entropy_of(b"A" * 4096).entropy, 0.0)
 
     def test_a_uniform_byte_distribution_is_eight_bits(self):
@@ -130,7 +147,11 @@ class TestSectionEntropy(unittest.TestCase):
 
     def test_every_section_is_reported_in_table_order(self):
         """A section missing from the list is indistinguishable from a clean
-        one, so unreadable sections still appear, at 0.0 with size 0."""
+        one, so unreadable sections still appear, with entropy None and size 0.
+
+        An empty section used to be reported as 0.0, which said "measured, no
+        entropy" about bytes that were never measured.
+        """
         builder = PEBuilder(magic=0x10B, image_base=0x400000)
         builder.add_section(".zero", b"\x00" * 256, 0x1000)
         builder.add_section(".flat", bytes(range(256)), 0x2000)
@@ -144,14 +165,14 @@ class TestSectionEntropy(unittest.TestCase):
         self.assertEqual(found[0].entropy, 0.0)
         self.assertAlmostEqual(found[1].entropy, 8.0, delta=1e-9)
         self.assertEqual(found[2].entropy, 0.0)
-        self.assertEqual(found[3].entropy, 0.0)
+        self.assertIsNone(found[3].entropy)
 
-    def test_a_truncated_section_is_zero_rather_than_an_exception(self):
+    def test_a_truncated_section_is_unmeasured_rather_than_zero(self):
         builder = PEBuilder(magic=0x10B, image_base=0x400000)
         builder.add_section(".text", b"\x00hello\x00", 0x1000)
         found = section_entropy(PE(builder.build()[:-1]))
         self.assertEqual([(s.name, s.entropy, s.size) for s in found],
-                         [(".text", 0.0, 0)])
+                         [(".text", None, 0)])
 
     def test_a_virtual_only_tail_does_not_hide_the_raw_bytes(self):
         """FileView refuses a read that runs past size_of_raw_data.
@@ -230,6 +251,19 @@ class TestPackingHints(unittest.TestCase):
         self.assertFalse(
             packing_hints(pe, low_import_threshold=1).low_import_count)
 
+    def test_an_unmeasured_section_is_never_high_entropy(self):
+        """None is skipped, not compared: "no measurement" is not "8 bits".
+
+        The threshold is 0 here so every measured section qualifies; the
+        section with no readable bytes must still stay out of the list.
+        """
+        pe = self.build([
+            (".text", b"\x90" * 0x100, 0x60000020),
+            (".empty", b"", 0x40000040),
+        ])
+        hints = packing_hints(pe, entropy_threshold=0.0)
+        self.assertEqual(hints.high_entropy_sections, [".text"])
+
 
 class TestExtractStrings(unittest.TestCase):
     """Walking a PE's sections, where addresses become RVAs for real."""
@@ -276,6 +310,15 @@ class TestExtractStrings(unittest.TestCase):
         pe = PE(widen_virtual_size(builder.build(), 0, 0x8000))
         self.assertEqual([(s.rva, s.text) for s in extract_strings(pe)],
                          [(0x1001, "hello")])
+
+    def test_a_built_image_yields_at_least_one_string(self):
+        """The real-target acceptance check, without the real target.
+
+        tests/target/simple_target_x64.exe is not always built, so its test
+        is skipped; the same claim — a normal image's sections yield strings —
+        is made here against a PEBuilder image the suite always has.
+        """
+        self.assertGreaterEqual(len(extract_strings(self.build())), 1)
 
     @unittest.skipUnless(
         os.path.exists(TARGET_X64),
