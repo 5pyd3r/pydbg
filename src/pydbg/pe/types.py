@@ -171,6 +171,28 @@ class LoadConfig:
 
 
 @dataclass
+class CLRHeader:
+    """IMAGE_COR20_HEADER (data directory 14) — the header, not the metadata.
+
+    'size' is the header's own cb field. A field a truncated directory does not
+    reach is None; the managed tables this header points at are out of scope,
+    so nothing here is dereferenced.
+    """
+
+    size: int
+    major_runtime_version: int
+    minor_runtime_version: int
+    metadata_rva: int | None
+    metadata_size: int | None
+    flags: int | None
+    entry_point_token: int | None
+    resources_rva: int | None
+    resources_size: int | None
+    strong_name_rva: int | None
+    strong_name_size: int | None
+
+
+@dataclass
 class RelocationEntry:
     """One IMAGE_REL_BASED_* fixup within a relocation block."""
 

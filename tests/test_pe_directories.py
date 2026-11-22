@@ -264,6 +264,28 @@ def build_load_config_image(magic=0x20B, declared_size=None, dir_size=None):
     return builder.build()
 
 
+def build_clr_image(dir_size=None):
+    """Image with an IMAGE_COR20_HEADER (data directory 14).
+
+    Only the header is written: this fixture is about reading the CLR header,
+    not about the metadata it points at.
+    """
+    builder, _ = _base_image()
+    blob = bytearray(0x48)
+    struct.pack_into("<IHH", blob, 0x00, 0x48, 2, 5)
+    struct.pack_into("<II", blob, 0x08, 0x2200, 0x100)   # MetaData
+    struct.pack_into("<I", blob, 0x10, 0x3)              # Flags
+    struct.pack_into("<I", blob, 0x14, 0x06000001)       # EntryPointToken
+    struct.pack_into("<II", blob, 0x18, 0x2300, 0x80)    # Resources
+    struct.pack_into("<II", blob, 0x20, 0x2400, 0x20)    # StrongNameSignature
+    rdata = bytearray(0x400)
+    _place(rdata, RVA_RDATA, bytes(blob))
+    builder.add_section(".rdata", bytes(rdata), RVA_RDATA, 0x40000040)
+    size = len(blob) if dir_size is None else dir_size
+    builder.add_dir(14, RVA_RDATA, size)
+    return builder.build()
+
+
 def build_rich_image(key=0x12345678, pairs=((0x0101, 5), (0x0202, 3))):
     builder, _ = _base_image()
     blob = struct.pack("<I", 0x536E6144 ^ key)          # "DanS", encoded
@@ -753,6 +775,57 @@ class TestLoadConfig(unittest.TestCase):
         data = bytearray(data)
         data[RVA_RDATA:RVA_RDATA + 0x94] = b"\x00" * 0x94
         self.assertIsNone(PE(bytes(data)).load_config)
+
+
+class TestCLRHeader(unittest.TestCase):
+    """Data directory 14 — IMAGE_COR20_HEADER.
+
+    Reading the header only: the managed metadata it points at is out of scope.
+    The point is that a .NET image is identifiable from the header alone, and
+    that a native image says so with None rather than an empty header.
+    """
+
+    def test_header_fields(self):
+        from pydbg.pe import PE
+
+        header = PE(build_clr_image()).clr_header
+        self.assertIsNotNone(header)
+        self.assertEqual(header.size, 0x48)
+        self.assertEqual(header.major_runtime_version, 2)
+        self.assertEqual(header.minor_runtime_version, 5)
+        self.assertEqual(header.metadata_rva, 0x2200)
+        self.assertEqual(header.metadata_size, 0x100)
+        self.assertEqual(header.flags, 0x3)
+        self.assertEqual(header.entry_point_token, 0x06000001)
+        self.assertEqual(header.resources_rva, 0x2300)
+        self.assertEqual(header.resources_size, 0x80)
+        self.assertEqual(header.strong_name_rva, 0x2400)
+        self.assertEqual(header.strong_name_size, 0x20)
+
+    def test_truncated_directory_keeps_the_readable_fields(self):
+        from pydbg.pe import PE
+
+        header = PE(build_clr_image(dir_size=0x20)).clr_header
+        self.assertIsNotNone(header)
+        self.assertEqual(header.size, 0x48)
+        self.assertEqual(header.metadata_rva, 0x2200)
+        self.assertEqual(header.resources_rva, 0x2300)
+        self.assertIsNone(header.strong_name_rva)
+        self.assertIsNone(header.strong_name_size)
+
+    def test_absent_directory_is_none(self):
+        """A native image has no CLR header, and that is not an error."""
+        from pydbg.pe import PE
+
+        builder, _ = _base_image()
+        self.assertIsNone(PE(builder.build()).clr_header)
+
+    def test_all_zero_header_is_none(self):
+        from pydbg.pe import PE
+
+        data = bytearray(build_clr_image())
+        data[RVA_RDATA:RVA_RDATA + 0x48] = b"\x00" * 0x48
+        self.assertIsNone(PE(bytes(data)).clr_header)
 
 
 def build_broken_rich_image(blob):

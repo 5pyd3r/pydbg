@@ -5,7 +5,7 @@ import struct
 from .types import (
     DosHeader, FileHeader, OptionalHeader, DataDirectory,
     SectionHeader, ExportEntry, ImportEntry, DelayImport,
-    BoundImport, BoundImportForwarder, LoadConfig,
+    BoundImport, BoundImportForwarder, LoadConfig, CLRHeader,
     RelocationEntry, RelocationBlock, TLSDirectory, DebugEntry,
     CodeViewInfo, ExceptionEntry, RichHeader, RichHeaderEntry,
 )
@@ -24,6 +24,7 @@ DIR_TLS = 9
 DIR_LOAD_CONFIG = 10
 DIR_BOUND_IMPORT = 11
 DIR_DELAY_IMPORT = 13
+DIR_CLR = 14
 
 # IMAGE_DEBUG_TYPE_CODEVIEW: the one debug entry type that carries the PDB.
 DEBUG_TYPE_CODEVIEW = 2
@@ -94,6 +95,24 @@ _LOAD_CONFIG_LAYOUT = {
     0x20B: (_LOAD_CONFIG_64, 0x94),
     0x10B: (_LOAD_CONFIG_32, 0x5C),
 }
+
+# IMAGE_COR20_HEADER. Only the header is read; the metadata directory it points
+# at is deliberately not followed — identifying a .NET image does not need it.
+CLR_HEADER_SIZE = 0x48
+
+_CLR_HEADER_FIELDS = (
+    ('size', 0x00, '<I'),
+    ('major_runtime_version', 0x04, '<H'),
+    ('minor_runtime_version', 0x06, '<H'),
+    ('metadata_rva', 0x08, '<I'),
+    ('metadata_size', 0x0C, '<I'),
+    ('flags', 0x10, '<I'),
+    ('entry_point_token', 0x14, '<I'),
+    ('resources_rva', 0x18, '<I'),
+    ('resources_size', 0x1C, '<I'),
+    ('strong_name_rva', 0x20, '<I'),
+    ('strong_name_size', 0x24, '<I'),
+)
 
 
 def _format_guid(raw: bytes) -> str:
@@ -532,6 +551,35 @@ class PEParser:
             else:
                 values[name] = None
         return LoadConfig(**values)
+
+    def parse_clr_header(self, data_dirs: dict):
+        """CLR header (data directory 14), or None when absent.
+
+        Header only: the metadata directory it points at is not followed, so
+        this answers "is this a .NET image and what does its header claim"
+        rather than duplicating a metadata reader.
+        """
+        dd = data_dirs.get(DIR_CLR)
+        if dd is None or dd.virtual_address == 0 or dd.size == 0:
+            return None
+
+        raw = self._read_rva(dd.virtual_address, min(dd.size, CLR_HEADER_SIZE))
+        if raw is None or len(raw) < 8:
+            return None
+
+        declared = struct.unpack_from('<I', raw, 0)[0]
+        if declared < 8:
+            return None                     # zero cb is no header at all
+
+        end = min(declared, len(raw))
+        values = {}
+        for name, offset, fmt in _CLR_HEADER_FIELDS:
+            field_size = struct.calcsize(fmt)
+            if offset + field_size <= end:
+                values[name] = struct.unpack_from(fmt, raw, offset)[0]
+            else:
+                values[name] = None
+        return CLRHeader(**values)
 
     # ── data directories 3, 5, 6, 9 and the Rich header ────────
     #

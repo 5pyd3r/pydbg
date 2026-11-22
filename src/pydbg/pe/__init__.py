@@ -4,7 +4,7 @@ from .types import (
     IMAGE_SCN_MEM_EXECUTE, IMAGE_SCN_MEM_WRITE,
     DosHeader, FileHeader, OptionalHeader, DataDirectory,
     SectionHeader, ExportEntry, ImportEntry, DelayImport,
-    BoundImport, BoundImportForwarder, LoadConfig,
+    BoundImport, BoundImportForwarder, LoadConfig, CLRHeader,
     RelocationEntry, RelocationBlock, TLSDirectory, DebugEntry,
     CodeViewInfo, ExceptionEntry, RichHeader, RichHeaderEntry,
 )
@@ -126,6 +126,12 @@ class PE:
             self.optional_header.magic))
 
     @property
+    def clr_header(self):
+        """CLR header (data directory 14), or None for a native image."""
+        return self._cached('clr_header', lambda: self._parser.parse_clr_header(
+            self.optional_header.data_directories))
+
+    @property
     def relocations(self):
         """Base relocation blocks (data directory 5)."""
         return self._cached('relocations', lambda: self._parser.parse_relocations(
@@ -235,7 +241,7 @@ __all__ = [
     'PE',
     'DosHeader', 'FileHeader', 'OptionalHeader', 'DataDirectory',
     'SectionHeader', 'ExportEntry', 'ImportEntry', 'DelayImport',
-    'BoundImport', 'BoundImportForwarder', 'LoadConfig',
+    'BoundImport', 'BoundImportForwarder', 'LoadConfig', 'CLRHeader',
     'IMAGE_SCN_MEM_EXECUTE', 'IMAGE_SCN_MEM_WRITE',
     'RelocationEntry', 'RelocationBlock', 'TLSDirectory', 'DebugEntry',
     'CodeViewInfo', 'ExceptionEntry', 'RichHeader', 'RichHeaderEntry',
