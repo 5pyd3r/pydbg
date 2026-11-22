@@ -4,172 +4,24 @@ import os
 import struct
 import unittest
 
+from tests.pe_builder import (
+    RESOURCE_RVA, build_resource_image,
+)
+
+# One RT_RCDATA payload; the shared builder puts it at RESOURCE_DATA_OFFSET
+# inside .rsrc, so its RVA is RESOURCE_RVA + 0x58.
+RESOURCE_DATA = b"\xDE\xAD\xBE\xEF" * 4
+
 
 def build_pe_with_resources():
-    """Build a synthetic PE32+ with a .rsrc section containing one RT_RCDATA resource.
+    """A synthetic PE32+ with a .rsrc holding one RT_RCDATA resource.
 
-    The .rsrc section contains:
-    - Type-level directory: 1 ID entry (type_id=10, RT_RCDATA)
-    - Name-level directory: 1 ID entry (name_id=100)
-    - Language-level directory: 1 ID entry (language_id=1033 = 0x0409)
-    - Data entry pointing to 16 bytes at the end of .rsrc section
-
-    Layout within .rsrc section (base at pointer_to_raw_data):
-        0x0000: Type-level directory (16 + 1*8 = 24 bytes)
-        0x0018: Name-level directory (16 + 1*8 = 24 bytes)
-        0x0030: Language-level directory (16 + 1*8 = 24 bytes)
-        0x0048: IMAGE_RESOURCE_DATA_ENTRY (16 bytes)
-        0x0058: Resource data (16 bytes)
-
-    The .rsrc section will be at RVA 0x3000, file offset 0x600.
+    The tree (type 10 -> name 100 -> language 0x0409 -> data) is built by
+    tests/pe_builder.build_resource_image, which tests/test_pe_version.py
+    uses for its RT_VERSION image too: one builder, two resource types.
     """
-    # --- DOS header: 64 bytes, e_lfanew at 0x3C -> 0x80 ---
-    dos_header = struct.pack("<2s58xI", b"MZ", 0x80)
-    dos_header += b"\x00" * (0x80 - len(dos_header))
-
-    # PE signature
-    pe_sig = struct.pack("<I", 0x00004550)  # "PE\0\0"
-
-    # IMAGE_FILE_HEADER (20 bytes)
-    file_header = struct.pack(
-        "<HHIIIHH",
-        0x8664,  # machine: AMD64
-        3,       # number_of_sections (.text, .rdata, .rsrc)
-        0x5A000000,  # time_date_stamp
-        0,  # PointerToSymbolTable
-        0,  # NumberOfSymbols
-        0xF0,  # SizeOfOptionalHeader (PE32+)
-        0x22,  # characteristics
-    )
-
-    # IMAGE_OPTIONAL_HEADER64 (PE32+)
-    opt_header = struct.pack("<HBB", 0x20B, 14, 0)  # magic, linker
-    opt_header += struct.pack("<III", 0x1000, 0, 0)  # code sizes
-    opt_header += struct.pack("<II", 0x1000, 0x1000)  # entry, base of code
-    opt_header += struct.pack("<Q", 0x140000000)  # image base
-    opt_header += struct.pack("<II", 0x1000, 0x200)  # section/file align
-    opt_header += struct.pack("<HHHHHHI", 4, 0, 0, 0, 4, 0, 0)  # versions
-    opt_header += struct.pack("<III", 0x5000, 0x400, 0)  # image/headers size, checksum
-    opt_header += struct.pack("<HH", 2, 0)  # subsystem, dll chars
-    opt_header += struct.pack("<QQQQ", 0x100000, 0x1000, 0x100000, 0x1000)  # stack/heap
-    opt_header += struct.pack("<II", 0, 16)  # LoaderFlags, NumberOfRvaAndSizes
-
-    # Data directories: 16 entries * 8 bytes = 128 bytes
-    # Entry 0 (Export): none
-    # Entry 1 (Import): none
-    # Entry 2 (Resource): RVA=0x3000, Size=0x100
-    data_dirs = struct.pack("<II", 0, 0)   # Export
-    data_dirs += struct.pack("<II", 0, 0)  # Import
-    data_dirs += struct.pack("<II", 0x3000, 0x100)  # Resource
-    # Pad to 16 entries (remaining 13 entries = 104 bytes of zeros)
-    data_dirs += b"\x00" * (13 * 8)
-
-    # Section headers: 3 * 40 bytes
-    # .text section
-    text_section = struct.pack(
-        "<8sIIIIIIHHI",
-        b".text\x00\x00\x00",  # Name
-        0xE00,   # VirtualSize
-        0x1000,  # VirtualAddress
-        0x1000,  # SizeOfRawData
-        0x400,   # PointerToRawData
-        0, 0, 0, 0,
-        0x60000020,  # CODE|EXECUTE|READ
-    )
-    # .rdata section
-    rdata_section = struct.pack(
-        "<8sIIIIIIHHI",
-        b".rdata\x00\x00",  # Name
-        0xA00,   # VirtualSize
-        0x2000,  # VirtualAddress
-        0x200,   # SizeOfRawData
-        0x1400,  # PointerToRawData
-        0, 0, 0, 0,
-        0x40000040,  # DATA|READ
-    )
-    # .rsrc section: starts at file offset 0x1600, RVA 0x3000
-    # Size needs to hold all resource directory structures + data
-    # Directory structures: 3 dirs * 24 bytes + 1 data entry (16) + 16 bytes data = 104
-    # Round up to 0x200 for file alignment
-    rsrc_section = struct.pack(
-        "<8sIIIIIIHHI",
-        b".rsrc\x00\x00\x00",  # Name
-        0x200,   # VirtualSize
-        0x3000,  # VirtualAddress
-        0x200,   # SizeOfRawData (aligned to 0x200)
-        0x1600,  # PointerToRawData
-        0, 0, 0, 0,
-        0x40000040,  # DATA|READ
-    )
-
-    # Build the PE header portion
-    header = dos_header + pe_sig + file_header + opt_header + data_dirs
-    header += text_section + rdata_section + rsrc_section
-
-    # Pad header to at least 0x1600 bytes (start of .rsrc raw data)
-    if len(header) < 0x1600:
-        header += b"\x00" * (0x1600 - len(header))
-
-    # Now build the .rsrc section content
-    # All offsets within .rsrc are relative to the section start
-    # .rsrc file offset = 0x1600, .rsrc RVA = 0x3000
-
-    resource_data = b"\xDE\xAD\xBE\xEF" * 4  # 16 bytes of test data
-
-    # Type-level directory at .rsrc offset 0x0000
-    # 1 ID entry (RT_RCDATA = 10)
-    type_dir = struct.pack('<IIHHHH',
-                           0,  # Characteristics
-                           0,  # TimeDateStamp
-                           0,  # MajorVersion
-                           0,  # MinorVersion
-                           0,  # NumberOfNamedEntries
-                           1)  # NumberOfIdEntries
-    # Entry: Id=10, Subdir at offset 0x0018
-    type_dir += struct.pack('<II', 10, 0x80000000 | 0x0018)
-
-    # Name-level directory at .rsrc offset 0x0018
-    # 1 ID entry (name_id = 100)
-    name_dir = struct.pack('<IIHHHH',
-                           0, 0, 0, 0,
-                           0,  # NumberOfNamedEntries
-                           1)  # NumberOfIdEntries
-    # Entry: Id=100, Subdir at offset 0x0030
-    name_dir += struct.pack('<II', 100, 0x80000000 | 0x0030)
-
-    # Language-level directory at .rsrc offset 0x0030
-    # 1 ID entry (language = 0x0409 = 1033 English US)
-    lang_dir = struct.pack('<IIHHHH',
-                           0, 0, 0, 0,
-                           0,  # NumberOfNamedEntries
-                           1)  # NumberOfIdEntries
-    # Entry: Id=0x0409, DataEntry at offset 0x0048
-    lang_dir += struct.pack('<II', 0x0409, 0x0048)
-
-    # IMAGE_RESOURCE_DATA_ENTRY at .rsrc offset 0x0048
-    # OffsetToData = RVA of the actual resource data
-    # Data is at .rsrc offset 0x0058 -> RVA = 0x3000 + 0x0058 = 0x3058
-    data_rva = 0x3058
-    data_entry = struct.pack('<IIII',
-                             data_rva,      # OffsetToData (RVA)
-                             16,            # Size
-                             0,             # CodePage
-                             0)             # Reserved
-
-    # Assemble .rsrc section content
-    rsrc_content = type_dir + name_dir + lang_dir + data_entry + resource_data
-
-    # Pad .rsrc to 0x200 bytes (SizeOfRawData)
-    if len(rsrc_content) < 0x200:
-        rsrc_content += b"\x00" * (0x200 - len(rsrc_content))
-
-    # Full PE
-    pe_data = header + rsrc_content
-    # Ensure total is big enough
-    if len(pe_data) < 0x1800:
-        pe_data += b"\x00" * (0x1800 - len(pe_data))
-
-    return pe_data, resource_data
+    return (build_resource_image(10, RESOURCE_DATA, name_id=100),
+            RESOURCE_DATA)
 
 
 def build_pe_without_resources():
@@ -366,9 +218,9 @@ class TestPEResourceParser(unittest.TestCase):
         parser = PEResourceParser(pe)
         entries = parser.parse()
 
-        # .rsrc: RVA=0x3000, file offset=0x1600
-        # Data RVA=0x3058 -> file offset = 0x3058 - 0x3000 + 0x1600 = 0x1658
-        self.assertEqual(entries[0].data_offset, 0x1658)
+        # The shared builder lays .rsrc out with raw offset == RVA (0x3000),
+        # so the data at RVA 0x3058 is at file offset 0x3058 as well.
+        self.assertEqual(entries[0].data_offset, 0x3058)
 
 
 class TestResourceParserRobustness(unittest.TestCase):
@@ -379,8 +231,7 @@ class TestResourceParserRobustness(unittest.TestCase):
     that were readable, not an exception out of the middle of a walk.
     """
 
-    RSRC_FILE_OFFSET = 0x1600        # see build_pe_with_resources
-    RSRC_RVA = 0x3000
+    RSRC_FILE_OFFSET = RESOURCE_RVA     # see build_pe_with_resources
 
     def test_pe_facade_exposes_the_tree(self):
         from pydbg.pe import PE

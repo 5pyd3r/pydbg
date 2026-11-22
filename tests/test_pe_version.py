@@ -11,12 +11,11 @@ import os
 import struct
 import unittest
 
-from tests.pe_builder import PEBuilder
+from pydbg.pe.resource import RT_VERSION
 
-RT_VERSION = 16
-RVA_RSRC = 0x3000
-# Offset past the three directory levels and the data entry, all inside .rsrc.
-RSRC_DATA_OFFSET = 0x58
+from tests.pe_builder import (
+    PEBuilder, RESOURCE_DATA_OFFSET, RESOURCE_RVA, build_resource_image,
+)
 
 
 def _utf16z(text):
@@ -102,33 +101,14 @@ def build_version_blob(fixed=None, tables=None, translations=None):
 def build_pe_with_version_resource(blob=None):
     """A synthetic PE32+ whose .rsrc holds 'blob' under RT_VERSION.
 
-    The tree is the same three-level shape as
-    tests/test_resource.py::build_pe_with_resources: type (ID 16) -> name
-    (ID 1) -> language (0x0409) -> one data entry -> the payload.
+    The tree comes from tests.pe_builder.build_resource_image, the same
+    three-level builder tests/test_resource.py uses for its RT_RCDATA image;
+    only the resource type, name, language and payload differ.
     """
     if blob is None:
         blob = build_version_blob()
-
-    rsrc = bytearray(RSRC_DATA_OFFSET + len(blob))
-    # Type-level directory: one ID entry, RT_VERSION, subdir at 0x18.
-    struct.pack_into("<IIHHHH", rsrc, 0x00, 0, 0, 0, 0, 0, 1)
-    struct.pack_into("<II", rsrc, 0x10, RT_VERSION, 0x80000000 | 0x18)
-    # Name-level directory: one ID entry, name 1, subdir at 0x30.
-    struct.pack_into("<IIHHHH", rsrc, 0x18, 0, 0, 0, 0, 0, 1)
-    struct.pack_into("<II", rsrc, 0x28, 1, 0x80000000 | 0x30)
-    # Language-level directory: one ID entry, 0x0409, data entry at 0x48.
-    struct.pack_into("<IIHHHH", rsrc, 0x30, 0, 0, 0, 0, 0, 1)
-    struct.pack_into("<II", rsrc, 0x40, 0x0409, 0x48)
-    # IMAGE_RESOURCE_DATA_ENTRY pointing at the payload.
-    struct.pack_into("<IIII", rsrc, 0x48, RVA_RSRC + RSRC_DATA_OFFSET,
-                     len(blob), 1200, 0)
-    rsrc[RSRC_DATA_OFFSET:] = blob
-
-    builder = PEBuilder()
-    builder.add_section(".text", b"\x90" * 0x10, 0x1000)
-    builder.add_section(".rsrc", bytes(rsrc), RVA_RSRC, 0x40000040)
-    builder.add_dir(2, RVA_RSRC, len(rsrc))
-    return builder.build()
+    return build_resource_image(RT_VERSION, blob, name_id=1,
+                                language_id=0x0409, code_page=1200)
 
 
 class TestParseVersionInfo(unittest.TestCase):
@@ -282,7 +262,7 @@ class TestPEVersionInfo(unittest.TestCase):
         from pydbg.pe import PE
 
         data = build_pe_with_version_resource()
-        pe = PE(data[:RVA_RSRC + RSRC_DATA_OFFSET])
+        pe = PE(data[:RESOURCE_RVA + RESOURCE_DATA_OFFSET])
         self.assertIsNone(pe.version_info)
 
 

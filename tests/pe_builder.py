@@ -119,6 +119,45 @@ def build_with_directories(**kwargs):
     return PEBuilder(**kwargs)
 
 
+# The .rsrc layout every resource test uses: type -> name -> language
+# directories (24 bytes each), one IMAGE_RESOURCE_DATA_ENTRY at 0x48, payload
+# at 0x58. Payload placement is fixed so its RVA is deterministic.
+RESOURCE_RVA = 0x3000
+RESOURCE_DATA_OFFSET = 0x58
+
+
+def build_resource_image(resource_type, data, name_id=1, language_id=0x0409,
+                         code_page=0, rva=RESOURCE_RVA):
+    """A PE32+ whose .rsrc holds one type -> name -> language -> data entry.
+
+    The tree is a fixed three-level shape with self-relative offsets, so
+    spelling it out in every test that needs a resource is a copy waiting to
+    diverge. Tests parameterise the type, name, language and payload; the
+    offsets inside the tree stay here.
+    """
+    data = bytes(data)
+    rsrc = bytearray(RESOURCE_DATA_OFFSET + len(data))
+    # Type-level directory: one ID entry, subdir at 0x18.
+    struct.pack_into("<IIHHHH", rsrc, 0x00, 0, 0, 0, 0, 0, 1)
+    struct.pack_into("<II", rsrc, 0x10, resource_type, 0x80000000 | 0x18)
+    # Name-level directory: one ID entry, subdir at 0x30.
+    struct.pack_into("<IIHHHH", rsrc, 0x18, 0, 0, 0, 0, 0, 1)
+    struct.pack_into("<II", rsrc, 0x28, name_id, 0x80000000 | 0x30)
+    # Language-level directory: one ID entry, data entry at 0x48.
+    struct.pack_into("<IIHHHH", rsrc, 0x30, 0, 0, 0, 0, 0, 1)
+    struct.pack_into("<II", rsrc, 0x40, language_id, 0x48)
+    # IMAGE_RESOURCE_DATA_ENTRY pointing at the payload.
+    struct.pack_into("<IIII", rsrc, 0x48, rva + RESOURCE_DATA_OFFSET,
+                     len(data), code_page, 0)
+    rsrc[RESOURCE_DATA_OFFSET:] = data
+
+    builder = PEBuilder()
+    builder.add_section(".text", b"\x90" * 0x10, 0x1000)
+    builder.add_section(".rsrc", bytes(rsrc), rva, 0x40000040)
+    builder.add_dir(2, rva, len(rsrc))
+    return builder.build()
+
+
 def build_loaded_image_with_one_import(func_name="MessageBoxA",
                                        dll_name="user32.dll",
                                        image_base=0x140000000):
