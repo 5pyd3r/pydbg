@@ -10,10 +10,10 @@ both produce output that looks like a finding.
 import os
 import unittest
 
-from pydbg.analysis import section_entropy, strings_in_bytes
+from pydbg.analysis import packing_hints, section_entropy, strings_in_bytes
 from pydbg.pe import PE
 
-from tests.pe_builder import PEBuilder
+from tests.pe_builder import PEBuilder, build_loaded_image_with_one_import
 
 TARGET_X64 = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                           "target", "simple_target_x64.exe")
@@ -122,6 +122,69 @@ class TestSectionEntropy(unittest.TestCase):
         found = section_entropy(PE(builder.build()[:-1]))
         self.assertEqual([(s.name, s.entropy, s.size) for s in found],
                          [(".text", 0.0, 0)])
+
+
+class TestPackingHints(unittest.TestCase):
+    """Cheap evidence, reported as separate facts rather than a verdict.
+
+    Each signal is individually weak and individually meaningful: a section
+    that is both writable and executable is suspicious without any entropy
+    story, and a high-entropy section is unremarkable in some legitimate
+    images. Folding them into one "packed: yes" would throw that away.
+    """
+
+    def build(self, sections):
+        builder = PEBuilder(magic=0x10B, image_base=0x400000)
+        rva = 0x1000
+        for name, data, characteristics in sections:
+            builder.add_section(name, data, rva, characteristics)
+            rva += 0x1000
+        return PE(builder.build())
+
+    def test_writable_executable_and_high_entropy_sections_are_reported(self):
+        pe = self.build([
+            (".text", b"\x90" * 0x100, 0x60000020),
+            (".wx", bytes(range(256)) * 8, 0xE0000020),
+            ("UPX0", b"\x00" * 0x100, 0x40000040),
+        ])
+        hints = packing_hints(pe)
+        self.assertEqual(hints.high_entropy_sections, [".wx"])
+        self.assertEqual(hints.write_exec_sections, [".wx"])
+        self.assertEqual(hints.suspicious_section_names, ["UPX0"])
+        self.assertTrue(hints.low_import_count)
+
+    def test_plain_sections_raise_no_packing_signal(self):
+        """A normal image must not look packed merely for existing."""
+        pe = self.build([
+            (".text", b"\x90" * 0x100, 0x60000020),
+            (".rdata", b"\x00" * 0x200, 0x40000040),
+        ])
+        hints = packing_hints(pe)
+        self.assertEqual(hints.high_entropy_sections, [])
+        self.assertEqual(hints.write_exec_sections, [])
+        self.assertEqual(hints.suspicious_section_names, [])
+
+    def test_suspicious_names_match_case_insensitively(self):
+        pe = self.build([
+            (".text", b"\x90" * 0x100, 0x60000020),
+            ("UPX0", b"\x00" * 0x10, 0x40000040),
+            (".Themida", b"\x00" * 0x10, 0x40000040),
+        ])
+        self.assertEqual(packing_hints(pe).suspicious_section_names,
+                         ["UPX0", ".Themida"])
+
+    def test_the_thresholds_are_arguments(self):
+        pe = self.build([(".flat", bytes(range(256)), 0x60000020)])
+        self.assertEqual(
+            packing_hints(pe, entropy_threshold=8.5).high_entropy_sections, [])
+
+    def test_import_count_is_compared_with_the_threshold(self):
+        image, _iat = build_loaded_image_with_one_import()
+        pe = PE(image)
+        self.assertEqual(len(pe.imports), 1)
+        self.assertTrue(packing_hints(pe).low_import_count)
+        self.assertFalse(
+            packing_hints(pe, low_import_threshold=1).low_import_count)
 
 
 if __name__ == "__main__":

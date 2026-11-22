@@ -48,6 +48,29 @@ class SectionEntropy:
     size: int
 
 
+# Substrings a packer's section names are known to contain, lower-case. The
+# match is on the lower-cased name, so `UPX0` and `upx0` are the same evidence.
+_SUSPICIOUS_MARKERS = ("upx", ".aspack", ".adata", ".packed",
+                       ".themida", ".vmp")
+
+
+@dataclass(frozen=True, slots=True)
+class PackingHints:
+    """Cheap, separate signals that an image may be packed.
+
+    Four facts rather than one verdict on purpose. A writable+executable
+    section is suspicious with no entropy story at all; a high-entropy section
+    is unremarkable in some legitimate images; and an image with almost no
+    imports may simply not need any. Collapsing them into "packed: yes" would
+    hide which evidence produced the answer.
+    """
+
+    high_entropy_sections: list
+    write_exec_sections: list
+    low_import_count: bool
+    suspicious_section_names: list
+
+
 def _printable(byte):
     return _PRINTABLE_MIN <= byte <= _PRINTABLE_MAX
 
@@ -135,3 +158,28 @@ def section_entropy(pe):
         found.append(SectionEntropy(section.name, _shannon_entropy(data),
                                     len(data)))
     return found
+
+
+def _looks_suspicious(name):
+    lowered = name.lower()
+    return any(marker in lowered for marker in _SUSPICIOUS_MARKERS)
+
+
+def packing_hints(pe, entropy_threshold=7.0, low_import_threshold=8):
+    """Cheap packing evidence, one fact per field, in section-table order.
+
+    Defaults are the ones a normal image clears: textual code and data sit far
+    below 7 bits of entropy, and an ordinary program imports more than eight
+    functions. They are arguments because a shellcode stub or a driver may
+    reasonably want different ones.
+    """
+    entropies = section_entropy(pe)
+    return PackingHints(
+        high_entropy_sections=[section.name for section in entropies
+                               if section.entropy >= entropy_threshold],
+        write_exec_sections=[section.name for section in pe.sections
+                             if section.is_executable and section.is_writable],
+        low_import_count=len(pe.imports) < low_import_threshold,
+        suspicious_section_names=[section.name for section in pe.sections
+                                  if _looks_suspicious(section.name)],
+    )
