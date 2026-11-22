@@ -56,7 +56,9 @@ from .scan import (
     LinearScan, Resync, Undecodable, linear_scan, scan_executable, scan_section,
 )
 from .seeds import SeedProvider, SeedSet, looks_like_entry
-from .strings import FoundString, strings_in_bytes
+from .strings import (
+    FoundString, SectionEntropy, section_entropy, strings_in_bytes,
+)
 from .values import (
     DECIDED, UNDECIDED, Bound, ValueSet, narrow_by_guards,
     unresolved_write_count, value_set_of, writes_to,
@@ -82,7 +84,7 @@ __all__ = [
     'xrefs_are_complete',
     'LinearScan', 'Resync', 'Undecodable', 'linear_scan', 'scan_executable',
     'scan_section',
-    'FoundString', 'strings_in_bytes',
+    'FoundString', 'SectionEntropy', 'strings_in_bytes', 'section_entropy',
     'SlotTable', 'OWNER_KINDS', 'OWNED_KINDS',
     'Boundary', 'BOUNDARY_KINDS', 'boundary_of',
     'RegionOwnership', 'classify_range', 'container_of', 'function_of',

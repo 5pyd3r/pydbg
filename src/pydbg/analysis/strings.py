@@ -10,7 +10,9 @@ image is ordinary input for this module: it is the shape of the thing being
 analysed, not an error worth aborting a scan for.
 """
 
+from collections import Counter
 from dataclasses import dataclass
+import math
 
 ASCII = "ascii"
 UTF16LE = "utf-16le"
@@ -30,6 +32,20 @@ class FoundString:
     rva: int
     encoding: str
     text: str
+
+
+@dataclass(frozen=True, slots=True)
+class SectionEntropy:
+    """One section's Shannon entropy, and how many bytes it was measured over.
+
+    `size` is the number of readable bytes, not the section's declared span:
+    the two differ whenever the file is truncated, and an entropy figure whose
+    denominator is an assumption is worse than one that states it.
+    """
+
+    name: str
+    entropy: float
+    size: int
 
 
 def _printable(byte):
@@ -92,4 +108,30 @@ def strings_in_bytes(data, base_rva=0, min_length=4):
     found = _utf16_strings(data, base_rva, min_length, consumed)
     found.extend(_ascii_strings(data, base_rva, min_length, consumed))
     found.sort(key=lambda string: (string.rva, string.encoding))
+    return found
+
+
+def _shannon_entropy(data):
+    """-Σ p·log2(p) over the byte distribution; 0.0 when there are no bytes."""
+    counts = Counter(data)
+    total = len(data)
+    return -sum((count / total) * math.log2(count / total)
+                for count in counts.values())
+
+
+def section_entropy(pe):
+    """Shannon entropy per section, in section-table order.
+
+    A section that cannot be read is reported at 0.0 with size 0 rather than
+    dropped: a section missing from the list and a clean section would look
+    alike to a caller wondering where the high-entropy evidence went.
+    """
+    found = []
+    for section in pe.sections:
+        data = pe.read_rva(section.virtual_address, section.span)
+        if not data:
+            found.append(SectionEntropy(section.name, 0.0, 0))
+            continue
+        found.append(SectionEntropy(section.name, _shannon_entropy(data),
+                                    len(data)))
     return found

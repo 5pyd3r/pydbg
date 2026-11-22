@@ -10,7 +10,10 @@ both produce output that looks like a finding.
 import os
 import unittest
 
-from pydbg.analysis import strings_in_bytes
+from pydbg.analysis import section_entropy, strings_in_bytes
+from pydbg.pe import PE
+
+from tests.pe_builder import PEBuilder
 
 TARGET_X64 = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                           "target", "simple_target_x64.exe")
@@ -76,6 +79,49 @@ class TestStringsInBytes(unittest.TestCase):
                  for s in found]
         for (_start, end), (next_start, _next_end) in zip(spans, spans[1:]):
             self.assertLessEqual(end, next_start, "reported runs overlap")
+
+
+class TestSectionEntropy(unittest.TestCase):
+    """Entropy is a claim about one section's bytes, so size travels with it."""
+
+    def entropy_of(self, data, name=".data"):
+        builder = PEBuilder(magic=0x10B, image_base=0x400000)
+        builder.add_section(name, data, 0x1000)
+        return section_entropy(PE(builder.build()))[0]
+
+    def test_one_repeated_byte_is_zero_entropy(self):
+        """Both all-zero and all-'A' are legitimately zero, not a failure."""
+        self.assertEqual(self.entropy_of(b"\x00" * 4096).entropy, 0.0)
+        self.assertEqual(self.entropy_of(b"A" * 4096).entropy, 0.0)
+
+    def test_a_uniform_byte_distribution_is_eight_bits(self):
+        found = self.entropy_of(bytes(range(256)))
+        self.assertAlmostEqual(found.entropy, 8.0, delta=1e-9)
+
+    def test_every_section_is_reported_in_table_order(self):
+        """A section missing from the list is indistinguishable from a clean
+        one, so unreadable sections still appear, at 0.0 with size 0."""
+        builder = PEBuilder(magic=0x10B, image_base=0x400000)
+        builder.add_section(".zero", b"\x00" * 256, 0x1000)
+        builder.add_section(".flat", bytes(range(256)), 0x2000)
+        builder.add_section(".same", b"A" * 4096, 0x3000)
+        builder.add_section(".empty", b"", 0x4000)
+        found = section_entropy(PE(builder.build()))
+
+        self.assertEqual([s.name for s in found],
+                         [".zero", ".flat", ".same", ".empty"])
+        self.assertEqual([s.size for s in found], [256, 256, 4096, 0])
+        self.assertEqual(found[0].entropy, 0.0)
+        self.assertAlmostEqual(found[1].entropy, 8.0, delta=1e-9)
+        self.assertEqual(found[2].entropy, 0.0)
+        self.assertEqual(found[3].entropy, 0.0)
+
+    def test_a_truncated_section_is_zero_rather_than_an_exception(self):
+        builder = PEBuilder(magic=0x10B, image_base=0x400000)
+        builder.add_section(".text", b"\x00hello\x00", 0x1000)
+        found = section_entropy(PE(builder.build()[:-1]))
+        self.assertEqual([(s.name, s.entropy, s.size) for s in found],
+                         [(".text", 0.0, 0)])
 
 
 if __name__ == "__main__":
