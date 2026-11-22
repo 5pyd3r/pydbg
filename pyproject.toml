@@ -40,3 +40,8 @@ dev = ["meson", "meson-python", "ninja", "cython", "pytest", "flake8",
        "capstone>=5.0", "keystone-engine>=0.9.2"]
 disasm = ["capstone>=5.0"]
 patch = ["keystone-engine>=0.9.2"]
+# The instrumenter disassembles the target bytes to size the trampoline, so it
+# needs capstone; the core install does not. LLVM itself is a native build
+# dependency and cannot be expressed as a pip extra: build the backend with
+# -Denable-llvm-instrument=true -Dllvm-config=<path>.
+instrument = ["capstone>=5.0"]

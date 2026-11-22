@@ -1,36 +1,19 @@
 # LLVM Instrument 后端 — 静态链接预编译 LLVM 22 + clang 组件库，构建 hook_compiler 静态库
 # 不再依赖 libclang.dll（clang_to_ir 使用 clang C++ API，链接 clang 静态组件库）。
-fs = import('fs')
 
 llvm_config = ''
 llvm_cfg = get_option('llvm-config')
 if llvm_cfg != ''
   llvm_config = find_program(llvm_cfg, native : true)
 else
+  # PATH 上的 llvm-config；不在这里写死任何机器或用户目录。
   llvm_config = find_program(
     'llvm-config', 'llvm-config-22', 'llvm-config-18', 'llvm-config-17',
     required : false)
 endif
 
 if not llvm_config.found()
-  # ── Fallback: 预编译 LLVM 搜索路径 ──────────────────────────
-  llvm_search_dirs = [
-    'C:/Users/Spyder/AppData/Local/llvm-22',
-    'C:/Users/Spyder/AppData/Local/llvm-17',
-    'C:/Program Files/LLVM',
-  ]
-  llvm_use_prebuilt = false
-  foreach dir : llvm_search_dirs
-    if fs.exists(dir / 'bin/llvm-config.exe')
-      llvm_config = find_program(dir / 'bin/llvm-config.exe', native : true)
-      llvm_use_prebuilt = true
-      message('LLVM Instrument: using prebuilt LLVM at ' + dir)
-      break
-    endif
-  endforeach
-  if not llvm_use_prebuilt
-    error('LLVM Instrument requires llvm-config. Install prebuilt LLVM 22 or set -Dllvm-config=/path/to/llvm-config')
-  endif
+  error('LLVM Instrument requires llvm-config. Put llvm-config on PATH or configure with -Dllvm-config=/absolute/path/to/llvm-config.exe (see devtools/build-llvm-22.ps1).')
 endif
 
 llvm_includedir = run_command(llvm_config, '--includedir', check : true).stdout().strip()

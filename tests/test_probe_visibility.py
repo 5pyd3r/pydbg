@@ -479,6 +479,8 @@ class TestNestedDebugging(unittest.TestCase):
 
     SPAWN_WAIT_S = 15.0
     SETTLE_S = 2.0      # let the child's loader finish before PSAPI asks
+    READY_BUDGET_S = 10.0
+    READY_POLL_S = 0.25
 
     def setUp(self):
         from pydbg import Debugger
@@ -529,6 +531,31 @@ class TestNestedDebugging(unittest.TestCase):
             time.sleep(self.SETTLE_S)
         return self.child
 
+    def _modules_when_ready(self, child, what):
+        """Read the child's modules, retrying while it is not openable yet.
+
+        The process snapshot can name a pid a moment before OpenProcess can
+        open it, and the child can also exit between the two. Both are
+        transient; a refusal that persists for the whole budget is a real
+        failure and is reported as such.
+        """
+        from pydbg.exceptions import ProcessError
+
+        deadline = time.monotonic() + self.READY_BUDGET_S
+        last = None
+        while True:
+            try:
+                modules = self.dbg.enum_modules(pid=child["pid"])
+                if modules:
+                    return modules
+                last = "the module list was empty"
+            except ProcessError as exc:
+                last = exc
+            if time.monotonic() >= deadline:
+                self.fail(f"child {child['pid']} was not readable within "
+                          f"{self.READY_BUDGET_S:.0f}s ({what}): {last}")
+            time.sleep(self.READY_POLL_S)
+
     def test_attach_receives_no_create_process_for_the_child(self):
         """The measurement F19 recorded as unverified, made.
 
@@ -568,7 +595,7 @@ class TestNestedDebugging(unittest.TestCase):
         happened to be attached to, so detach has to release them too."""
         child = self._drive_until_child()
         self.assertIsNotNone(child, "no child was observed")
-        self.dbg.enum_modules(pid=child["pid"])
+        self._modules_when_ready(child, "detach test")
         self.assertIn(child["pid"], self.dbg._session.foreign_handles)
 
         self.dbg.detach()
@@ -580,7 +607,7 @@ class TestNestedDebugging(unittest.TestCase):
         child = self._drive_until_child()
         self.assertIsNotNone(child, "no child was observed")
 
-        modules = self.dbg.enum_modules(pid=child["pid"])
+        modules = self._modules_when_ready(child, "memory read")
         self.assertTrue(modules)
 
         # The child's list must be the child's: exactly what PSAPI reports,

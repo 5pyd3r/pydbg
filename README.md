@@ -152,7 +152,17 @@ except TimeoutError:
 ### 插桩（Instrumentation）
 
 stub/trampoline 用硬编码指令生成，payload 由 LLVM 22 动态编译 C 源码为机器码并注入目标进程。
-需以 `-Denable-llvm-instrument=true` 构建，并预装 LLVM 22（检测 `C:/Users/Spyder/AppData/Local/llvm-22` 或 `-Dllvm-config=`）。
+默认安装/构建**不链接 LLVM**；启用需同时打开构建选项并安装可选依赖：
+
+```bash
+pip install -e '.[instrument]' --no-build-isolation \
+  --config-settings=setup-args=-Denable-llvm-instrument=true \
+  --config-settings=setup-args=-Dllvm-config=C:/path/to/llvm-config.exe
+```
+
+`-Dllvm-config` 可省略，此时在 PATH 上查找 `llvm-config`。
+LLVM 22 可用 `devtools/build-llvm-22.ps1` 获取（默认装到 `%LOCALAPPDATA%\llvm-22`）。
+v0.2 起该特性**冻结**：不新增插桩功能，x64 的 RIP-relative 重定位不修（见 `docs/KNOWN_ISSUES.md`）。
 
 ```python
 from pydbg.instrument import Instrumenter, InstrumentTemplates

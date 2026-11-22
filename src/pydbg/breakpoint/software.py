@@ -107,13 +107,9 @@ class SoftwareBreakpointManager:
 
         try:
             original = _pydbg.read_process_memory(h_process, addr, 1)
-            old_prot = _pydbg.virtual_protect_ex(
-                h_process, addr, 1, self._PAGE_EXECUTE_READWRITE
-            )
-            _pydbg.write_process_memory(h_process, addr, b"\xcc")
-            _pydbg.virtual_protect_ex(h_process, addr, 1, old_prot)
         except OSError as e:
             raise BreakpointError(f"set_breakpoint at 0x{addr:X}: {e}")
+        self._write_protected(h_process, addr, self._INT3, "set_breakpoint")
 
         self._s.bp_counter += 1
         bp_id = self._s.bp_counter
@@ -121,27 +117,53 @@ class SoftwareBreakpointManager:
             kind="int3", addr=addr, original=original, h_process=h_process)
         return bp_id
 
-    def _restore_byte_handle(self, h_process, addr, original):
-        """Restore original byte at addr using explicit handle."""
+    def _write_protected(self, h_process, addr, data, what):
+        """Write 'data' at 'addr', always attempting to restore protection.
+
+        The restore used to sit after the write with no try/finally, so a
+        failed write left the page writable — a side effect the caller never
+        asked for, and a detection surface for a tool whose whole job is not
+        to disturb the target. The restore is now attempted whatever the write
+        did, and a restore failure is reported rather than lost.
+        """
         try:
             old_prot = _pydbg.virtual_protect_ex(
-                h_process, addr, 1, self._PAGE_EXECUTE_READWRITE
+                h_process, addr, len(data), self._PAGE_EXECUTE_READWRITE
             )
-            _pydbg.write_process_memory(h_process, addr, original)
-            _pydbg.virtual_protect_ex(h_process, addr, 1, old_prot)
         except OSError as e:
-            raise BreakpointError(f"restore_byte at 0x{addr:X}: {e}")
+            raise BreakpointError(
+                f"{what} at 0x{addr:X}: could not change protection: {e}")
+
+        write_error = None
+        try:
+            _pydbg.write_process_memory(h_process, addr, data)
+        except OSError as e:
+            write_error = e
+
+        restore_error = None
+        try:
+            _pydbg.virtual_protect_ex(h_process, addr, len(data), old_prot)
+        except OSError as e:
+            restore_error = e
+
+        if write_error is not None:
+            message = f"{what} at 0x{addr:X}: {write_error}"
+            if restore_error is not None:
+                message += (f"; restoring protection also failed: "
+                            f"{restore_error}")
+            raise BreakpointError(message) from write_error
+        if restore_error is not None:
+            raise BreakpointError(
+                f"{what} at 0x{addr:X}: wrote the byte but restoring "
+                f"protection failed: {restore_error}")
+
+    def _restore_byte_handle(self, h_process, addr, original):
+        """Restore original byte at addr using explicit handle."""
+        self._write_protected(h_process, addr, original, "restore_byte")
 
     def _write_int3_handle(self, h_process, addr):
         """Write INT3 byte at addr using explicit handle."""
-        try:
-            old_prot = _pydbg.virtual_protect_ex(
-                h_process, addr, 1, self._PAGE_EXECUTE_READWRITE
-            )
-            _pydbg.write_process_memory(h_process, addr, b"\xcc")
-            _pydbg.virtual_protect_ex(h_process, addr, 1, old_prot)
-        except OSError as e:
-            raise BreakpointError(f"write_int3 at 0x{addr:X}: {e}")
+        self._write_protected(h_process, addr, self._INT3, "write_int3")
 
     def handle_breakpoint_hit(self, tid, addr):
         """Handle breakpoint lifecycle: remove INT3, set single-step, schedule restore.
