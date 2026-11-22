@@ -81,11 +81,21 @@ def _utf16_char_at(data, index):
 
 
 def _utf16_strings(data, base_rva, min_length, consumed):
-    """UTF-16LE runs whose every character is ASCII and followed by a NUL."""
+    """UTF-16LE runs whose every character is ASCII and followed by a NUL.
+
+    A run may only start at the buffer's first byte or just after a
+    non-printable byte. The NUL that terminates an ASCII string is also a
+    valid UTF-16 high byte, so without that boundary check the last character
+    of `b"hello\\x00"` joins the next UTF-16 run as `"oWide"` instead of
+    leaving `"hello"` whole for the ASCII pass.
+    """
     found = []
     index = 0
     while index + 1 < len(data):
         if not _utf16_char_at(data, index):
+            index += 1
+            continue
+        if index and _printable(data[index - 1]):
             index += 1
             continue
         start = index
@@ -122,6 +132,13 @@ def strings_in_bytes(data, base_rva=0, min_length=4):
     UTF-16LE is recognised first and its bytes are claimed before the ASCII
     pass runs. Doing it the other way around reports a UTF-16 string as a run
     of one-character ASCII fragments — five findings where there is one.
+
+    A UTF-16LE run may only start at the buffer's first byte or immediately
+    after a non-printable byte; a run that would begin inside an ASCII run is
+    left to the ASCII pass. That boundary is load-bearing: the NUL that ends
+    an ASCII string is also a valid UTF-16 high byte, so without it the last
+    character of `b"hello\\x00"` would be claimed as the start of the next
+    UTF-16 run.
 
     Results are in address order, whatever order the two passes found them in.
     """

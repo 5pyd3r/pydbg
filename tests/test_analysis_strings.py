@@ -57,25 +57,37 @@ class TestStringsInBytes(unittest.TestCase):
                          ["Hello"])
         self.assertEqual(strings_in_bytes(data, min_length=6), [])
 
+    def test_a_utf16_run_cannot_start_inside_an_ascii_run(self):
+        """The NUL terminating an ASCII string is a valid UTF-16 high byte.
+
+        Without a boundary rule the last character of "hello\\0" is read as
+        the first of the following UTF-16 run, yielding "hell" + "oWide"
+        over the same bytes.
+        """
+        found = strings_in_bytes(b"hello\x00" + "Wide".encode("utf-16-le"))
+        self.assertEqual([(s.rva, s.encoding, s.text) for s in found],
+                         [(0, "ascii", "hello"), (6, "utf-16le", "Wide")])
+
+    def test_a_utf16_run_may_start_after_a_non_printable_byte(self):
+        found = strings_in_bytes(b"\x00" + "Wide".encode("utf-16-le"))
+        self.assertEqual([(s.rva, s.encoding, s.text) for s in found],
+                         [(1, "utf-16le", "Wide")])
+
     def test_mixed_encodings_do_not_overlap(self):
         """Every reported run is a different slice of the input.
 
-        The UTF-16 string is fenced by non-NUL filler on purpose. A single NUL
-        after an ASCII string is also the high byte of a UTF-16 character, so
-        the two encodings are genuinely ambiguous there; the spec's
-        UTF-16-first order settles it by joining, and this fixture avoids
-        asserting an answer the spec leaves undefined.
+        Offsets are spelled out so a scan that claims the wrong bytes fails
+        here rather than producing a plausible-looking list.
         """
         data = (b"\x00hello\x00"
-                + b"\x01\x02\x03"
                 + "Wide".encode("utf-16-le")
-                + b"\x01\x02\x03"
+                + b"\x00\x01\x02"
                 + b"\x00world\x00")
         found = strings_in_bytes(data)
         self.assertEqual([(s.rva, s.encoding, s.text) for s in found],
                          [(1, "ascii", "hello"),
-                          (10, "utf-16le", "Wide"),
-                          (22, "ascii", "world")])
+                          (7, "utf-16le", "Wide"),
+                          (19, "ascii", "world")])
         spans = [(s.rva, s.rva + len(s.text) *
                   (2 if s.encoding == "utf-16le" else 1))
                  for s in found]
