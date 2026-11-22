@@ -46,7 +46,10 @@ from .owners import (
 from .names import Name, NameTable, auto_names, import_names
 from .workspace import Workspace, WorkspaceError, image_fingerprint
 from .process_source import ProcessSource
-from .refs import branch_target, classify_refs, is_indirect_branch, memory_address
+from .refs import (
+    branch_target, call_graph_is_complete, classify_refs, indirect_call_sites,
+    is_indirect_branch, memory_address, ref_kinds, xrefs_are_complete,
+)
 from .scan import (
     LinearScan, Resync, Undecodable, linear_scan, scan_executable, scan_section,
 )
@@ -72,6 +75,8 @@ __all__ = [
     'profiles', 'STACK_REGISTERS',
     'Workspace', 'WorkspaceError', 'image_fingerprint',
     'branch_target', 'classify_refs', 'is_indirect_branch', 'memory_address',
+    'call_graph_is_complete', 'indirect_call_sites', 'ref_kinds',
+    'xrefs_are_complete',
     'LinearScan', 'Resync', 'Undecodable', 'linear_scan', 'scan_executable',
     'scan_section',
     'SlotTable', 'OWNER_KINDS',

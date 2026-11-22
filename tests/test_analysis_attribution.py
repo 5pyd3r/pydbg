@@ -10,6 +10,7 @@ because it reads as a finding.
 import struct
 import unittest
 
+from pydbg.analysis import report
 from tests.pe_builder import PEBuilder
 
 TEXT_RVA = 0x1000
@@ -166,11 +167,11 @@ class TestOverlapAttribution(unittest.TestCase):
         """
         result = analyze(OVERLAP_CODE)
         self.assertGreater(result.stats.overlap_bytes, 0)
-        per_section = sum(report.overlap_bytes
-                          for report in result.coverage.values())
+        per_section = sum(section.overlap_bytes
+                          for section in result.coverage.values())
         self.assertEqual(per_section, result.stats.overlap_bytes)
-        for name, report in result.coverage.items():
-            self.assertLessEqual(report.overlap_bytes, report.covered, name)
+        for name, section in result.coverage.items():
+            self.assertLessEqual(section.overlap_bytes, section.covered, name)
 
     def test_no_overlap_means_nothing_to_attribute(self):
         result = analyze()
@@ -257,7 +258,7 @@ class TestRealImageAttribution(unittest.TestCase):
         self.assertGreater(uncovered.padding / uncovered.total, 0.5)
 
     def test_the_rendered_report_names_the_categories(self):
-        text = self.result.render_attribution()
+        text = report.render_attribution(self.attribution)
         self.assertIn("padding", text)
         self.assertIn("unknown", text)
 

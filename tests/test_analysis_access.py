@@ -11,6 +11,7 @@ what it reports.
 import struct
 import unittest
 
+from pydbg.analysis import report
 from tests.pe_builder import PEBuilder
 
 TEXT_RVA = 0x1000
@@ -163,7 +164,7 @@ class TestProfiles(unittest.TestCase):
     def test_the_report_names_the_function_and_the_register(self):
         code = (b"\x8b\x43\x18" + b"\x8b\x4b\x1c" + b"\x8b\x53\x20"
                 + b"\xc3")
-        text = analyze(code).render_structures()
+        text = report.render_structures(analyze(code))
         self.assertIn("base ebx", text)
         self.assertIn("+0x0018", text)
 

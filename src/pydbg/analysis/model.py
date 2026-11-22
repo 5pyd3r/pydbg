@@ -281,7 +281,7 @@ class AnalysisResult:
         32-bit Delphi target it turned 11,310 addresses that had no reference
         of any kind into referenced ones.
 
-        Incomplete in two ways, and both are answerable. `indirect_call_sites`
+        Incomplete in two ways, and both are answerable. `refs.indirect_call_sites`
         lists the branches whose target was never resolved, and `xref_gaps`
         names the classes of reference this run did not collect at all.
         """
@@ -318,43 +318,6 @@ class AnalysisResult:
         return tuple(sorted({RefKind(ref.kind)
                              for ref in self.xrefs.get(rva, ())
                              if ref.kind in _ALL_KINDS}))
-
-    def ref_kinds(self):
-        """Every RefKind this run produced anywhere, ascending.
-
-        A kind that is declared in the enum and absent here has no producer,
-        which is how an entire class of reference goes missing while every
-        individual answer still looks right. Asserting this set is the shape
-        of "no declared kind is unproduced" — the check that would have caught
-        DATA being labelled in the reports and emitted by nothing.
-        """
-        return tuple(sorted({RefKind(ref.kind)
-                             for refs in self.xrefs.values() for ref in refs
-                             if ref.kind in _ALL_KINDS}))
-
-    def xrefs_are_complete(self):
-        """False when the index is known to be missing *classes* of reference.
-
-        The counterpart of `call_graph_is_complete`, one level up. That one is
-        about individual call sites this analysis could not resolve; this one
-        is about kinds of reference the run did not collect at all. Both are
-        needed, because a run can have every call site resolved and still be
-        blind to every pointer in the image.
-        """
-        return not self.xref_gaps
-
-    def indirect_call_sites(self):
-        """Branches left unresolved that could be calling something.
-
-        The honest footnote to `callers_of`: these are the places a call edge
-        could be hidden. A target reached only through one of them appears to
-        have no callers at all.
-        """
-        return tuple(site for site in self.indirect_sites if site.is_call)
-
-    def call_graph_is_complete(self):
-        """False when some call site has no resolved target."""
-        return not self.indirect_call_sites()
 
     def function_of(self, rva):
         """The function owning 'rva', or None.
@@ -423,48 +386,6 @@ class AnalysisResult:
         from .values import narrow_by_guards
         return narrow_by_guards(self, rva, **kwargs)
 
-    def references_of(self, rva):
-        """Xrefs made *by* the instruction at 'rva'."""
-        return tuple(xref for refs in self.xrefs.values() for xref in refs
-                     if xref.source == rva)
-
-    # ── rendering (delegated to report.py) ─────────────────────
-
-    def render_summary(self):
-        from .report import render_summary
-        return render_summary(self)
-
-    def render_functions(self, limit=None):
-        from .report import render_functions
-        return render_functions(self, limit=limit)
-
-    def render_xrefs(self, target=None, limit=8):
-        from .report import render_xrefs
-        return render_xrefs(self, target=target, limit=limit)
-
-    def render_coverage(self):
-        from .report import render_coverage
-        return render_coverage(self)
-
-    def render_stats(self):
-        from .report import render_stats
-        return render_stats(self)
-
-    def render_listing(self, rva, size, workspace=None):
-        from .report import render_listing
-        table = self.names(workspace) if workspace is not None else None
-        comments = workspace.comments if workspace is not None else None
-        return render_listing(self.image, rva, size, names=table,
-                              comments=comments)
-
-    def render_indirect_sites(self, limit=40, calls_only=True):
-        from .report import render_indirect_sites
-        return render_indirect_sites(self, limit=limit, calls_only=calls_only)
-
-    def render_xref_gaps(self):
-        from .report import render_xref_gaps
-        return render_xref_gaps(self)
-
     # ── names ──────────────────────────────────────────────────
 
     def names(self, workspace=None):
@@ -484,11 +405,6 @@ class AnalysisResult:
         """A stable name for 'rva', inventing one when nothing named it."""
         return self.names(workspace).label(rva)
 
-    def render_names(self, workspace=None, limit=None, source=None):
-        from .report import render_names
-        return render_names(self, workspace=workspace, limit=limit,
-                            source=source)
-
     def accesses(self, **kwargs):
         """Every `[reg + disp]` access in the decoded code."""
         from .access import collect_accesses
@@ -504,12 +420,6 @@ class AnalysisResult:
         from .access import profiles
         return profiles(self, accesses=accesses, min_offsets=min_offsets)
 
-    def render_structures(self, workspace=None, limit=None, function=None,
-                          min_offsets=None):
-        from .report import render_structures
-        return render_structures(self, workspace=workspace, limit=limit,
-                                 function=function, min_offsets=min_offsets)
-
     def attribution(self, min_run=4):
         """Break the coverage and overlap numbers down by cause.
 
@@ -519,10 +429,6 @@ class AnalysisResult:
         """
         from .attribution import attribute_coverage
         return attribute_coverage(self, min_run=min_run)
-
-    def render_attribution(self, limit=10):
-        from .report import render_attribution
-        return render_attribution(self.attribution(), limit=limit)
 
     def scan(self, start, end, **kwargs):
         """Decode [start, end) linearly, reporting the gaps it had to cross.

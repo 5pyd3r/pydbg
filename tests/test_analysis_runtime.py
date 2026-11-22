@@ -8,6 +8,7 @@ success. Only running it against a real process distinguishes the two.
 
 import unittest
 
+from pydbg.analysis import report
 from tests.pe_builder import PEBuilder
 
 TEXT_RVA = 0x1000
@@ -131,31 +132,32 @@ class TestReports(unittest.TestCase):
         self.result = analyze(b"\x75\x02" + RET + NOP + RET)
 
     def test_summary_reports_coverage_with_overlap(self):
-        text = self.result.render_summary()
+        text = report.render_summary(self.result)
         self.assertIn("instructions", text)
         self.assertIn("overlap", text)      # the qualifier travels with it
         self.assertIn(".text", text)
 
     def test_functions_render_shows_confidence(self):
-        text = self.result.render_functions()
+        text = report.render_functions(self.result)
         self.assertIn("conf", text)
         self.assertIn("0x00001000", text)
 
     def test_xrefs_render_groups_by_kind(self):
-        text = analyze(b"\xe8\x03\x00\x00\x00" + RET + NOP * 3 + RET
-                       ).render_xrefs()
+        text = report.render_xrefs(analyze(b"\xe8\x03\x00\x00\x00" + RET
+                                           + NOP * 3 + RET))
         self.assertIn("branch", text)
 
     def test_rendering_is_stable_across_runs(self):
         """Two runs must be diffable; the numbers are compared by hand."""
         again = analyze(b"\x75\x02" + RET + NOP + RET)
-        self.assertEqual(self.result.render_summary(), again.render_summary())
-        self.assertEqual(self.result.render_coverage(),
-                         again.render_coverage())
+        self.assertEqual(report.render_summary(self.result),
+                         report.render_summary(again))
+        self.assertEqual(report.render_coverage(self.result),
+                         report.render_coverage(again))
 
     def test_listing_annotates_references(self):
-        text = analyze(b"\xe8\x03\x00\x00\x00" + RET + NOP * 3 + RET
-                       ).render_listing(TEXT_RVA, 16)
+        result = analyze(b"\xe8\x03\x00\x00\x00" + RET + NOP * 3 + RET)
+        text = report.render_listing(result.image, TEXT_RVA, 16)
         self.assertIn("call", text)
         self.assertIn("branch->", text)
 

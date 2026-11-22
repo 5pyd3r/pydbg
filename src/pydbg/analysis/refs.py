@@ -81,3 +81,53 @@ def is_indirect_branch(insn):
     if not (insn.is_call or insn.is_jmp):
         return False
     return all(op.kind != OP_IMM for op in insn.operands)
+
+
+# ── queries over a result's frozen index ───────────────────────
+#
+# These live here rather than on AnalysisResult because they are statements
+# about the reference index's completeness, not about the result as a record.
+# The per-address lookups (`callers_of`, `xrefs_of`, `data_refs_of`,
+# `ref_kinds_of`) stay on the result: they read a field and nothing else.
+
+
+def ref_kinds(result):
+    """Every RefKind this run produced anywhere, ascending.
+
+    A kind that is declared in the enum and absent here has no producer, which
+    is how an entire class of reference goes missing while every individual
+    answer still looks right. Asserting this set is the shape of "no declared
+    kind is unproduced" — the check that would have caught DATA being labelled
+    in the reports and emitted by nothing.
+    """
+    found = set()
+    for target in result.xrefs:
+        found.update(result.ref_kinds_of(target))
+    return tuple(sorted(found))
+
+
+def xrefs_are_complete(result):
+    """False when the index is known to be missing *classes* of reference.
+
+    The counterpart of `call_graph_is_complete`, one level up. That one is
+    about individual call sites this analysis could not resolve; this one is
+    about kinds of reference the run did not collect at all. Both are needed,
+    because a run can have every call site resolved and still be blind to every
+    pointer in the image.
+    """
+    return not result.xref_gaps
+
+
+def indirect_call_sites(result):
+    """Branches left unresolved that could be calling something.
+
+    The honest footnote to `AnalysisResult.callers_of`: these are the places a
+    call edge could be hidden. A target reached only through one of them
+    appears to have no callers at all.
+    """
+    return tuple(site for site in result.indirect_sites if site.is_call)
+
+
+def call_graph_is_complete(result):
+    """False when some call site has no resolved target."""
+    return not indirect_call_sites(result)

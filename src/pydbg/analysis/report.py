@@ -7,6 +7,9 @@ eyeballing two tables is not a comparison.
 """
 
 from .model import RefKind
+from .refs import (
+    call_graph_is_complete, indirect_call_sites, ref_kinds, xrefs_are_complete,
+)
 
 _KIND_NAMES = {
     RefKind.BRANCH: "branch",
@@ -22,12 +25,6 @@ def kind_name(kind):
         return _KIND_NAMES[RefKind(kind)]
     except (ValueError, KeyError):
         return str(kind)
-
-
-def render_stats(result):
-    """One line per counter, sorted for stable diffs."""
-    stats = result.stats.as_dict()
-    return "\n".join(f"{key:24s} {stats[key]}" for key in sorted(stats))
 
 
 def render_coverage(result):
@@ -266,7 +263,7 @@ def render_indirect_sites(result, limit=40, calls_only=True):
     of these has no recorded callers, and without this list that is
     indistinguishable from having none.
     """
-    sites = (result.indirect_call_sites() if calls_only
+    sites = (indirect_call_sites(result) if calls_only
              else result.indirect_sites)
     header = ("indirect call sites (call graph is incomplete through these)"
               if calls_only else "unresolved indirect branches")
@@ -284,7 +281,7 @@ def render_indirect_sites(result, limit=40, calls_only=True):
 def render_summary(result):
     """The one-screen overview: what was found and how much to trust it."""
     stats = result.stats
-    kinds = ", ".join(kind_name(kind) for kind in result.ref_kinds())
+    kinds = ", ".join(kind_name(kind) for kind in ref_kinds(result))
     lines = [
         f"image            {result.image.mode} base {result.image.image_base:#x}",
         f"instructions     {stats.insns}",
@@ -295,13 +292,13 @@ def render_summary(result):
         # Which kinds exist at all, not just how many there are. A kind that
         # is declared and never produced reads as a clean zero everywhere else.
         f"reference kinds  {kinds or '(none)'}"
-        f"{'' if result.xrefs_are_complete() else '  <- classes not collected'}",
+        f"{'' if xrefs_are_complete(result) else '  <- classes not collected'}",
         f"undecodable      {len(result.undecodable)}",
         # Both halves of the indirect story on one line. The resolved count
         # alone reads as progress even while most sites stay unknown.
         f"indirect branches {stats.indirect_resolved} resolved, "
         f"{stats.indirect_unknown} unresolved"
-        f"{'' if result.call_graph_is_complete() else '  <- call graph incomplete'}",
+        f"{'' if call_graph_is_complete(result) else '  <- call graph incomplete'}",
         "",
         render_coverage(result),
     ]

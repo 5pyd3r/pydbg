@@ -10,7 +10,7 @@ incompleteness is visible rather than implied.
 import struct
 import unittest
 
-from pydbg.analysis import RefKind
+from pydbg.analysis import RefKind, refs, report
 from tests.pe_builder import PEBuilder
 
 TEXT_RVA = 0x1000
@@ -107,11 +107,11 @@ class TestConstantPropagation(unittest.TestCase):
         result = analyze(code)
 
         self.assertEqual(result.stats.indirect_resolved, 0)
-        calls = result.indirect_call_sites()
+        calls = refs.indirect_call_sites(result)
         self.assertEqual(len(calls), 1)
         self.assertTrue(calls[0].is_call)
         self.assertIn("esi", calls[0].text)
-        self.assertFalse(result.call_graph_is_complete())
+        self.assertFalse(refs.call_graph_is_complete(result))
 
     def test_an_unrecognised_instruction_forgets_what_was_known(self):
         """Conservative on purpose: a clobbered register must not stay known.
@@ -126,7 +126,7 @@ class TestConstantPropagation(unittest.TestCase):
         result = analyze(code, data)
 
         self.assertEqual(result.stats.indirect_resolved, 0)
-        self.assertEqual(len(result.indirect_call_sites()), 1)
+        self.assertEqual(len(refs.indirect_call_sites(result)), 1)
 
     def test_propagation_does_not_cross_a_branch(self):
         """A conditional jump is not a recognised form, so state is dropped."""
@@ -155,7 +155,7 @@ class TestNoFabricatedEdges(unittest.TestCase):
         result = analyze(code, data)
 
         self.assertEqual(result.stats.indirect_resolved, 0)
-        self.assertEqual(len(result.indirect_call_sites()), 1)
+        self.assertEqual(len(refs.indirect_call_sites(result)), 1)
 
     def test_the_same_slot_resolves_when_it_holds_code(self):
         """Control for the test above: the only difference is the target.
@@ -169,7 +169,7 @@ class TestNoFabricatedEdges(unittest.TestCase):
         result = analyze(code, data)
 
         self.assertEqual(result.stats.indirect_resolved, 1)
-        self.assertEqual(len(result.indirect_call_sites()), 0)
+        self.assertEqual(len(refs.indirect_call_sites(result)), 0)
 
     def test_a_pointer_outside_the_image_does_not_resolve(self):
         code = mov_eax(IMAGE_BASE + DATA_RVA) + CALL_EAX_INDIRECT + RET
@@ -182,7 +182,7 @@ class TestIndirectSitesAreReported(unittest.TestCase):
 
     def test_sites_are_listed_with_their_operand_text(self):
         result = analyze(b"\xff\x56\x18" + b"\xff\x53\x20" + RET)
-        text = result.render_indirect_sites()
+        text = report.render_indirect_sites(result)
         self.assertIn("esi", text)
         self.assertIn("ebx", text)
         self.assertIn("incomplete", text)
@@ -190,7 +190,7 @@ class TestIndirectSitesAreReported(unittest.TestCase):
     def test_summary_reports_both_halves(self):
         """Resolved alone reads as progress even while most sites are unknown."""
         result = analyze(b"\xff\x56\x18" + RET)
-        summary = result.render_summary()
+        summary = report.render_summary(result)
         self.assertIn("0 resolved", summary)
         self.assertIn("unresolved", summary)
 
@@ -198,7 +198,7 @@ class TestIndirectSitesAreReported(unittest.TestCase):
         # jmp dword ptr [esi] — a switch or tail dispatch, not a call.
         result = analyze(b"\xff\x26" + RET)
         self.assertEqual(len(result.indirect_sites), 1)
-        self.assertEqual(result.indirect_call_sites(), ())
+        self.assertEqual(refs.indirect_call_sites(result), ())
 
 
 class TestRealImageIndirectSites(unittest.TestCase):
@@ -226,8 +226,8 @@ class TestRealImageIndirectSites(unittest.TestCase):
     def test_some_stay_unknown_and_the_graph_says_so(self):
         """The call graph is still incomplete, and must not read as complete."""
         self.assertGreater(self.result.stats.indirect_unknown, 0)
-        self.assertFalse(self.result.call_graph_is_complete())
-        self.assertIn("incomplete", self.result.render_summary())
+        self.assertFalse(refs.call_graph_is_complete(self.result))
+        self.assertIn("incomplete", report.render_summary(self.result))
 
 
 if __name__ == "__main__":

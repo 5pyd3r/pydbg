@@ -12,6 +12,7 @@ import struct
 import tempfile
 import unittest
 
+from pydbg.analysis import report
 from tests.pe_builder import PEBuilder
 
 TEXT_RVA = 0x1000
@@ -236,13 +237,13 @@ class TestRendering(unittest.TestCase):
 
     def test_the_names_report_shows_provenance(self):
         result = analyze()
-        text = result.render_names(limit=5)
+        text = report.render_names(result, limit=5)
         self.assertIn("source", text)
         self.assertIn("auto", text)
 
     def test_the_function_listing_shows_names(self):
         result = analyze()
-        text = result.render_functions(limit=3)
+        text = report.render_functions(result, limit=3)
         self.assertIn("name", text)
         self.assertIn("sub_001000", text)
 
@@ -252,7 +253,9 @@ class TestRendering(unittest.TestCase):
         workspace = Workspace()
         workspace.name(TEXT_RVA, "WinMain")
         workspace.comment(TEXT_RVA, "starts here")
-        text = result.render_listing(TEXT_RVA, 8, workspace=workspace)
+        text = report.render_listing(result.image, TEXT_RVA, 8,
+                                     names=result.names(workspace),
+                                     comments=workspace.comments)
         self.assertIn("WinMain", text)
         self.assertIn("starts here", text)
 
