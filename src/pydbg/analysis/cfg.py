@@ -75,11 +75,19 @@ class FunctionCFG:
                      if target is None and kind != RET)
 
 
-def build_function_cfg(decoder, image, functions, entry, max_blocks=4096):
+def build_function_cfg(decoder, image, functions, entry, max_blocks=4096,
+                       end=None):
     """Build the CFG of the function at 'entry'.
 
     Takes the decoder rather than an analyzer because that is all it needs; the
     function table supplies the extent and nothing else is consulted.
+
+    'end' is an RVA bound used only when the function table has no extent for
+    'entry'. A jump-table case body is an ordinary block of the function, but
+    it is not a function entry, so `extent_of` answers 0 for it; without a
+    bound the walk would follow the case's fall-through out of its function and
+    into padding or the next function. The caller that knows which function the
+    case belongs to passes that function's end.
 
     Walks decoded instructions only: the analyzer has already decoded this
     function, so a byte with no recorded size is either outside it or a
@@ -88,7 +96,7 @@ def build_function_cfg(decoder, image, functions, entry, max_blocks=4096):
     fallthrough rather than silently ending the block.
     """
     extent = functions.extent_of(entry)
-    limit = entry + extent if extent else None
+    limit = entry + extent if extent else end
 
     cfg = FunctionCFG(entry=entry)
     indirect_calls = set()

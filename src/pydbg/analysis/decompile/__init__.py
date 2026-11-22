@@ -71,7 +71,8 @@ def _unresolved(successors):
                for kind, target in block_successors)
 
 
-def _with_jump_table_targets(blocks, slot_tables, result, max_blocks):
+def _with_jump_table_targets(blocks, slot_tables, result, max_blocks,
+                             end=None):
     """Grow 'blocks' with the case bodies a jump table names.
 
     Returns (merged, extra_starts). 'blocks' itself is the CFG's; the starts
@@ -80,6 +81,11 @@ def _with_jump_table_targets(blocks, slot_tables, result, max_blocks):
     `build_function_cfg` is reused for each target rather than re-implementing
     a walk: the case body is ordinary code and must be decoded the same way
     the rest of the function was.
+
+    'end' is the containing function's end, passed to `build_function_cfg` as
+    the bound for a target that is not itself a function entry. A case body
+    that falls through must stop at its function's end rather than decode the
+    padding after it or the next function.
     """
     merged = dict(blocks)
     extra_starts = []
@@ -91,7 +97,7 @@ def _with_jump_table_targets(blocks, slot_tables, result, max_blocks):
             continue
         extra = build_function_cfg(result.decoder, result.image,
                                    result.functions, target,
-                                   max_blocks=max_blocks)
+                                   max_blocks=max_blocks, end=end)
         for block_rva, block in extra.blocks.items():
             if block_rva in merged:
                 continue
@@ -119,8 +125,10 @@ def decompile_function(result, rva, max_blocks=4096):
         return None
 
     slot_tables = tuple(getattr(result, "slot_tables", ()) or ())
+    extent = result.functions.extent_of(rva)
+    function_end = rva + extent if extent else None
     blocks, extra_blocks = _with_jump_table_targets(
-        cfg.blocks, slot_tables, result, max_blocks)
+        cfg.blocks, slot_tables, result, max_blocks, end=function_end)
     blocks = structure.normalize_blocks(blocks)
     successors = {block_rva: block.successors
                   for block_rva, block in blocks.items()}
