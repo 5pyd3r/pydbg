@@ -21,6 +21,7 @@ from dataclasses import dataclass
 
 from ...disasm.engine import OP_IMM, OP_MEM, OP_REG
 from ..cfg import INDIRECT, JCC, JMP
+from ..consts import MOV_LIKE
 from ..refs import branch_target, is_indirect_branch, memory_address
 
 # ── expressions ────────────────────────────────────────────────
@@ -712,7 +713,7 @@ def lower_instruction(decoder, image, insn):
                        mnemonic=insn.mnemonic),)
 
     name = insn.mnemonic
-    if name in ("mov", "movabs"):
+    if name in MOV_LIKE:
         stmts = _lower_mov(decoder, image, insn, rva)
     elif name == "lea":
         stmts = _lower_lea(decoder, image, insn, rva)
