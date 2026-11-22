@@ -248,8 +248,35 @@ def switch_extra(base=SWITCH_BASE, rvas=SWITCH_CASE_RVAS):
              0x40000040),)
 
 
+# Full-text goldens for the two smallest canonical shapes. They are the spec's
+# "golden" acceptance written down: keyword assertions keep the other shapes
+# readable, but these two pin the exact bytes a caller receives.
+IF_ELSE_TEXT = """\
+sub_1000:
+  if (eax == 1) {  // @0x1000, @0x1003, @0x100a
+    eax = 2;  // @0x1005
+  } else {
+    eax = 3;  // @0x100c
+  }
+  return rax;  // @0x1011
+"""
+
+WHILE_TEXT = """\
+sub_1000:
+  eax = 0;  // @0x1000
+  while (eax < 5) {  // @0x1005, @0x1008, @0x100d
+    eax = eax + 1;  // @0x100a
+  }
+  return rax;  // @0x100f
+"""
+
+
 class TestIfElse(unittest.TestCase):
     """A branch with two merge arms becomes an if/else, not two gotos."""
+
+    def test_the_whole_text_is_the_golden(self):
+        """Byte-for-byte: the construct, its indentation and its comments."""
+        self.assertEqual(decompile(IF_ELSE).text, IF_ELSE_TEXT)
 
     def test_both_arms_appear_inside_one_if(self):
         """`jne` + two assignments + a join is the canonical if/else.
@@ -290,6 +317,10 @@ class TestIfElse(unittest.TestCase):
 
 class TestWhile(unittest.TestCase):
     """A natural loop whose latch jumps back to its test is a `while`."""
+
+    def test_the_whole_text_is_the_golden(self):
+        """Byte-for-byte: the test at the top, no goto, one return."""
+        self.assertEqual(decompile(WHILE).text, WHILE_TEXT)
 
     def test_the_test_becomes_the_loop_condition(self):
         """`jge exit` becomes `while (eax < 5)`: the exit edge is negated."""

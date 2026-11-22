@@ -162,7 +162,8 @@ EFLAGS 作为伪寄存器：写指令声明写全 6 个标志，`jcc` 声明读�
 ### 7.5 验收
 
 1. 五类控制流各有 golden 测试：`if/else`、`while`、`do-while`、嵌套循环（C 的 `for` 与
-   `while` 共用一种形状）+ `break/continue`、4 分支 `switch`。
+   `while` 共用一种形状）+ `break/continue`、4 分支 `switch`；其中 `if/else` 与 `while`
+   断言整段文本（golden），其余形状断言关键词与缩进。
 2. 输出引用的 RVA 集合 ==（CFG 块的指令集合 ∪ `extra_blocks` 的指令集合），且
    CFG 块的指令集合 ⊆ 输出；不静默丢，switch 也按此等式验收（不排除）。
 3. `// unhandled:` 行数 == IR 里 `Opaque` 语句数。
