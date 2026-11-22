@@ -178,7 +178,7 @@ def cmd_dot(args):
 
 def cmd_list(args):
     result = analyze_file(args.image)
-    print(report.render_listing(result.image, args.at, args.size))
+    print(report.render_listing(result, args.at, args.size))
     return 0
 
 

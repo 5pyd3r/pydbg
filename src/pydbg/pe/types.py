@@ -2,6 +2,13 @@
 
 from dataclasses import dataclass
 
+# Section characteristics the analysis asks about. These live here, beside the
+# field they interpret, rather than as private copies in whoever needs them:
+# `IMAGE_SCN_MEM_EXECUTE` decides whether a byte can be code, and a second
+# definition of that number is a second answer to that question.
+IMAGE_SCN_MEM_EXECUTE = 0x20000000
+IMAGE_SCN_MEM_WRITE = 0x80000000
+
 
 @dataclass
 class DosHeader:
@@ -50,6 +57,27 @@ class SectionHeader:
     size_of_raw_data: int
     pointer_to_raw_data: int
     characteristics: int
+
+    @property
+    def span(self) -> int:
+        """Bytes this section covers in the address space.
+
+        The larger of the two sizes, because a section may store more on disk
+        than it maps. Every consumer that walks RVA ranges used to spell this
+        rule out itself, four copies in all, and a section whose two sizes
+        disagree is exactly where a divergent copy goes unnoticed.
+        """
+        return max(self.virtual_size, self.size_of_raw_data)
+
+    @property
+    def is_executable(self) -> bool:
+        """True when the section may hold code (IMAGE_SCN_MEM_EXECUTE)."""
+        return bool(self.characteristics & IMAGE_SCN_MEM_EXECUTE)
+
+    @property
+    def is_writable(self) -> bool:
+        """True when the section is writable (IMAGE_SCN_MEM_WRITE)."""
+        return bool(self.characteristics & IMAGE_SCN_MEM_WRITE)
 
 
 @dataclass

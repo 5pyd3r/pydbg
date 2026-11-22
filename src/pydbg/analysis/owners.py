@@ -19,10 +19,9 @@ that it did.
 
 from dataclasses import dataclass
 
-from ..disasm.engine import (
-    ACC_READ, ACC_WRITE, OP_IMM, OP_MEM, OP_REG, DisasmEngine,
-)
+from ..disasm.engine import ACC_READ, ACC_WRITE, OP_IMM, OP_MEM, OP_REG
 from .access import STACK_REGISTERS
+from .consts import address_without_registers
 from .model import OWNER_KINDS, _OWNED_KINDS
 
 # What the decode has at one address. Three findings, kept apart because
@@ -293,21 +292,23 @@ class ReceiverNote:
         return line
 
 
-def memory_base_registers(insn, engine=None):
+def memory_base_registers(insn, decoder):
     """(base register name, ...) for the `[reg + ...]` operands of 'insn'.
 
     Stack registers are excluded, matching `access.base_relative_access`: a
     frame pointer bases every local variable and says nothing about which
     object is being reached.
+
+    Register names come from the decoder, which owns the only disassembly
+    engine in this package.
     """
     if insn is None:
         return ()
-    engine = engine or DisasmEngine(mode="x86")
     found = []
     for operand in insn.operands:
         if operand.kind != OP_MEM or operand.mem_base == 0:
             continue
-        name = engine.reg_name(operand.mem_base)
+        name = decoder.reg_name(operand.mem_base)
         if not name or name in STACK_REGISTERS:
             continue
         if name not in found:
@@ -333,9 +334,8 @@ def receiver_of(result, rva, base_reg=None):
     insn = decoder.decode_one(rva) if decoder.is_decoded(rva) else None
     if insn is None:
         return None
-    engine = DisasmEngine(mode=result.image.mode)
     if base_reg is None:
-        candidates = memory_base_registers(insn, engine)
+        candidates = memory_base_registers(insn, decoder)
         if not candidates:
             return None
         base_reg = candidates[0]
@@ -364,7 +364,7 @@ def receiver_of(result, rva, base_reg=None):
             branched_at = (f"control flow at 0x{cursor:X} makes this not "
                            f"one path")
             break
-        _apply(step, cursor, facts, source, engine)
+        _apply(step, cursor, facts, source, decoder)
 
     if branched_at is not None:
         # Whatever was established before the branch was established on a path
@@ -408,10 +408,10 @@ def _straight_line(decoder, start, stop):
         cursor += size
 
 
-def _apply(insn, rva, facts, source, engine):
+def _apply(insn, rva, facts, source, decoder):
     """Record what 'insn' writes into the register-fact maps."""
-    for name in _written_registers(insn, engine):
-        fact, inherited, why = _written_by(insn, name, engine, facts, source)
+    for name in _written_registers(insn, decoder):
+        fact, inherited, why = _written_by(insn, name, decoder, facts, source)
         facts[name] = fact
         # The instruction that established the value. For a propagated fact
         # that is wherever it came from, not the copy — reporting the copy
@@ -421,18 +421,18 @@ def _apply(insn, rva, facts, source, engine):
             source[(name, "why")] = why
 
 
-def _written_registers(insn, engine):
+def _written_registers(insn, decoder):
     names = []
     for operand in insn.operands:
         if operand.kind != OP_REG or not (operand.access & ACC_WRITE):
             continue
-        name = engine.reg_name(operand.reg)
+        name = decoder.reg_name(operand.reg)
         if name and name not in names:
             names.append(name)
     return names
 
 
-def _written_by(insn, name, engine, facts, source):
+def _written_by(insn, name, decoder, facts, source):
     """(fact, inherited_source, reason) for the value 'insn' puts in 'name'.
 
     'inherited_source' is None when the value originates here, in which case
@@ -441,7 +441,7 @@ def _written_by(insn, name, engine, facts, source):
     index = None
     for position, operand in enumerate(insn.operands):
         if (operand.kind == OP_REG and operand.access & ACC_WRITE
-                and engine.reg_name(operand.reg) == name):
+                and decoder.reg_name(operand.reg) == name):
             index = position
             break
     if index is None:
@@ -457,18 +457,20 @@ def _written_by(insn, name, engine, facts, source):
                 f"0x{'%X' % insn.address} reads {name} to write it")
 
     # `lea` computes an address and touches no memory, so its memory operand is
-    # not a load. Treated as a constant only when the address is absolute:
-    # `lea ecx, [esi+0x10]` is a pointer *into* esi's object and says nothing
-    # about where that object came from.
+    # not a load. Treated as a constant only when the encoding names an
+    # absolute address: `lea ecx, [esi+0x10]` is a pointer *into* esi's object
+    # and says nothing about where that object came from. The rule itself is
+    # `consts.address_without_registers`, the same one refs.memory_address
+    # converts to an RVA — this used to be a third copy of it.
     if insn.mnemonic == "lea":
         for operand in insn.operands:
             if operand.kind != OP_MEM:
                 continue
-            if operand.mem_base == 0 and operand.mem_index == 0:
+            if address_without_registers(insn, operand) is not None:
                 return ("constant", None, None)
             return ("unknown", None,
-                    "lea of a base-relative address: the value is derived "
-                    "from a register this walk did not resolve")
+                    "lea of an address this walk cannot resolve (a base or "
+                    "index register, or a segment override)")
 
     for position, operand in enumerate(insn.operands):
         if position == index:
@@ -476,13 +478,13 @@ def _written_by(insn, name, engine, facts, source):
         if operand.kind == OP_IMM:
             return ("constant", None, None)
         if operand.kind == OP_REG:
-            other = engine.reg_name(operand.reg)
+            other = decoder.reg_name(operand.reg)
             if other in facts and facts[other] != "unknown":
                 return (facts[other], source.get(other), None)
             return ("moved_from_register", None,
                     f"{other} is not determined")
         if operand.kind == OP_MEM:
-            base = (engine.reg_name(operand.mem_base)
+            base = (decoder.reg_name(operand.mem_base)
                     if operand.mem_base else None)
             if base in STACK_REGISTERS:
                 return ("loaded_from_stack", None, None)

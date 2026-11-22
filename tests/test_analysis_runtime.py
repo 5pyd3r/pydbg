@@ -157,7 +157,7 @@ class TestReports(unittest.TestCase):
 
     def test_listing_annotates_references(self):
         result = analyze(b"\xe8\x03\x00\x00\x00" + RET + NOP * 3 + RET)
-        text = report.render_listing(result.image, TEXT_RVA, 16)
+        text = report.render_listing(result, TEXT_RVA, 16)
         self.assertIn("call", text)
         self.assertIn("branch->", text)
 

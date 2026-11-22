@@ -905,6 +905,48 @@ class TestValidation(unittest.TestCase):
             PE(data)
 
 
+class TestSectionHeaderDerivations(unittest.TestCase):
+    """The section model owns its span and its flags.
+
+    The analysis used to re-declare both in a SectionInfo copy, and the span
+    rule (the larger of the two sizes) was written out at four call sites. A
+    section whose virtual and raw sizes disagree is exactly where a divergent
+    copy goes unnoticed, so the rule is pinned here rather than through an
+    analysis fixture.
+    """
+
+    @staticmethod
+    def section(virtual_size, size_of_raw_data, characteristics=0x60000020):
+        from pydbg.pe.types import SectionHeader
+        return SectionHeader(
+            name=".text", virtual_address=0x1000,
+            virtual_size=virtual_size, size_of_raw_data=size_of_raw_data,
+            pointer_to_raw_data=0x400, characteristics=characteristics)
+
+    def test_span_takes_the_larger_of_the_two_sizes(self):
+        virtual_heavy = self.section(0x2000, 0x400)     # zero-fill tail
+        self.assertEqual(virtual_heavy.span, 0x2000)
+        raw_heavy = self.section(0x400, 0x800)          # more on disk than mapped
+        self.assertEqual(raw_heavy.span, 0x800)
+        self.assertEqual(self.section(0x1000, 0x1000).span, 0x1000)
+
+    def test_characteristics_decide_executable_and_writable(self):
+        from pydbg.pe.types import IMAGE_SCN_MEM_EXECUTE, IMAGE_SCN_MEM_WRITE
+
+        code = self.section(0x1000, 0x1000, IMAGE_SCN_MEM_EXECUTE)
+        self.assertTrue(code.is_executable)
+        self.assertFalse(code.is_writable)
+
+        data = self.section(0x1000, 0x1000, IMAGE_SCN_MEM_WRITE)
+        self.assertFalse(data.is_executable)
+        self.assertTrue(data.is_writable)
+
+        both = self.section(0x1000, 0x1000,
+                            IMAGE_SCN_MEM_EXECUTE | IMAGE_SCN_MEM_WRITE)
+        self.assertTrue(both.is_executable)
+        self.assertTrue(both.is_writable)
+
+
 class TestRealDLL(unittest.TestCase):
     """Integration tests with real DLL files."""
 

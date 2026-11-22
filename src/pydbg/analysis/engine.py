@@ -349,8 +349,7 @@ class StaticAnalyzer:
         data that was in hand.
         """
         if not self._stack_ids:
-            self._stack_ids = stack_register_ids(self.image.mode,
-                                                 STACK_REGISTERS)
+            self._stack_ids = stack_register_ids(self.decoder, STACK_REGISTERS)
         resolved = base_relative_access(insn, stack_ids=self._stack_ids)
         if resolved is None:
             return
@@ -490,12 +489,11 @@ class StaticAnalyzer:
     def _coverage(self):
         report = {}
         for section in self.image.sections:
-            if not section.is_exec:
+            if not section.is_executable:
                 continue
-            # The span a decoder can actually reach is max(virtual, raw): the
-            # tail of a section can be raw-only, and bytes decoded there were
+            # The tail of a section can be raw-only; bytes decoded there were
             # previously left out of both the numerator and the denominator.
-            span = max(section.virtual_size, section.size_of_raw_data)
+            span = section.span
             start = section.virtual_address
             end = start + span
             report[section.name] = CoverageReport(

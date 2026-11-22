@@ -11,6 +11,12 @@ everything on any instruction it does not**. That costs resolutions; it never
 costs correctness. A wrong "constant" would produce a call edge to somewhere
 the program never calls, and nothing downstream could tell it apart from a
 real one — a missing edge is visible, a fabricated one is not.
+
+Addresses here are VAs, because that is what the decode contains: capstone
+reports an instruction's address and an absolute displacement as VAs, and a
+tracked register holds a value read straight out of a slot. The VA boundary
+stops at this module's own reads — `refs.memory_address` is the single place
+an operand becomes an RVA answer.
 """
 
 from ..disasm.engine import OP_IMM, OP_MEM, OP_REG

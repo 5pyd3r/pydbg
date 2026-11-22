@@ -1,4 +1,11 @@
-"""Turn one decoded instruction into the references it makes."""
+"""Turn one decoded instruction into the references it makes.
+
+Every answer here is an RVA. The decoded instruction is where a VA still
+exists — capstone reports addresses and absolute displacements in VA space,
+and `consts` uses that unit internally — so this module is the one conversion
+point between the decode and the analysis index. owners used to carry a third,
+partial copy of the same arithmetic for `lea`; it now calls `consts` too.
+"""
 
 from ..disasm.engine import OP_IMM, OP_MEM
 from .consts import address_without_registers

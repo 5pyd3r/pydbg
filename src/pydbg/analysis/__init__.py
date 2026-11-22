@@ -35,7 +35,7 @@ from .engine import (
     StaticAnalyzer, analyze_bytes, analyze_file, analyze_pe, analyze_process,
 )
 from .functions import OWNER_KINDS, FunctionTable
-from .image import AnalyzedImage, SectionInfo
+from .image import AnalyzedImage
 from .model import (
     AnalysisResult, AnalysisStats, CoverageReport, Function, IndirectSite,
     RefKind, SeedConfig, SlotTable, Xref,
@@ -64,7 +64,7 @@ from .values import (
 __all__ = [
     'StaticAnalyzer', 'analyze_file', 'analyze_bytes', 'analyze_pe',
     'analyze_process',
-    'AnalyzedImage', 'SectionInfo', 'ProcessSource',
+    'AnalyzedImage', 'ProcessSource',
     'FunctionTable', 'SeedProvider', 'SeedSet', 'looks_like_entry',
     'AnalysisResult', 'AnalysisStats', 'CoverageReport', 'Function',
     'IndirectSite', 'RefKind', 'SeedConfig', 'Xref',

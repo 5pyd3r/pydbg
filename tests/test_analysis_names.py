@@ -254,7 +254,7 @@ class TestRendering(unittest.TestCase):
         workspace = Workspace()
         workspace.name(TEXT_RVA, "WinMain")
         workspace.comment(TEXT_RVA, "starts here")
-        text = report.render_listing(result.image, TEXT_RVA, 8,
+        text = report.render_listing(result, TEXT_RVA, 8,
                                      names=names.resolve_for(result, workspace),
                                      comments=workspace.comments)
         self.assertIn("WinMain", text)

@@ -244,7 +244,7 @@ class SeedProvider:
         """
         found = 0
         for section in self.image.sections:
-            if section.is_exec or section.size_of_raw_data == 0:
+            if section.is_executable or section.size_of_raw_data == 0:
                 continue
             data = self.image.read_rva(section.virtual_address,
                                        section.size_of_raw_data)
