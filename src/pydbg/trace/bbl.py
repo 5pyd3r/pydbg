@@ -19,11 +19,21 @@ operand until the run ends — a byte the target can observe. The overlap figure
 in the analysis report say whether the decode had such drift; filtering to
 confident functions would narrow the plan but is not what §8.4 asks for.
 
-The target must be paused when `plan()` reads its image, and `run()` must be
-called with no debug event still pending — `Debugger.run()` begins by waiting
-for the next event, so an event left uncontinued would look like a wedged
-target. Starting the process and stopping on its initial breakpoint, then
-planning, then continuing that event into `run()` is the flow the tests use.
+The target must be paused when `plan()` reads its image. Arming is separate
+from running so the breakpoints can be placed while it is still paused, before
+any debug event is continued:
+
+    tracer = BblTracer(dbg)
+    tracer.plan()
+    tracer.arm()                  # while paused: no arming race
+    dbg.continue_event(...)       # release the pending stop
+    summary = tracer.run()
+
+`run()` still arms when `arm()` was not called, so a caller that has already
+resumed the target can use it; that order is racy, because code that ran
+before the breakpoint was written is never seen. A run stopped by a budget
+leaves its debug event uncontinued and the target paused —
+`summary.single_step_pending` says so, and the caller owns that event.
 """
 
 import time
@@ -32,8 +42,11 @@ from dataclasses import dataclass
 from ..analysis import analyze_process
 from ..analysis.cfg import cfg_of
 from ..core.status import ExitReason
-from ..exceptions import BreakpointError, PydbgError
+from ..exceptions import BreakpointError, ProcessError, PydbgError
 from .format import BLOCK, TraceEvent
+
+# GetExitCodeProcess answers this while the process is still running.
+_STILL_ACTIVE = 259
 
 # Why a run stopped. These are exported so callers compare against a name and
 # not a string literal that can drift. Two of them mean the trace is partial.
@@ -89,10 +102,14 @@ class BblTracer:
 
         tracer = BblTracer(dbg)
         tracer.plan()                 # 0 means "not traceable", never a guess
-        summary = tracer.run()        # arms, runs the target, removes
+        tracer.arm()                  # still paused: place the INT3s
+        dbg.continue_event(...)       # release the pending stop
+        summary = tracer.run()        # runs the target, records, removes
 
     Breakpoints are removed in a `finally`, including when `run()` raises, so a
     failed trace does not leave INT3s behind for the next run to step on.
+    Removal and arming are separate public steps so a caller can also arm,
+    inspect the target, and disarm without running it at all.
     """
 
     def __init__(self, dbg, module=None, max_events=100_000, max_blocks=4096,
@@ -117,9 +134,14 @@ class BblTracer:
         # breakpoint arming order (and any report over it) is stable.
         self._blocks = {}
         self._base = None
-        # VA -> RVA, built in run() because a module can be rebased between
-        # planning and arming and the mapping must follow the plan it belongs to.
+        # VA -> RVA, built by arm() so it names the same plan that was armed.
         self._addresses = {}
+        # VA -> bp_id for the breakpoints this tracer set. Only these ids are
+        # ever removed: a breakpoint the caller already had at a planned
+        # address is reused, never owned.
+        self._armed_ids = {}
+        # Warnings collected by arm() for the current armed state.
+        self._arming_warnings = []
         self._events = 0
         self._seen = set()
         self._reason = None
@@ -199,25 +221,139 @@ class BblTracer:
             return None
         return None
 
+    # ── arming ─────────────────────────────────────────────────
+
+    def arm(self):
+        """Place one INT3 per planned block; return how many this tracer owns.
+
+        Call it while the target is paused: a breakpoint written after the
+        target has resumed can miss code that already ran, which is the race
+        `run()` documents for its no-arm() path.
+
+        An address that already has a breakpoint — software or hardware — is
+        left alone. That breakpoint belongs to the caller (or another
+        component), so it is neither re-armed nor removed, and the summary
+        reports "reused caller breakpoints". Arming twice returns the same
+        count and writes nothing the second time.
+
+        If a later set fails, the breakpoints already placed here are removed
+        before the exception propagates, so a failed arm does not leave a
+        half-armed target behind.
+        """
+        if self._armed_ids:
+            return len(self._armed_ids)
+        if not self._blocks:
+            self.plan()
+        if not self._blocks:
+            return 0
+
+        self._arming_warnings = []
+        self._addresses = {self._base + rva: rva for rva in self._blocks}
+        self._armed_ids = {}
+        reused = False
+        try:
+            for address in sorted(self._addresses):
+                if self.dbg.find_breakpoint(address) is not None:
+                    reused = True
+                    continue
+                self._armed_ids[address] = self.dbg.set_breakpoint(address)
+        except BaseException:
+            self.disarm()
+            raise
+        if reused:
+            self._arming_warnings.append("reused caller breakpoints")
+        return len(self._armed_ids)
+
+    def disarm(self):
+        """Remove the breakpoints this tracer armed; return cleanup warnings.
+
+        Only ids recorded by arm() are removed; the caller's own breakpoints
+        are never touched.
+
+        A failed removal is not assumed harmless. The breakpoint manager drops
+        its record before restoring the byte, so the record being gone does
+        not prove the byte went back — when the target is still alive that is
+        reported as 'breakpoint left'. After the target has exited the byte
+        cannot be put back at all: that is reported once as "target exited
+        during cleanup", and the remaining removals are abandoned because
+        every one would fail the same way. It is deliberately not called
+        'breakpoint left', which would name a live target's leftover.
+
+        After the loop every own address is asked for again; a record that
+        survived removal is a real leftover. Calling disarm() twice is
+        harmless: the second call owns nothing and reports nothing.
+        """
+        own = self._armed_ids
+        self._armed_ids = {}
+        self._arming_warnings = []
+        if not own:
+            return ()
+
+        warnings = []
+        leftover_ids = set()
+        target_exited = False
+        for address, bp_id in own.items():
+            try:
+                self.dbg.remove_breakpoint(bp_id)
+            except (BreakpointError, ProcessError):
+                if self._target_exited():
+                    warnings.append("target exited during cleanup")
+                    target_exited = True
+                    break
+                leftover_ids.add(address)
+                warnings.append("breakpoint left")
+
+        if not target_exited:
+            for address in own:
+                if address in leftover_ids:
+                    continue
+                if self.dbg.find_breakpoint(address) is not None:
+                    warnings.append("breakpoint left")
+                    break
+        return tuple(dict.fromkeys(warnings))
+
+    def _target_exited(self):
+        """Whether the target is gone, so its bytes can no longer be restored.
+
+        The process handle outlives EXIT_PROCESS so the exit code stays
+        readable, which makes GetExitCodeProcess the honest answer: the
+        STILL_ACTIVE pseudo-code means it is still there. A failed query means
+        the handle is gone too — equally unable to restore a byte.
+        """
+        try:
+            return self.dbg.get_exit_code() != _STILL_ACTIVE
+        except (PydbgError, OSError):
+            return True
+
     # ── running ────────────────────────────────────────────────
 
     def run(self):
-        """Arm a breakpoint per planned block, run the target, record hits.
+        """Arm if needed, run the target, record hits, remove own INT3s.
+
+        The documented sequence is plan() -> arm() -> continue the pending
+        debug event -> run(). When arm() was not called this arms here, which
+        still works for a caller that has already resumed the target but is
+        racy: a breakpoint written after the target has run some code is never
+        hit for that code, so the trace silently under-reports it. Prefer
+        arm() while the target is paused.
 
         Plans first when no plan exists. When there is nothing to trace it
-        returns a summary whose `reason` says so instead of pretending an empty
-        trace means the target ran nothing.
+        returns a summary whose `reason` is STOP_NO_BLOCKS instead of
+        pretending an empty trace means the target ran nothing.
+
+        A run stopped by `max_events` (or by an idle timeout) leaves the debug
+        event uncontinued and the target paused. The summary says so in
+        `single_step_pending`; the caller owns that event and must continue it
+        before doing anything else with the target.
 
         Breakpoints are removed on the way out whether the run succeeded or
-        raised, and the removal is checked: if any software breakpoint is still
-        armed the reason becomes 'breakpoints left', so a failed cleanup is
-        visible in the summary rather than only in the target.
+        raised. The summary's `warnings` reports cleanup that could not be
+        completed, plus "reused caller breakpoints" for breakpoints this
+        tracer deliberately did not own.
         """
         started = time.perf_counter_ns()
         self._reset()
 
-        armed = []
-        status = None
         try:
             if not self._blocks:
                 self.plan()
@@ -225,25 +361,17 @@ class BblTracer:
             if not self._blocks:
                 self._reason = STOP_NO_BLOCKS
             else:
-                self._addresses = {self._base + rva: rva
-                                   for rva in self._blocks}
-                for address in sorted(self._addresses):
-                    armed.append(self.dbg.set_breakpoint(address))
+                if not self._armed_ids:
+                    self.arm()
                 status = self.dbg.run(self._on_event)
                 if (status is not None
                         and status.reason is ExitReason.TARGET_EXITED):
                     self._reason = STOP_TARGET_EXITED
         finally:
-            unrestored = self._remove_breakpoints(armed)
-            if self.dbg.verify_breakpoints():
-                self._reason = 'breakpoints left'
-            elif unrestored and not self._target_exited(status):
-                # Removal failed while the process is still alive, so its
-                # bytes may still hold an INT3 even though the records are
-                # gone. That is the same "left behind" the verify check
-                # reports — the one case it cannot see, because remove() drops
-                # the record before attempting the byte restore.
-                self._reason = 'breakpoints left'
+            arming_warnings = list(self._arming_warnings)
+            cleanup_warnings = self.disarm()
+            self._warnings = list(dict.fromkeys(
+                arming_warnings + list(cleanup_warnings)))
 
         return TraceSummary(
             events=self._events,
@@ -254,13 +382,7 @@ class BblTracer:
             single_step_pending=bool(self.dbg._session.pending_single_step),
         )
 
-    @staticmethod
-    def _target_exited(status):
-        """Whether run() ended because the process was gone."""
-        return status is not None and status.reason is ExitReason.TARGET_EXITED
-
     def _reset(self):
-        self._addresses = {}
         self._events = 0
         self._seen = set()
         self._reason = None
@@ -294,20 +416,3 @@ class BblTracer:
             self._reason = STOP_MAX_EVENTS
             return False
         return None
-
-    def _remove_breakpoints(self, bp_ids):
-        """Remove what run() armed, even when the run raised.
-
-        A removal can fail because the breakpoint is already gone (the target
-        overwrote the byte) or because the target has terminated and its memory
-        can no longer be written. Neither may mask the run's outcome or stop
-        the remaining removals. Returns True when some byte could not be put
-        back, so the caller can report it.
-        """
-        unrestored = False
-        for bp_id in bp_ids:
-            try:
-                self.dbg.remove_breakpoint(bp_id)
-            except BreakpointError:
-                unrestored = True
-        return unrestored
