@@ -1,5 +1,6 @@
 """Source layer — random-access byte providers."""
 
+import os
 from abc import ABC, abstractmethod
 
 
@@ -11,7 +12,13 @@ class Source(ABC):
     slice; try_read turns either into the None that callers in pe/ actually
     test for. A short slice is the one wrong answer, because it is
     indistinguishable from real data at the call site.
+
+    `path` is where the bytes came from when they came from a file, and None
+    for a memory buffer. It is what lets `PE` hand a consumer the image path
+    that a sibling-PDB lookup needs.
     """
+
+    path = None
 
     @abstractmethod
     def read(self, offset: int, size: int) -> bytes:
@@ -40,8 +47,13 @@ class FileSource(Source):
     """Read PE bytes from a file on disk."""
 
     def __init__(self, path: str):
-        self._path = path
-        self._file = open(path, 'rb')
+        self._path = os.fspath(path)
+        self._file = open(self._path, 'rb')
+
+    @property
+    def path(self):
+        """The file this source reads."""
+        return self._path
 
     def read(self, offset: int, size: int) -> bytes:
         """Read bytes at 'offset', raising ValueError for a short range.

@@ -84,9 +84,10 @@ class TestFieldShape(unittest.TestCase):
         field = Field(0, "a", "unsigned int", 4, bit_position=3, bit_width=5)
         self.assertEqual((field.bit_position, field.bit_width), (3, 5))
 
-    def test_negative_offset_or_size_is_rejected(self):
-        with self.assertRaises(ValueError):
-            Field(-1, "x", "int", 4)
+    def test_a_negative_size_is_rejected(self):
+        # Offset is deliberately not constrained: `analysis.types` shares this
+        # class and carries signed displacements from access profiles. A type
+        # stream never produces a negative one, so nothing is lost here.
         with self.assertRaises(ValueError):
             Field(0, "x", "int", -4)
 

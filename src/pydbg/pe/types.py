@@ -278,6 +278,10 @@ class CodeViewInfo:
     pdb_path: str              # as stored; typically a full build-machine path
     age: int
     guid: str | None = None    # 'xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx', RSDS only
+    # The same GUID as the 16 bytes stored in the image, in Windows memory
+    # order. This is the identity a PDB's info stream can be compared against
+    # byte for byte; the rendered form above is for display.
+    guid_bytes: bytes | None = None   # RSDS only
     timestamp: int | None = None   # NB10 only
 
 

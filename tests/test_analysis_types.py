@@ -6,8 +6,10 @@ both are queryable through the same shape, and where they can be compared
 offset by offset — including the offsets only one track knows about, because a
 comparison that hides those is not one.
 
-`pdb` is duck-typed here on purpose: `analysis` must not import `pydbg.pdb`,
-so the tests stand a fake wherever a real handle would go.
+`pdb` stays duck-typed here on purpose: the type exit only calls `structs()`
+and `layout_of()`, never `isinstance`, so a fake stands in for the real handle.
+The value classes (`Field`, `StructLayout`) are shared with `pydbg.pdb` rather
+than copied, and that identity is itself part of the contract.
 """
 
 import os
@@ -108,6 +110,37 @@ class TestStructs(unittest.TestCase):
     def test_an_empty_pdb_yields_no_layouts_rather_than_inventing_them(self):
         self.assertEqual(types.structs(profile_result(), pdb=FakePdb(())), ())
 
+    def test_a_signed_profile_offset_still_produces_a_layout(self):
+        """`[ebx-0x8]` is a field location, not a reason to refuse the table."""
+        code = (b"\x8b\x43\xf8" + b"\x8b\x4b\xfc" + b"\x8b\x53\x00" + b"\xc3")
+        layout, = types.structs(analyze(code))
+        self.assertEqual([field.offset for field in layout.fields],
+                         [-8, -4, 0])
+
+
+class TestSharedValueClasses(unittest.TestCase):
+    """One `Field`/`StructLayout`, so the two tracks cannot drift apart.
+
+    They were copied once and had already diverged in defaults and
+    validation; a PDB layout and a profile layout are compared field by field,
+    which is only trustworthy if both are the same shape.
+    """
+
+    def test_the_value_classes_are_the_pdb_ones(self):
+        from pydbg.pdb import Field as PdbField
+        from pydbg.pdb import StructLayout as PdbStructLayout
+        self.assertIs(types.Field, PdbField)
+        self.assertIs(types.StructLayout, PdbStructLayout)
+
+    def test_a_profile_field_is_a_pdb_field(self):
+        layout, = types.structs(profile_result())
+        for field in layout.fields:
+            self.assertIsInstance(field, types.Field)
+
+    def test_the_profile_track_still_accepts_an_offset(self):
+        layout, = types.structs(profile_result())
+        self.assertEqual(layout.fields[0].offset, 0x18)
+
 
 class TestLayoutOf(unittest.TestCase):
 
@@ -123,6 +156,21 @@ class TestLayoutOf(unittest.TestCase):
         layout = types.layout_of(profile_result(), TEXT_RVA)
         self.assertIsNotNone(layout)
         self.assertEqual(layout.name, f"{TEXT_RVA}:ebx")
+        self.assertEqual(layout.source, "profile")
+
+    def test_an_integer_key_never_reaches_the_pdb(self):
+        """An RVA and a TypeIndex are both ints; only a name is a PDB key."""
+        calls = []
+
+        class RecordingPdb(FakePdb):
+            def layout_of(self, key):
+                calls.append(key)
+                return super().layout_of(key)
+
+        layout = types.layout_of(profile_result(), TEXT_RVA,
+                                 pdb=RecordingPdb([POINT]))
+        self.assertEqual(calls, [])
+        self.assertIsNotNone(layout)
         self.assertEqual(layout.source, "profile")
 
     def test_an_unknown_rva_or_a_name_without_a_pdb_is_none(self):

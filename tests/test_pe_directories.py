@@ -463,6 +463,17 @@ class TestCodeViewPayload(unittest.TestCase):
         self.assertEqual(info.guid, PDB_GUID_TEXT)
         self.assertIsNone(info.timestamp)
 
+    def test_the_raw_guid_bytes_are_kept_for_byte_comparison(self):
+        """The identity is bytes, not the rendered 8-4-4-4-12 string."""
+        from pydbg.pe import PE
+
+        raw = (struct.pack("<IHH", 0x12345678, 0x9ABC, 0xDEF0)
+               + bytes(range(0x11, 0x19)))
+        info = PE(build_codeview_image([build_codeview_payload()])
+                  ).codeview_entries[0]
+        self.assertEqual(info.guid_bytes, raw)
+        self.assertEqual(len(info.guid_bytes), 16)
+
     def test_nb10_payload_is_decoded(self):
         """The older layout: no GUID, and a timestamp where RSDS has none."""
         from pydbg.pe import PE
@@ -475,6 +486,7 @@ class TestCodeViewPayload(unittest.TestCase):
         self.assertEqual(info.age, 7)
         self.assertEqual(info.timestamp, 0x5A000000)
         self.assertIsNone(info.guid)
+        self.assertIsNone(info.guid_bytes)
 
     def test_every_record_is_decoded(self):
         """Two type-2 records both come back; the first is not 'the' PDB.

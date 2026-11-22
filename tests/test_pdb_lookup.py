@@ -39,6 +39,42 @@ def synthetic_pdb_bytes(age=INFO_STREAM_AGE, guid=SAMPLE_GUID_BYTES):
     return build_msf({1: pdb_info_stream(age=age, guid=guid)})
 
 
+def copy_with_unreachable_recorded_path(directory, image_path, pdb_path):
+    """Copy a real image+PDB pair, rewriting the image's recorded PDB path.
+
+    On the machine that produced the fixture the recorded path still exists,
+    so the sibling-PDB step is never reached. Rewriting the drive letter keeps
+    the same byte length (the payload has no room for a longer path) and makes
+    the recorded path unresolvable, which is the condition the third lookup
+    step exists for.
+
+    Returns (copied image path, copied PDB path).
+    """
+    from pydbg.pe import PE
+
+    with open(image_path, "rb") as handle:
+        data = bytearray(handle.read())
+    pe = PE(bytes(data))
+    entry = next(entry for entry in pe.codeview_entries
+                 if entry.signature == "RSDS")
+    debug = next(entry for entry in pe.debug_entries if entry.type == 2)
+    recorded = entry.pdb_path.encode("utf-8")
+    start = debug.pointer_to_raw_data
+    index = data.find(recorded, start, start + debug.size_of_data)
+    assert index != -1, "the fixture's RSDS path is not in its payload"
+    replacement = b"Z:" + recorded[2:]
+    assert len(replacement) == len(recorded)
+    data[index:index + len(recorded)] = replacement
+
+    stem = os.path.splitext(os.path.basename(image_path))[0]
+    image_copy = write_file(directory, bytes(data), stem + ".exe")
+    pdb_copy = os.path.join(directory, stem + ".pdb")
+    with open(pdb_path, "rb") as handle:
+        with open(pdb_copy, "wb") as copy:
+            copy.write(handle.read())
+    return image_copy, pdb_copy
+
+
 def rsds_entry(pdb_path="C:/build/target.pdb", guid=SAMPLE_GUID_TEXT,
                age=INFO_STREAM_AGE):
     """The image-side identity a current MSVC build records."""
@@ -362,6 +398,54 @@ class TestRealPdb(unittest.TestCase):
         self.assertIsNone(open_for(pe, search_paths=[mutated]))
         # The untouched original still verifies, so the edit is what failed.
         self.assertTrue(Pdb(self.pdb_path).matches(pe))
+
+    def test_a_parsed_pe_keeps_the_image_path_its_symbols_need(self):
+        """`find(PE.from_file(...))` used to return a Pdb that could not read.
+
+        The lookup succeeded through the recorded path, but PE kept no path of
+        its own, so `pdb.image_path` was None and `symbols()` refused to guess.
+        """
+        from pydbg.pe import PE
+
+        pe = PE.from_file(self.image_path)
+        self.assertEqual(pe.path, self.image_path)
+        pdb = open_for(pe)
+        self.assertIsNotNone(pdb, "find() found no PDB for a real image")
+        self.assertEqual(pdb.image_path, self.image_path)
+        self.assertTrue(pdb.symbols(), "the real PDB enumerated no symbols")
+        point = pdb.layout_of("Point")
+        self.assertIsNotNone(point, "layout_of('Point') found nothing")
+        self.assertEqual(point.size, 8)
+        self.assertEqual({field.name: field.offset for field in point.fields},
+                         {"x": 0, "y": 4})
+
+    def test_the_sibling_pdb_is_reachable_when_the_recorded_path_is_gone(self):
+        from pydbg.pe import PE
+
+        image_copy, pdb_copy = copy_with_unreachable_recorded_path(
+            self._directory.name, self.image_path, self.pdb_path)
+        pe = PE.from_file(image_copy)
+        lookup = find(pe)
+        self.assertIsNone(lookup.reason, lookup.message)
+        self.assertEqual(lookup.path, pdb_copy)
+        self.assertEqual(lookup.pdb.image_path, image_copy)
+
+    def test_the_real_record_carries_the_raw_guid_bytes_that_decide(self):
+        """The bytes are the identity; the rendered GUID is only display text.
+
+        A record whose text was wrong but whose bytes were right must still
+        verify, which is only possible if the raw branch is the one taken.
+        """
+        from pydbg.pe import PE
+
+        pe = PE.from_file(self.image_path)
+        entry = next(entry for entry in pe.codeview_entries
+                     if entry.signature == "RSDS")
+        self.assertEqual(len(entry.guid_bytes), 16)
+        entry.guid = OTHER_GUID_TEXT
+        self.assertTrue(Pdb(self.pdb_path).matches(pe))
+        lookup = find(pe)
+        self.assertIsNone(lookup.reason, lookup.message)
 
 
 if __name__ == "__main__":
