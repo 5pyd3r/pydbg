@@ -1,0 +1,668 @@
+"""The decompiler's IR, and the lift from decoded instructions (S1).
+
+One decoded instruction becomes one or more statements; anything outside the
+integer subset in docs/analysis-coverage.md §7.4 becomes an `Opaque` statement
+carrying its original text. Opaque is the point: a gap in the model stays
+visible in the output instead of being rounded off, the same rule the coverage
+report follows for undecoded bytes. Nothing is dropped silently.
+
+Addresses in the IR are RVAs. A decoded `Instruction` speaks VAs, because
+capstone derives branch targets from the base it is handed while a memory
+displacement is absolute — the conversion happens once, in `branch_target` and
+`AnalyzedImage.va_to_rva`, and the IR never mixes the two again.
+
+EFLAGS are pseudo-registers (`eflags.zf`, ...). An instruction that writes flags
+is declared to write all six: conservative, and honest, because the individual
+flags are not modelled beyond the `jcc` condition table. A conditional branch
+declares only the flags its condition actually reads.
+"""
+
+from dataclasses import dataclass
+
+from ...disasm.engine import OP_IMM, OP_MEM, OP_REG
+from ..refs import branch_target, is_indirect_branch
+
+# ── expressions ────────────────────────────────────────────────
+
+
+class Expr:
+    """Marker base for the expression tree.
+
+    The concrete nodes are frozen dataclasses so an expression can be compared,
+    hashed and rebuilt without a caller worrying that a later pass mutated the
+    one it was holding.
+    """
+
+
+@dataclass(frozen=True)
+class Const(Expr):
+    """An integer literal, as written by the instruction."""
+
+    value: int
+
+
+@dataclass(frozen=True)
+class Addr(Expr):
+    """A code or data address that is an absolute value, rendered in hex.
+
+    Distinct from `Const` so a reader can tell `eax = 5` from `eax = 0x401000`
+    without knowing where the expression came from.
+    """
+
+    value: int
+
+
+@dataclass(frozen=True)
+class Reg(Expr):
+    """A register name as the decoder spells it, with its operand width."""
+
+    name: str
+    width: int = 0
+
+
+@dataclass(frozen=True)
+class Mem(Expr):
+    """A memory operand: segment, base, index, scale, displacement, width."""
+
+    size: int = 0
+    base: Expr | None = None
+    index: Expr | None = None
+    scale: int = 1
+    disp: int = 0
+    segment: str = ""
+
+
+@dataclass(frozen=True)
+class BinExpr(Expr):
+    """A binary operation, already in the operator spelling the text uses."""
+
+    op: str
+    left: Expr
+    right: Expr
+
+
+@dataclass(frozen=True)
+class UnExpr(Expr):
+    """A unary operation: `-`, `~`, or the flag negation `!`."""
+
+    op: str
+    operand: Expr
+
+
+# ── statements ─────────────────────────────────────────────────
+
+
+class Stmt:
+    """Marker base; every statement carries the RVA of its instruction.
+
+    The RVA is how the renderer annotates a line, and how a test can check that
+    every decoded instruction is still visible somewhere in the text.
+    """
+
+    rva: int
+
+
+@dataclass(frozen=True)
+class Assign(Stmt):
+    """`dst = src`, for a register destination."""
+
+    rva: int
+    dst: str
+    src: Expr
+
+
+@dataclass(frozen=True)
+class BinOp(Stmt):
+    """`dst = left <op> right`, for an arithmetic or logical instruction."""
+
+    rva: int
+    dst: str
+    op: str
+    left: Expr
+    right: Expr
+
+
+@dataclass(frozen=True)
+class UnOp(Stmt):
+    """`dst = <op> operand`, for `neg` and `not`."""
+
+    rva: int
+    dst: str
+    op: str
+    operand: Expr
+
+
+@dataclass(frozen=True)
+class Load(Stmt):
+    """`dst = <addr>` where addr is a memory expression (`mov reg, [mem]`)."""
+
+    rva: int
+    dst: str
+    addr: Expr
+
+
+@dataclass(frozen=True)
+class Store(Stmt):
+    """`<addr> = value` (`mov [mem], reg`, `push`, arithmetic into memory)."""
+
+    rva: int
+    addr: Expr
+    value: Expr
+
+
+@dataclass(frozen=True)
+class Cmp(Stmt):
+    """A flag-setting comparison (`cmp` / `test`).
+
+    Kept as its own statement rather than expanded into six flag assignments:
+    the flags are pseudo-registers, and the comparison is the expression the
+    structure pass will want when it turns a branch into an `if`.
+    """
+
+    rva: int
+    op: str
+    left: Expr
+    right: Expr
+
+
+@dataclass(frozen=True)
+class Branch(Stmt):
+    """A jump, with its condition when it has one and its target when known.
+
+    `kind` is ``jcc``, ``jmp`` or ``indirect``. A ``jcc`` keeps `cond` as a
+    flag expression; turning that into a structured `if` is the next ticket's
+    job, not this one's. `target` is None for a branch whose destination the
+    analysis could not resolve, which is a statement about the analysis and not
+    about the instruction.
+    """
+
+    rva: int
+    cond: Expr | None
+    target: int | None
+    kind: str
+    text: str = ""
+
+
+@dataclass(frozen=True)
+class Call(Stmt):
+    """A call, direct (target RVA) or indirect (`text` is the operand)."""
+
+    rva: int
+    target: int | None
+    text: str = ""
+    indirect: bool = False
+
+
+@dataclass(frozen=True)
+class Ret(Stmt):
+    """A return, optionally carrying the value recovery gave it."""
+
+    rva: int
+    value: Expr | None = None
+
+
+@dataclass(frozen=True)
+class Opaque(Stmt):
+    """An instruction outside the model, kept with its original spelling."""
+
+    rva: int
+    text: str
+    mnemonic: str = ""
+
+
+@dataclass(frozen=True)
+class Nop(Stmt):
+    """`nop`, which is in the support subset and does nothing."""
+
+    rva: int
+
+
+@dataclass(frozen=True)
+class IRBlock:
+    """One basic block's statements, in address order.
+
+    `dead` holds pure register writes that a later write in the same block
+    overwrote before any read. They are kept out of `stmts` -- they carry no
+    meaning for a structuring pass -- but they are not discarded: the renderer
+    prints them as comments, because an instruction must never leave the text.
+    """
+
+    rva: int
+    stmts: tuple
+    dead: tuple = ()
+
+
+# ── EFLAGS as pseudo-registers ─────────────────────────────────
+
+EFLAGS = ("cf", "pf", "af", "zf", "sf", "of")
+EFLAGS_REGISTERS = tuple("eflags." + flag for flag in EFLAGS)
+
+# Instructions that write flags. `not` is absent on purpose: it touches no
+# flags, and claiming otherwise would make a later condition look newer than it
+# is. `inc`/`dec` really leave CF alone but are declared with all six, which is
+# the conservative direction the spec asks for.
+FLAG_WRITERS = frozenset(
+    ("add", "sub", "and", "or", "xor", "imul", "inc", "dec", "neg", "cmp",
+     "test")
+)
+
+
+def _flag(name):
+    return Reg("eflags." + name, width=1)
+
+
+def _not(expr):
+    return UnExpr("!", expr)
+
+
+def _and(left, right):
+    return BinExpr("&&", left, right)
+
+
+def _or(left, right):
+    return BinExpr("||", left, right)
+
+
+_ZF = _flag("zf")
+_CF = _flag("cf")
+_SF = _flag("sf")
+_OF = _flag("of")
+_PF = _flag("pf")
+
+# mnemonic -> (condition expression, flags the condition reads)
+#
+# The spellings that share a condition are listed separately rather than
+# aliased through a canonical mnemonic: capstone emits whichever spelling the
+# assembler used, and a table that only knew `je` would turn `jz` into an
+# unhandled instruction.
+_CONDITIONS = {
+    "je": (_ZF, ("zf",)),
+    "jz": (_ZF, ("zf",)),
+    "jne": (_not(_ZF), ("zf",)),
+    "jnz": (_not(_ZF), ("zf",)),
+    "js": (_SF, ("sf",)),
+    "jns": (_not(_SF), ("sf",)),
+    "jo": (_OF, ("of",)),
+    "jno": (_not(_OF), ("of",)),
+    "jp": (_PF, ("pf",)),
+    "jpe": (_PF, ("pf",)),
+    "jnp": (_not(_PF), ("pf",)),
+    "jpo": (_not(_PF), ("pf",)),
+    "jb": (_CF, ("cf",)),
+    "jnae": (_CF, ("cf",)),
+    "jc": (_CF, ("cf",)),
+    "jae": (_not(_CF), ("cf",)),
+    "jnb": (_not(_CF), ("cf",)),
+    "jnc": (_not(_CF), ("cf",)),
+    "jbe": (_or(_CF, _ZF), ("cf", "zf")),
+    "jna": (_or(_CF, _ZF), ("cf", "zf")),
+    "ja": (_and(_not(_CF), _not(_ZF)), ("cf", "zf")),
+    "jnbe": (_and(_not(_CF), _not(_ZF)), ("cf", "zf")),
+    "jl": (BinExpr("!=", _SF, _OF), ("sf", "of")),
+    "jnge": (BinExpr("!=", _SF, _OF), ("sf", "of")),
+    "jge": (BinExpr("==", _SF, _OF), ("sf", "of")),
+    "jnl": (BinExpr("==", _SF, _OF), ("sf", "of")),
+    "jle": (_or(_ZF, BinExpr("!=", _SF, _OF)), ("zf", "sf", "of")),
+    "jng": (_or(_ZF, BinExpr("!=", _SF, _OF)), ("zf", "sf", "of")),
+    "jg": (_and(_not(_ZF), BinExpr("==", _SF, _OF)), ("zf", "sf", "of")),
+    "jnle": (_and(_not(_ZF), BinExpr("==", _SF, _OF)), ("zf", "sf", "of")),
+}
+
+# The count-is-zero family is not a flag condition: it compares a register with
+# zero directly, so it reads no flags at all.
+_COUNT_ZERO = {"jcxz": "cx", "jecxz": "ecx", "jrcxz": "rcx"}
+
+
+def condition_for(mnemonic):
+    """The condition `mnemonic` branches on, or None when it is not modelled.
+
+    None is the honest answer for the loop family and anything else outside the
+    condition table; the caller turns that into an Opaque statement rather than
+    inventing a condition.
+    """
+    if mnemonic in _COUNT_ZERO:
+        return BinExpr("==", Reg(_COUNT_ZERO[mnemonic]), Const(0))
+    entry = _CONDITIONS.get(mnemonic)
+    return entry[0] if entry is not None else None
+
+
+def flags_read(mnemonic):
+    """The flag pseudo-registers `mnemonic`'s condition actually reads."""
+    if mnemonic in _COUNT_ZERO:
+        return ()
+    entry = _CONDITIONS.get(mnemonic)
+    return entry[1] if entry is not None else ()
+
+
+def flags_written(mnemonic):
+    """The flag pseudo-registers `mnemonic` writes, or () when it writes none.
+
+    All six for every arithmetic/logic instruction, as the spec requires: the
+    per-flag effects are not modelled, so claiming a subset would be a false
+    precision.
+    """
+    return EFLAGS_REGISTERS if mnemonic in FLAG_WRITERS else ()
+
+
+# ── lowering ───────────────────────────────────────────────────
+
+_BINARY_OPS = {
+    "add": "+",
+    "sub": "-",
+    "and": "&",
+    "or": "|",
+    "xor": "^",
+}
+
+
+def _reg(decoder, reg_id, width=0):
+    return Reg(decoder.reg_name(reg_id), width)
+
+
+def _mem(decoder, op):
+    base = _reg(decoder, op.mem_base) if op.mem_base else None
+    index = _reg(decoder, op.mem_index) if op.mem_index else None
+    segment = decoder.reg_name(op.mem_segment) if op.mem_segment else ""
+    return Mem(size=op.size, base=base, index=index,
+               scale=op.mem_scale or 1, disp=op.mem_disp,
+               segment=segment)
+
+
+def _operand(decoder, op):
+    """The expression an operand stands for, reading memory as `[mem]`."""
+    if op.kind == OP_REG:
+        return _reg(decoder, op.reg, op.size)
+    if op.kind == OP_IMM:
+        return Const(op.imm)
+    return _mem(decoder, op)
+
+
+def _effective_address(decoder, image, insn, op):
+    """The value `lea` would put in its destination.
+
+    A RIP-relative operand is resolved against the next instruction's address
+    and converted to an RVA, because the displacement on its own is not an
+    address and rendering it as one would be the address-space mistake this
+    package keeps out of the analysis. A base/index form stays symbolic: the
+    decompiler does not know the register's value and must not pretend to.
+    """
+    if op.is_rip_relative:
+        absolute = insn.address + insn.size + op.mem_disp
+        rva = image.va_to_rva(absolute)
+        return Addr(rva if rva is not None else absolute)
+    if op.mem_base == 0 and op.mem_index == 0:
+        return Addr(op.mem_disp)
+
+    parts = []
+    if op.mem_base:
+        parts.append(_reg(decoder, op.mem_base))
+    if op.mem_index:
+        index = _reg(decoder, op.mem_index)
+        if op.mem_scale and op.mem_scale != 1:
+            index = BinExpr("*", index, Const(op.mem_scale))
+        parts.append(index)
+    if not parts:
+        return Addr(op.mem_disp)
+
+    expr = parts[0]
+    for part in parts[1:]:
+        expr = BinExpr("+", expr, part)
+    if op.mem_disp:
+        op_symbol, value = ("+", op.mem_disp) if op.mem_disp > 0 else ("-", -op.mem_disp)
+        expr = BinExpr(op_symbol, expr, Const(value))
+    return expr
+
+
+def _opaque(insn, rva):
+    text = insn.mnemonic
+    if insn.op_str:
+        text += " " + insn.op_str
+    return Opaque(rva=rva, text=text, mnemonic=insn.mnemonic)
+
+
+def _lower_mov(decoder, image, insn, rva):
+    ops = insn.operands
+    if len(ops) != 2:
+        return None
+    dst, src = ops
+    if dst.kind == OP_REG:
+        name = decoder.reg_name(dst.reg)
+        if src.kind == OP_MEM:
+            return (Load(rva=rva, dst=name, addr=_mem(decoder, src)),)
+        return (Assign(rva=rva, dst=name, src=_operand(decoder, src)),)
+    if dst.kind == OP_MEM:
+        return (Store(rva=rva, addr=_mem(decoder, dst),
+                      value=_operand(decoder, src)),)
+    return None
+
+
+def _lower_lea(decoder, image, insn, rva):
+    ops = insn.operands
+    if len(ops) != 2 or ops[0].kind != OP_REG or ops[1].kind != OP_MEM:
+        return None
+    return (Assign(rva=rva, dst=decoder.reg_name(ops[0].reg),
+                   src=_effective_address(decoder, image, insn, ops[1])),)
+
+
+def _lower_binary(decoder, image, insn, rva):
+    ops = insn.operands
+    if len(ops) != 2:
+        return None
+    dst, src = ops
+    symbol = _BINARY_OPS[insn.mnemonic]
+    if dst.kind == OP_REG:
+        name = decoder.reg_name(dst.reg)
+        return (BinOp(rva=rva, dst=name, op=symbol,
+                      left=_reg(decoder, dst.reg, dst.size),
+                      right=_operand(decoder, src)),)
+    if dst.kind == OP_MEM:
+        addr = _mem(decoder, dst)
+        return (Store(rva=rva, addr=addr,
+                      value=BinExpr(symbol, addr, _operand(decoder, src))),)
+    return None
+
+
+def _lower_imul(decoder, image, insn, rva):
+    ops = insn.operands
+    if len(ops) == 1:
+        return None              # implicit edx:eax; not modelled
+    if len(ops) == 3:
+        dst, src, multiplier = ops
+        if dst.kind != OP_REG:
+            return None
+        return (BinOp(rva=rva, dst=decoder.reg_name(dst.reg), op="*",
+                      left=_operand(decoder, src),
+                      right=_operand(decoder, multiplier)),)
+    if len(ops) != 2:
+        return None
+    dst, src = ops
+    if dst.kind == OP_REG:
+        name = decoder.reg_name(dst.reg)
+        return (BinOp(rva=rva, dst=name, op="*",
+                      left=_reg(decoder, dst.reg, dst.size),
+                      right=_operand(decoder, src)),)
+    if dst.kind == OP_MEM:
+        addr = _mem(decoder, dst)
+        return (Store(rva=rva, addr=addr,
+                      value=BinExpr("*", addr, _operand(decoder, src))),)
+    return None
+
+
+def _lower_unary(decoder, image, insn, rva):
+    """`inc` / `dec` / `neg` / `not` — one operand, register or memory."""
+    ops = insn.operands
+    if len(ops) != 1:
+        return None
+    dst = ops[0]
+    name = insn.mnemonic
+    if name in ("inc", "dec"):
+        symbol = "+" if name == "inc" else "-"
+        if dst.kind == OP_REG:
+            reg_name = decoder.reg_name(dst.reg)
+            return (BinOp(rva=rva, dst=reg_name, op=symbol,
+                          left=_reg(decoder, dst.reg, dst.size),
+                          right=Const(1)),)
+        if dst.kind == OP_MEM:
+            addr = _mem(decoder, dst)
+            return (Store(rva=rva, addr=addr,
+                          value=BinExpr(symbol, addr, Const(1))),)
+        return None
+    symbol = "-" if name == "neg" else "~"
+    if dst.kind == OP_REG:
+        reg_name = decoder.reg_name(dst.reg)
+        return (UnOp(rva=rva, dst=reg_name, op=symbol,
+                     operand=_reg(decoder, dst.reg, dst.size)),)
+    if dst.kind == OP_MEM:
+        addr = _mem(decoder, dst)
+        return (Store(rva=rva, addr=addr,
+                      value=UnExpr(symbol, addr)),)
+    return None
+
+
+def _lower_cmp(decoder, image, insn, rva):
+    ops = insn.operands
+    if len(ops) != 2:
+        return None
+    return (Cmp(rva=rva, op=insn.mnemonic,
+                left=_operand(decoder, ops[0]),
+                right=_operand(decoder, ops[1])),)
+
+
+def _lower_jcc(decoder, image, insn, rva):
+    cond = condition_for(insn.mnemonic)
+    if cond is None:
+        return None
+    return (Branch(rva=rva, cond=cond,
+                   target=branch_target(insn, image), kind="jcc",
+                   text=insn.op_str),)
+
+
+def _lower_jmp(decoder, image, insn, rva):
+    if is_indirect_branch(insn) or branch_target(insn, image) is None:
+        return (Branch(rva=rva, cond=None, target=None, kind="indirect",
+                       text=insn.op_str),)
+    return (Branch(rva=rva, cond=None,
+                   target=branch_target(insn, image), kind="jmp",
+                   text=insn.op_str),)
+
+
+def _lower_call(decoder, image, insn, rva):
+    target = branch_target(insn, image)
+    return (Call(rva=rva, target=target, text=insn.op_str,
+                 indirect=target is None),)
+
+
+def _stack_pointer(image):
+    """The stack pointer's spelling for this image's architecture."""
+    return "rsp" if image.mode == "x64" else "esp"
+
+
+def _lower_push(decoder, image, insn, rva):
+    """`push x`: store below the stack pointer, then move the pointer.
+
+    Two statements for one instruction, because the store and the pointer move
+    are two effects. The stack pointer is modelled exactly here and nowhere
+    else: no frame reconstruction, so a later pop still reads `[rsp]` rather
+    than a named local. The width comes from the operand, so `push ax` moves
+    two bytes while `push rax` moves eight.
+    """
+    ops = insn.operands
+    if len(ops) != 1:
+        return None
+    slot = ops[0].size or image.slot_size
+    stack = _stack_pointer(image)
+    addr = Mem(size=slot, base=Reg(stack, slot), disp=-slot)
+    value = _operand(decoder, ops[0])
+    return (Store(rva=rva, addr=addr, value=value),
+            Assign(rva=rva, dst=stack,
+                   src=BinExpr("-", Reg(stack, slot), Const(slot))))
+
+
+def _lower_pop(decoder, image, insn, rva):
+    ops = insn.operands
+    if len(ops) != 1:
+        return None
+    slot = ops[0].size or image.slot_size
+    stack = _stack_pointer(image)
+    addr = Mem(size=slot, base=Reg(stack, slot))
+    dst = ops[0]
+    if dst.kind == OP_REG:
+        name = decoder.reg_name(dst.reg)
+        loaded = Load(rva=rva, dst=name, addr=addr)
+        if name == stack:
+            # `pop rsp` loads the pointer itself; adding the slot afterwards
+            # would move it twice.
+            return (loaded,)
+    elif dst.kind == OP_MEM:
+        loaded = Store(rva=rva, addr=_mem(decoder, dst), value=addr)
+    else:
+        return None
+    return (loaded,
+            Assign(rva=rva, dst=stack,
+                   src=BinExpr("+", Reg(stack, slot), Const(slot))))
+
+
+def lower_instruction(decoder, image, insn):
+    """The statements one decoded instruction becomes.
+
+    Returns a tuple with at least one element: when the instruction is outside
+    the support subset, or is an unsupported *form* of a supported mnemonic
+    (one-operand `imul`, say), the result is an Opaque statement and never an
+    empty tuple.
+    """
+    rva = image.va_to_rva(insn.address)
+    if rva is None:
+        return (Opaque(rva=insn.address,
+                       text=f"instruction outside the image: {insn.mnemonic} "
+                            f"{insn.op_str}",
+                       mnemonic=insn.mnemonic),)
+
+    name = insn.mnemonic
+    if name in ("mov", "movabs"):
+        stmts = _lower_mov(decoder, image, insn, rva)
+    elif name == "lea":
+        stmts = _lower_lea(decoder, image, insn, rva)
+    elif name in _BINARY_OPS:
+        stmts = _lower_binary(decoder, image, insn, rva)
+    elif name == "imul":
+        stmts = _lower_imul(decoder, image, insn, rva)
+    elif name in ("inc", "dec", "neg", "not"):
+        stmts = _lower_unary(decoder, image, insn, rva)
+    elif name in ("cmp", "test"):
+        stmts = _lower_cmp(decoder, image, insn, rva)
+    elif name in _CONDITIONS or name in _COUNT_ZERO:
+        stmts = _lower_jcc(decoder, image, insn, rva)
+    elif name == "jmp":
+        stmts = _lower_jmp(decoder, image, insn, rva)
+    elif name == "call":
+        stmts = _lower_call(decoder, image, insn, rva)
+    elif name == "ret":
+        stmts = (Ret(rva=rva),)
+    elif name == "push":
+        stmts = _lower_push(decoder, image, insn, rva)
+    elif name == "pop":
+        stmts = _lower_pop(decoder, image, insn, rva)
+    elif name == "nop":
+        stmts = (Nop(rva=rva),)
+    else:
+        stmts = None
+
+    if not stmts:
+        return (_opaque(insn, rva),)
+    return stmts
+
+
+def lower_block(decoder, image, block):
+    """Lower one CFG block. Every instruction contributes at least one stmt."""
+    stmts = []
+    for rva in block.instructions:
+        insn = decoder.decode_one(rva)
+        if insn is None:
+            # The CFG only walks decoded instructions, so this is defensive:
+            # if it ever happens the address still reaches the text.
+            stmts.append(Opaque(rva=rva,
+                                text=f"undecodable instruction at 0x{rva:x}",
+                                mnemonic=""))
+            continue
+        stmts.extend(lower_instruction(decoder, image, insn))
+    return IRBlock(rva=block.rva, stmts=tuple(stmts))
