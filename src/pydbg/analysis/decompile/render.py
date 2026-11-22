@@ -4,19 +4,23 @@ C-style, with two conventions worth stating rather than discovering:
 
 - every statement ends with an address comment `// @0x<rva>`, because an
   instruction that cannot be seen in the output cannot be checked against the
-  decode. The same annotation appears on control-transfer lines;
+  decode. The same annotation appears on control-transfer lines, and a
+  structured construct carries the addresses of every branch it consumed;
 - data values and offsets are decimal, code addresses are hex (`sub_<hex>`,
   `L_<hex>`, `0x...`). Mixing the two would make `[rcx + 0x8]` and `L_1008`
   look like the same kind of number.
 
-The control flow is rendered from the CFG's successors, not from the terminal
-statement alone. That is what lets an unmodelled terminator (a `loop`, say)
-still show the edges the analysis knows about, and it keeps a block's fall
-through implicit: a `goto` appears exactly where control does *not* fall into
-the next block in address order.
+The tree comes from `structure`; this module only prints it. Two rendering
+forms coexist on purpose. A structured node (`if`/`while`/`do`/`switch`) prints
+its branches itself. A `Flat` node is the P5 form -- statements followed by the
+CFG's edges -- and is what a shape the structurer does not recognise falls back
+to. Inside a `Flat` node the fall-through stays implicit when it targets the
+block emitted next, which is what keeps `goto` meaning "control does not just
+continue here".
 """
 
 from ..cfg import FALL, INDIRECT, JCC, JMP, RET
+from . import structure
 from .ir import (
     Addr, Assign, BinExpr, BinOp, Branch, Call, Cmp, Const, Load, Mem, Nop,
     Opaque, Reg, Ret, Store, UnExpr, UnOp,
@@ -60,6 +64,26 @@ def _at(rva):
 def _at_comment(rva):
     """Address annotation for a line that already ends in a comment."""
     return f"@0x{rva:x}"
+
+
+def _indent(depth):
+    return "  " * depth
+
+
+def _at_many(rvas):
+    """One comment naming several instruction addresses, in the given order."""
+    seen = []
+    for rva in rvas:
+        if rva not in seen:
+            seen.append(rva)
+    if not seen:
+        return ""
+    return "// " + ", ".join(f"@0x{rva:x}" for rva in seen)
+
+
+def _annotate(code, rvas):
+    comment = _at_many(rvas)
+    return f"{code}  {comment}" if comment else code
 
 
 def render_expr(expr, parent_prec=0, side="left"):
@@ -115,38 +139,39 @@ def _render_mem(mem):
     return f"{prefix}[{text}]"
 
 
-def _statement_lines(stmt):
+def _statement_lines(stmt, indent="  "):
     """Lines for one statement, or none for the control-transfer forms.
 
-    `Branch` and `Ret` are rendered by `_edge_lines`, which owns the CFG's
-    successors; rendering them here as well would print every jump twice.
+    `Branch` and `Ret` are rendered by `_edge_lines` (a `Flat` block) or by the
+    enclosing construct, which owns the edges; rendering them here as well
+    would print every jump twice.
     """
     at = _at(stmt.rva)
     if isinstance(stmt, Assign):
-        return [f"  {stmt.dst} = {render_expr(stmt.src)};  {at}"]
+        return [f"{indent}{stmt.dst} = {render_expr(stmt.src)};  {at}"]
     if isinstance(stmt, BinOp):
         expr = BinExpr(stmt.op, stmt.left, stmt.right)
-        return [f"  {stmt.dst} = {render_expr(expr)};  {at}"]
+        return [f"{indent}{stmt.dst} = {render_expr(expr)};  {at}"]
     if isinstance(stmt, UnOp):
         expr = UnExpr(stmt.op, stmt.operand)
-        return [f"  {stmt.dst} = {render_expr(expr)};  {at}"]
+        return [f"{indent}{stmt.dst} = {render_expr(expr)};  {at}"]
     if isinstance(stmt, Load):
-        return [f"  {stmt.dst} = {render_expr(stmt.addr)};  {at}"]
+        return [f"{indent}{stmt.dst} = {render_expr(stmt.addr)};  {at}"]
     if isinstance(stmt, Store):
-        return [f"  {render_expr(stmt.addr)} = {render_expr(stmt.value)};  "
-                f"{at}"]
+        return [f"{indent}{render_expr(stmt.addr)} = "
+                f"{render_expr(stmt.value)};  {at}"]
     if isinstance(stmt, Cmp):
-        return [f"  eflags = {stmt.op}({render_expr(stmt.left)}, "
+        return [f"{indent}eflags = {stmt.op}({render_expr(stmt.left)}, "
                 f"{render_expr(stmt.right)});  {at}"]
     if isinstance(stmt, Call):
         if stmt.target is not None:
-            return [f"  sub_{stmt.target:x}();  {at}"]
+            return [f"{indent}sub_{stmt.target:x}();  {at}"]
         operand = stmt.text or "?"
-        return [f"  (*{operand})();  {at}"]
+        return [f"{indent}(*{operand})();  {at}"]
     if isinstance(stmt, Nop):
-        return [f"  nop;  {at}"]
+        return [f"{indent}nop;  {at}"]
     if isinstance(stmt, Opaque):
-        return [f"  // unhandled: {stmt.text}  {_at_comment(stmt.rva)}"]
+        return [f"{indent}// unhandled: {stmt.text}  {_at_comment(stmt.rva)}"]
     return []
 
 
@@ -168,7 +193,7 @@ def _label(rva, entry):
     return f"sub_{rva:x}" if rva == entry else f"L_{rva:x}"
 
 
-def _edge_lines(block, successors, next_rva, entry):
+def _edge_lines(block, successors, next_rva, entry, indent="  "):
     terminator = _terminator(block)
     lines = []
     for kind, target in successors:
@@ -176,20 +201,20 @@ def _edge_lines(block, successors, next_rva, entry):
             ret = terminator if isinstance(terminator, Ret) else None
             rva = ret.rva if ret is not None else _block_end(block)
             if ret is not None and ret.value is not None:
-                lines.append(f"  return {render_expr(ret.value)};  "
+                lines.append(f"{indent}return {render_expr(ret.value)};  "
                              f"{_at(rva)}")
             else:
-                lines.append(f"  return;  {_at(rva)}")
+                lines.append(f"{indent}return;  {_at(rva)}")
             continue
 
         if kind == FALL:
             if target is None:
-                lines.append("  // falls through past the decoded "
+                lines.append(f"{indent}// falls through past the decoded "
                              f"instructions  {_at_comment(_block_end(block))}")
             elif target != next_rva:
-                # The fallthrough is not the next block in address order, so
-                # the layout cannot imply it and it must be written down.
-                lines.append(f"  goto {_label(target, entry)};  "
+                # The fallthrough is not the block emitted next, so the layout
+                # cannot imply it and it must be written down.
+                lines.append(f"{indent}goto {_label(target, entry)};  "
                              f"{_at(_edge_rva(terminator, block))}")
             continue
 
@@ -199,30 +224,32 @@ def _edge_lines(block, successors, next_rva, entry):
                     if isinstance(terminator, Branch)
                     and terminator.kind == "jcc" else None)
             if target is None:
-                lines.append(f"  // conditional edge: target unknown  "
+                lines.append(f"{indent}// conditional edge: target unknown  "
                              f"{_at_comment(rva)}")
             elif cond is not None:
-                lines.append(f"  if ({render_expr(cond)}) goto "
+                lines.append(f"{indent}if ({render_expr(cond)}) goto "
                              f"{_label(target, entry)};  {_at(rva)}")
             else:
-                lines.append(f"  // conditional edge to {_label(target, entry)}: "
-                             f"condition not modeled  {_at_comment(rva)}")
+                lines.append(f"{indent}// conditional edge to "
+                             f"{_label(target, entry)}: condition not "
+                             f"modeled  {_at_comment(rva)}")
             continue
 
         if kind == JMP:
             rva = _edge_rva(terminator, block)
             if target is None:
-                lines.append(f"  // jump target unknown  {_at_comment(rva)}")
+                lines.append(f"{indent}// jump target unknown  "
+                             f"{_at_comment(rva)}")
             else:
-                lines.append(f"  goto {_label(target, entry)};  {_at(rva)}")
+                lines.append(f"{indent}goto {_label(target, entry)};  "
+                             f"{_at(rva)}")
             continue
 
         if kind == INDIRECT:
             rva = _edge_rva(terminator, block)
-            operand = (terminator.text
-                       if isinstance(terminator, Branch) else "")
+            operand = terminator.text if isinstance(terminator, Branch) else ""
             operand = operand or "?"
-            lines.append(f"  goto *{operand};  // indirect jump, target "
+            lines.append(f"{indent}goto *{operand};  // indirect jump, target "
                          f"unknown  {_at_comment(rva)}")
     return lines
 
@@ -231,35 +258,141 @@ def _edge_rva(terminator, block):
     return terminator.rva if terminator is not None else _block_end(block)
 
 
-def render_function(entry, blocks, successors, truncated=False):
-    """Render a recovered function as labelled pseudo-C.
+def _iter_nodes(node):
+    """Every node in the tree below 'node', depth-first."""
+    if isinstance(node, structure.Seq):
+        for item in node.items:
+            yield from _iter_nodes(item)
+        return
+    yield node
+    if isinstance(node, structure.If):
+        yield from _iter_nodes(node.header)
+        yield from _iter_nodes(node.then)
+        if node.orelse is not None:
+            yield from _iter_nodes(node.orelse)
+    elif isinstance(node, structure.While):
+        yield from _iter_nodes(node.header)
+        yield from _iter_nodes(node.body)
+    elif isinstance(node, structure.DoWhile):
+        yield from _iter_nodes(node.body)
+    elif isinstance(node, structure.Switch):
+        yield from _iter_nodes(node.header)
+        for _, body in node.cases:
+            yield from _iter_nodes(body)
+        if node.default is not None:
+            yield from _iter_nodes(node.default)
 
-    'blocks' maps RVA -> IRBlock; 'successors' maps RVA -> the CFG block's
-    successor tuple. Both are read in sorted RVA order, which is the only order
-    used anywhere here -- no set iteration reaches the text, so two calls with
-    the same input produce the same bytes.
 
-    'truncated' appends a closing note when the CFG stopped at its block limit.
-    Without it a `goto` can point at a label that was never rendered, which
-    looks like a bug in the text rather than the honest boundary it is.
+def _referenced_targets(nodes, successors):
+    """Block RVAs a `goto` in the tree names.
+
+    Computed before rendering so a label can be printed even when its block is
+    emitted after the jump that needs it. Only the flat form produces gotos
+    from edges; structured constructs consume theirs.
     """
-    ordered = sorted(blocks)
-    next_rva = {rva: (ordered[index + 1] if index + 1 < len(ordered) else None)
-                for index, rva in enumerate(ordered)}
+    targets = set()
+    for node in _iter_nodes(structure.Seq(tuple(nodes))):
+        if isinstance(node, structure.Flat):
+            for kind, target in successors.get(node.block.rva, ()):
+                if target is None or kind in (RET, INDIRECT):
+                    continue
+                if kind == FALL and target == node.next_rva:
+                    continue
+                targets.add(target)
+    return targets
 
+
+def _render_block(node, lines, depth, entry, successors, referenced):
+    indent = _indent(depth)
+    block = node.block
+    if block.rva != entry and block.rva in referenced:
+        lines.append(f"{indent}L_{block.rva:x}:")
+    folded = getattr(node, "folded", ())
+    for stmt in block.stmts:
+        if stmt.rva in folded:
+            continue
+        lines.extend(_statement_lines(stmt, indent))
+    for stmt in block.dead:
+        for line in _statement_lines(stmt, indent):
+            body = line.strip().replace("  // @", "  @", 1)
+            lines.append(f"{indent}// dead: {body}")
+    if isinstance(node, structure.Flat):
+        lines.extend(_edge_lines(block, successors.get(block.rva, ()),
+                                 node.next_rva, entry, indent))
+
+
+def _render_node(node, lines, depth, entry, successors, referenced):
+    indent = _indent(depth)
+    if isinstance(node, structure.Seq):
+        for item in node.items:
+            _render_node(item, lines, depth, entry, successors, referenced)
+        return
+    if isinstance(node, (structure.Statements, structure.Flat)):
+        _render_block(node, lines, depth, entry, successors, referenced)
+        return
+    if isinstance(node, structure.Break):
+        lines.append(f"{indent}break;  {_at(node.rva)}")
+        return
+    if isinstance(node, structure.Continue):
+        lines.append(f"{indent}continue;  {_at(node.rva)}")
+        return
+    if isinstance(node, structure.If):
+        _render_block(node.header, lines, depth, entry, successors, referenced)
+        lines.append(_annotate(
+            f"{indent}if ({render_expr(node.condition)}) {{", node.rvas))
+        _render_node(node.then, lines, depth + 1, entry, successors,
+                     referenced)
+        if node.orelse is not None:
+            lines.append(f"{indent}}} else {{")
+            _render_node(node.orelse, lines, depth + 1, entry, successors,
+                         referenced)
+        lines.append(f"{indent}}}")
+        return
+    if isinstance(node, structure.While):
+        _render_block(node.header, lines, depth, entry, successors, referenced)
+        lines.append(_annotate(
+            f"{indent}while ({render_expr(node.condition)}) {{", node.rvas))
+        _render_node(node.body, lines, depth + 1, entry, successors,
+                     referenced)
+        lines.append(f"{indent}}}")
+        return
+    if isinstance(node, structure.DoWhile):
+        lines.append(f"{indent}do {{")
+        _render_node(node.body, lines, depth + 1, entry, successors,
+                     referenced)
+        lines.append(_annotate(
+            f"{indent}}} while ({render_expr(node.condition)});", node.rvas))
+        return
+    if isinstance(node, structure.Switch):
+        _render_block(node.header, lines, depth, entry, successors, referenced)
+        lines.append(_annotate(
+            f"{indent}switch ({render_expr(node.index)}) {{", node.rvas))
+        for label, body in node.cases:
+            lines.append(f"{indent}  case {label}:")
+            _render_node(body, lines, depth + 2, entry, successors,
+                         referenced)
+        if node.default is not None:
+            lines.append(f"{indent}  default:")
+            _render_node(node.default, lines, depth + 2, entry, successors,
+                         referenced)
+        lines.append(f"{indent}}}")
+        return
+    raise TypeError(f"unknown structured node: {node!r}")
+
+
+def render_function(entry, structured, successors, truncated=False):
+    """Render a structured function as labelled pseudo-C.
+
+    'structured' is a `structure.Structured`; 'successors' is the CFG's
+    successor map, needed only by the flat fallback. Nothing iterates a set
+    into the text: the nodes are ordered by construction and the lookup tables
+    are read by key, so two calls with the same input produce the same bytes.
+    """
+    nodes = structured.nodes
+    referenced = _referenced_targets(nodes, successors)
     lines = [f"sub_{entry:x}:"]
-    for rva in ordered:
-        block = blocks[rva]
-        if rva != entry:
-            lines.append(f"L_{rva:x}:")
-        for stmt in block.stmts:
-            lines.extend(_statement_lines(stmt))
-        for stmt in block.dead:
-            for line in _statement_lines(stmt):
-                body = line.strip().replace("  // @", "  @", 1)
-                lines.append(f"  // dead: {body}")
-        lines.extend(_edge_lines(block, successors.get(rva, ()),
-                                 next_rva[rva], entry))
+    for node in nodes:
+        _render_node(node, lines, 1, entry, successors, referenced)
     if truncated:
         lines.append("// truncated: the block limit stopped the CFG; "
                      "referenced labels may be missing")
