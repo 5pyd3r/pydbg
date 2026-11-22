@@ -96,6 +96,31 @@ class TestTraceRoundTrip(TraceFileTest):
         self.assertEqual((read_back[0].rva, read_back[0].a, read_back[0].b),
                          (0x401000, 3, 0))
 
+    def test_an_unknown_kind_is_read_back_verbatim(self):
+        """§9.7.1: an integer this reader does not name is still the fact.
+
+        A file written by a later phase must arrive as an unknown kind with
+        its fields untouched, not as a format error and not as a guessed name.
+        """
+        unknown = TraceEvent(99, tid=5, rva=0x401000, ts=77, a=1, b=2)
+        instr = TraceEvent(INSTR, tid=6, rva=0x401010, ts=78, a=4, b=0)
+        with TraceWriter(self.path()) as writer:
+            writer.write(unknown)
+            writer.write(instr)
+
+        read_back = list(read_trace(self.path()))
+
+        self.assertEqual(read_back, [unknown, instr])
+        self.assertEqual(read_back[0].kind, 99)
+        self.assertIsNone(KIND_NAMES.get(read_back[0].kind))
+        self.assertEqual(
+            (read_back[0].tid, read_back[0].rva, read_back[0].ts,
+             read_back[0].a, read_back[0].b),
+            (5, 0x401000, 77, 1, 2),
+            "an unknown kind must not lose or reorder its fields")
+        self.assertEqual(read_back[1].kind, INSTR)
+        self.assertEqual(KIND_NAMES[read_back[1].kind], "INSTR")
+
 
 class TestOnDiskLayout(TraceFileTest):
 

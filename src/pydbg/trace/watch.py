@@ -46,13 +46,11 @@ from ..exceptions import (
     BreakpointError, ProcessError, PydbgError,
     TimeoutError as PydbgTimeoutError,
 )
+from . import _shared
 from .bbl import (
     STOP_IDLE_TIMEOUT, STOP_MAX_EVENTS, STOP_TARGET_EXITED, TraceSummary,
 )
 from .format import MEM_WRITE, TraceEvent
-
-# GetExitCodeProcess answers this while the process is still running.
-_STILL_ACTIVE = 259
 
 # A data breakpoint is delivered as a single-step exception, in the native code
 # and in the WOW64 status code a 32-bit target under a 64-bit debugger reports.
@@ -101,7 +99,12 @@ class MemoryWatch:
         self._events = 0
         self._reason = None
         self._warnings = []
-        self._pending_single_step = False
+        self._uncontinued = False
+        # tid -> thread handle opened once per thread and closed by disarm().
+        # A tid-based register access makes the facade enumerate threads
+        # (~36 ms measured); caching the handle keeps a watch cheap enough to
+        # observe a target that writes every 20 ms.
+        self._h_threads = {}
 
     # ── arming ─────────────────────────────────────────────────
 
@@ -129,18 +132,9 @@ class MemoryWatch:
                 f"watch address 0x{self.addr:X} is not aligned to "
                 f"{self.length} bytes")
 
-        for slot in range(4):
-            try:
-                bp_id = self.dbg.set_hw_breakpoint(
-                    self.addr, "w", self.length, slot, self.tid)
-            except BreakpointError as exc:
-                if "already in use" not in str(exc):
-                    raise
-                continue
-            self._bp_id = bp_id
-            self._slot = slot
-            return bp_id
-        raise BreakpointError("no free debug-register slot")
+        self._bp_id, self._slot = _shared.arm_free_slot(
+            self.dbg, self.addr, "w", self.length, self.tid)
+        return self._bp_id
 
     def disarm(self):
         """Remove only the breakpoint this watch armed; return warnings.
@@ -148,33 +142,53 @@ class MemoryWatch:
         Calling it twice is harmless: the second call owns nothing. The
         cleanup wording matches `BblTracer.disarm()` — "breakpoint left" when a
         live target may still hold the slot, "target exited during cleanup"
-        once its debug registers are gone with it.
+        once its debug registers are gone with it. Every cached thread handle
+        is closed here too: the watch may have opened several for a
+        process-wide watch, and nothing else owns them.
         """
         own = self._bp_id
         self._bp_id = None
         self._slot = None
-        if own is None:
+        handles = self._h_threads
+        self._h_threads = {}
+        try:
+            if own is None:
+                return ()
+            try:
+                self.dbg.remove_breakpoint(own)
+            except (BreakpointError, ProcessError):
+                if _shared.target_exited(self.dbg):
+                    return ("target exited during cleanup",)
+                return ("breakpoint left",)
+
+            # A removal that raised is the only normal failure; if the
+            # breakpoint record survived a non-raising removal, that is still a
+            # leftover. Ask the public lookups, not the session's dict.
+            if self.dbg.find_breakpoint(self.addr) is not None:
+                return ("breakpoint left",)
             return ()
+        finally:
+            for h_thread in handles.values():
+                try:
+                    self.dbg.close_handle(h_thread)
+                except (PydbgError, OSError):
+                    pass
 
-        try:
-            self.dbg.remove_breakpoint(own)
-        except (BreakpointError, ProcessError):
-            if self._target_exited():
-                return ("target exited during cleanup",)
-            return ("breakpoint left",)
+    def _thread_handle(self, tid):
+        """The thread's handle, opened on first use and cached per tid."""
+        h_thread = self._h_threads.get(tid)
+        if h_thread is None:
+            h_thread = self.dbg.open_thread(tid)
+            self._h_threads[tid] = h_thread
+        return h_thread
 
-        # A removal that raised is the only normal failure; if the record
-        # somehow survived a non-raising removal, that is still a leftover.
-        if self.dbg._session.breakpoints.get(own) is not None:
-            return ("breakpoint left",)
-        return ()
+    def _get_context(self, tid):
+        """The thread's context, through the cached handle (not by tid)."""
+        return self.dbg.thread.get_context(self._thread_handle(tid))
 
-    def _target_exited(self):
-        """Whether the target is gone, so its debug registers cannot be cleared."""
-        try:
-            return self.dbg.get_exit_code() != _STILL_ACTIVE
-        except (PydbgError, OSError):
-            return True
+    def _set_context(self, tid, context):
+        """Write registers through the cached handle (not by tid)."""
+        return self.dbg.thread.set_context(self._thread_handle(tid), context)
 
     # ── running ────────────────────────────────────────────────
 
@@ -216,14 +230,15 @@ class MemoryWatch:
             reason=self._reason,
             elapsed_ns=time.perf_counter_ns() - started,
             warnings=tuple(dict.fromkeys(self._warnings)),
-            single_step_pending=self._pending_single_step,
+            single_step_pending=_shared.single_step_pending(
+                self.dbg, self._uncontinued),
         )
 
     def _reset(self):
         self._events = 0
         self._reason = None
         self._warnings = []
-        self._pending_single_step = False
+        self._uncontinued = False
 
     def _on_event(self, event):
         """Record a hit on our slot; leave every other single-step alone.
@@ -235,7 +250,9 @@ class MemoryWatch:
         the debugger.
 
         The budget is checked before recording, so ``max_events=0`` records
-        nothing instead of one event that then trips the limit.
+        nothing instead of one event that then trips the limit. Either way the
+        hit is real: its dr6 bit is cleared before the stop, so the caller's
+        next single-step cannot be mistaken for another write.
         """
         if event.type != 'EXCEPTION':
             return None
@@ -245,15 +262,14 @@ class MemoryWatch:
             return None
 
         try:
-            dr6 = self.dbg.get_registers(event.tid).get('dr6', 0)
+            dr6 = self._get_context(event.tid).get('dr6', 0)
         except (OSError, PydbgError):
             return None
         if not dr6 & (1 << self._slot):
             return None
 
         if self._events >= self.max_events:
-            self._reason = STOP_MAX_EVENTS
-            self._pending_single_step = True
+            self._stop_at_budget(event.tid)
             return False
 
         recorded = TraceEvent(kind=MEM_WRITE, tid=event.tid, rva=0,
@@ -266,9 +282,24 @@ class MemoryWatch:
         # Clear the slot's dr6 bit: it latches, and without this the next
         # single-step could not be told apart from this hit.
         try:
-            self.dbg.set_registers(event.tid, {'dr6': 0})
+            self._set_context(event.tid, {'dr6': 0})
         except (OSError, PydbgError):
             self._warnings.append("could not clear dr6")
-            self._pending_single_step = True
+            self._uncontinued = True
             return False
         return None
+
+    def _stop_at_budget(self, tid):
+        """Clear the latched slot and stop with the event uncontinued.
+
+        The hit that trips the budget is a real hardware hit, so dr6's slot bit
+        is set. Leaving it there would make the caller's next single-step look
+        like another write; a failure to clear it is reported with the same
+        warning the post-record path uses and the run still stops.
+        """
+        try:
+            self._set_context(tid, {'dr6': 0})
+        except (OSError, PydbgError):
+            self._warnings.append("could not clear dr6")
+        self._reason = STOP_MAX_EVENTS
+        self._uncontinued = True

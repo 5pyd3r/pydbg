@@ -41,19 +41,20 @@ from ..disasm import DisasmEngine
 from ..exceptions import (
     PydbgError, ThreadError, TimeoutError as PydbgTimeoutError,
 )
+from . import _shared
 from .bbl import (
-    STOP_IDLE_TIMEOUT, STOP_MAX_EVENTS, STOP_TARGET_EXITED, TraceSummary,
+    STOP_IDLE_TIMEOUT, STOP_MAX_EVENTS, STOP_NO_MODULE, STOP_NO_TARGET,
+    STOP_TARGET_EXITED, TraceSummary,
 )
 from .format import INSTR, TraceEvent
 
 # Why a single-step window stopped. The first two are budgets (shared with the
 # block tracer); the rest are rules — a trace that ended because the window
-# moved somewhere it cannot describe, not because it was cut short.
+# moved somewhere it cannot describe, not because it was cut short. The
+# no-module/no-target reasons are shared with every tracer and live in bbl.
 STOP_LEFT_MODULE = "left_module"
 STOP_BREAKPOINT = "breakpoint"
 STOP_EXCEPTION = "exception"
-STOP_NO_MODULE = "no module"
-STOP_NO_TARGET = "no target"
 
 # Native and WOW64 status codes. A 32-bit target under a 64-bit debugger reports
 # the WOW64 pair, and recognising only the native one means the tracer waits
@@ -81,6 +82,11 @@ _STEP_EVENT_BUDGET = 16
 _STEP_WAIT_MS = 10_000
 
 _UNDECODABLE = "undecodable instruction"
+
+# A defensive warning when a recorded cursor is outside the named window. The
+# pre-drive checks should make this unreachable; if it ever fires, the trace
+# says so instead of silently producing an out-of-window rva.
+_OUTSIDE_MODULE = "instruction outside module"
 
 
 class InstructionTracer:
@@ -125,49 +131,10 @@ class InstructionTracer:
         self._warnings = []
         self._uncontinued = False
         self._engine_cache = None
+        # Thread handle opened once per run(); see `run()` for why.
+        self._h_thread = None
 
     # ── module resolution ──────────────────────────────────────
-
-    def _find_module(self):
-        """The module to window, or None when there is nothing to window."""
-        if self.module is not None:
-            return self.module
-        try:
-            modules = self.dbg.enum_modules()
-        except (PydbgError, OSError, TypeError):
-            return None
-        return modules[0] if modules else None
-
-    @staticmethod
-    def _module_region(module):
-        """(base_address, size) for a module dict or a (base, size) tuple."""
-        if isinstance(module, dict):
-            return module.get('base_address') or 0, module.get('size')
-        base, size = module
-        return base or 0, size
-
-    def _module_size(self, module):
-        """Byte span of the module: its PE image size, or its mapped region."""
-        base, size = self._module_region(module)
-        if size:
-            return size
-        try:
-            for region in self.dbg.enum_regions():
-                if region.get('base_address') == base:
-                    return region.get('region_size')
-        except (PydbgError, OSError, TypeError):
-            return None
-        return None
-
-    def _in_module(self, address):
-        """Whether an address lies in [base, base + size) — the reported window.
-
-        Checking before recording is what keeps every `rva` in `[0, size)`: the
-        event that names the next instruction is the only place the window can
-        learn it has left, and stopping there is the honest end of the window.
-        """
-        return (address is not None and self._base is not None
-                and self._base <= address < self._base + self._size)
 
     # ── running ────────────────────────────────────────────────
 
@@ -194,12 +161,12 @@ class InstructionTracer:
             self._reason = STOP_NO_TARGET
             return self._summary(started)
 
-        module = self._find_module()
+        module = _shared.find_module(self.dbg, self.module)
         if module is None:
             self._reason = STOP_NO_MODULE
             return self._summary(started)
-        base, size = self._module_region(module)
-        size = self._module_size(module) if not size else size
+        base, size = _shared.module_region(module)
+        size = _shared.module_size(self.dbg, module) if not size else size
         if not base or not size:
             self._reason = STOP_NO_MODULE
             return self._summary(started)
@@ -211,43 +178,69 @@ class InstructionTracer:
             self._reason = STOP_MAX_EVENTS
             return self._summary(started)
 
-        if start is not None:
-            if not self._in_module(start):
-                # Nothing to run to: the requested window is not in this module.
-                self._reason = STOP_LEFT_MODULE
-                return self._summary(started)
-            first_length = self._decode_length(start)
-            self.dbg.run_until(start, max_idle_timeouts=max_idle_timeouts)
-            event = self._finish_pending_step(pid, tid)
-            if event is None:
-                return self._summary(started)
-            self._record(start, first_length, tid)
-            if self._events >= self.max_instructions:
-                self._reason = STOP_MAX_EVENTS
-                self._uncontinued = True
-                return self._summary(started)
-            self._cursor = self._current_ip(tid)
-        else:
-            if tid in self.dbg._session.pending_single_step:
-                # The caller stopped on a breakpoint; finish its single step so
-                # the window starts after the instruction that was stopped on.
+        if start is not None and not _shared.in_module(start, base, size):
+            # Nothing to run to: the requested window is not in this module.
+            self._reason = STOP_LEFT_MODULE
+            return self._summary(started)
+
+        # One thread handle for the whole run. Reading a context through a *tid*
+        # makes the facade enumerate the target's threads on every access
+        # (~36 ms measured here); a step loop doing that twice per instruction
+        # would spend nearly all its time enumerating. The handle is the
+        # capability object the README allows, not a second debugger API.
+        h_thread = self.dbg.open_thread(tid)
+        self._h_thread = h_thread
+        try:
+            if start is not None:
+                first_length = self._decode_length(start)
+                self.dbg.run_until(start, max_idle_timeouts=max_idle_timeouts)
                 event = self._finish_pending_step(pid, tid)
                 if event is None:
                     return self._summary(started)
-            self._cursor = self._current_ip(tid)
+                self._record(start, first_length, tid)
+                if self._events >= self.max_instructions:
+                    self._reason = STOP_MAX_EVENTS
+                    self._uncontinued = True
+                    return self._summary(started)
+                self._cursor = self._current_ip()
+                if not _shared.in_module(self._cursor, base, size):
+                    # `start` was the window's last instruction: the next one
+                    # is outside it. Stop before driving, so no INSTR can be
+                    # recorded for an address in another module.
+                    self._reason = STOP_LEFT_MODULE
+                    self._uncontinued = True
+                    return self._summary(started)
+            else:
+                finished_step = False
+                if tid in self.dbg._session.pending_single_step:
+                    # The caller stopped on a breakpoint; finish its single step
+                    # so the window starts after the instruction stopped on.
+                    event = self._finish_pending_step(pid, tid)
+                    if event is None:
+                        return self._summary(started)
+                    finished_step = True
+                self._cursor = self._current_ip()
+                if not _shared.in_module(self._cursor, base, size):
+                    # The current stop is already outside the window: there is
+                    # nothing honest to record and no reason to drive.
+                    self._reason = STOP_LEFT_MODULE
+                    self._uncontinued = finished_step
+                    return self._summary(started)
 
-        self._set_tf(tid)
-        self.dbg.continue_event(pid, tid)
-        try:
-            status = self.dbg.run(self._on_event,
-                                  max_idle_timeouts=max_idle_timeouts)
-        except PydbgTimeoutError:
-            self._reason = STOP_IDLE_TIMEOUT
-        else:
-            if (status is not None
-                    and status.reason is ExitReason.TARGET_EXITED):
-                self._reason = STOP_TARGET_EXITED
-        return self._summary(started)
+            self._set_tf()
+            self.dbg.continue_event(pid, tid)
+            try:
+                status = self.dbg.run(self._on_event,
+                                      max_idle_timeouts=max_idle_timeouts)
+            except PydbgTimeoutError:
+                self._reason = STOP_IDLE_TIMEOUT
+            else:
+                if (status is not None
+                        and status.reason is ExitReason.TARGET_EXITED):
+                    self._reason = STOP_TARGET_EXITED
+            return self._summary(started)
+        finally:
+            self._close_thread(h_thread)
 
     def _reset(self):
         self._cursor = None
@@ -255,6 +248,7 @@ class InstructionTracer:
         self._reason = None
         self._warnings = []
         self._uncontinued = False
+        self._h_thread = None
 
     def _summary(self, started):
         """The run's facts, with the pending-stop flag derived, not stored."""
@@ -265,8 +259,8 @@ class InstructionTracer:
             elapsed_ns=time.perf_counter_ns() - started,
             instructions=self._events,
             warnings=tuple(self._warnings),
-            single_step_pending=(self._uncontinued
-                                 or bool(self.dbg._session.pending_single_step)),
+            single_step_pending=_shared.single_step_pending(
+                self.dbg, self._uncontinued),
         )
 
     # ── stepping ───────────────────────────────────────────────
@@ -294,6 +288,14 @@ class InstructionTracer:
             return None
 
         executed = self._cursor
+        if not _shared.in_module(executed, self._base, self._size):
+            # Defense in depth: the run's pre-drive checks should have stopped
+            # before stepping an out-of-window address. If one slips through,
+            # do not record it — an rva outside [0, size) would be a lie.
+            self._warn(_OUTSIDE_MODULE)
+            self._reason = STOP_LEFT_MODULE
+            self._uncontinued = True
+            return False
         if self._events >= self.max_instructions:
             self._reason = STOP_MAX_EVENTS
             self._uncontinued = True
@@ -302,7 +304,7 @@ class InstructionTracer:
         self._record(executed, self._decode_length(executed), event.tid)
         self._cursor = event.exception_addr
 
-        if not self._in_module(self._cursor):
+        if not _shared.in_module(self._cursor, self._base, self._size):
             self._reason = STOP_LEFT_MODULE
             self._uncontinued = True
             return False
@@ -313,7 +315,7 @@ class InstructionTracer:
 
         # TF was cleared when this exception was delivered, so every step has to
         # set it again; setting it once traces exactly one instruction.
-        self._set_tf(self._tid)
+        self._set_tf()
         return None
 
     def _record(self, address, length, tid):
@@ -353,9 +355,14 @@ class InstructionTracer:
             self._engine_cache = engine
         return self._engine_cache
 
-    def _current_ip(self, tid):
+    def _warn(self, message):
+        """Record a warning once, however many steps it applies to."""
+        if message not in self._warnings:
+            self._warnings.append(message)
+
+    def _current_ip(self):
         """The thread's RIP (or EIP), the address of the next instruction."""
-        registers = self.dbg.get_registers(tid)
+        registers = self.dbg.thread.get_context(self._h_thread)
         address = registers.get('rip') or registers.get('eip')
         if address is None:
             raise ThreadError(
@@ -363,11 +370,18 @@ class InstructionTracer:
                 "cannot be placed")
         return address
 
-    def _set_tf(self, tid):
+    def _set_tf(self):
         """Arm the trap flag for exactly one instruction."""
-        registers = self.dbg.get_registers(tid)
-        self.dbg.set_register(tid, 'eflags',
-                              registers.get('eflags', 0) | _TRAP_FLAG)
+        registers = self.dbg.thread.get_context(self._h_thread)
+        self.dbg.thread.set_context(
+            self._h_thread, {'eflags': registers.get('eflags', 0) | _TRAP_FLAG})
+
+    def _close_thread(self, h_thread):
+        """Close the run's thread handle, ignoring a dead thread's refusal."""
+        try:
+            self.dbg.close_handle(h_thread)
+        except (PydbgError, OSError):
+            pass
 
     def _finish_pending_step(self, pid, tid):
         """Complete a breakpoint's single step; leave the target paused on it.

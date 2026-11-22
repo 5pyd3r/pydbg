@@ -59,6 +59,23 @@ def module_base(dbg):
     return dbg.enum_modules()[0]["base_address"]
 
 
+def export_address(dbg, path, name):
+    """Absolute address of an export of the target's main module.
+
+    The base is the first module `dbg` reports, which is the image both the
+    instrument and the probe targets start from; `path` is the PE on disk whose
+    export table names the RVA. One implementation, because three tests had
+    drifted copies of it.
+    """
+    from pydbg.pe import PE
+
+    base = module_base(dbg)
+    for export in PE.from_file(path).exports:
+        if export.name == name:
+            return base + export.rva
+    raise AssertionError(f"export {name} not found in {path}")
+
+
 def entry_point(dbg):
     """Absolute address of the target PE entry point — a guaranteed-executed
     code address (reliable breakpoint/hook target)."""
