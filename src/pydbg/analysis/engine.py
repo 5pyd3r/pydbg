@@ -43,6 +43,16 @@ class StaticAnalyzer:
         self.decoder = InstructionDecoder(
             image, mode=mode, cache_size=self.config.decode_cache_size)
         self.functions = FunctionTable(image)
+        # The exception directory is the loader's own function table, ends
+        # included. Its begin RVAs are already a seed class; installing the
+        # ranges here makes `extents()` prefer them over "the next start",
+        # which is a guess that stops at the wrong place wherever the linker
+        # left padding between two functions. An image without the directory
+        # (every PE32) contributes nothing and behaves exactly as before.
+        self.functions.set_exact_extents(
+            {entry.begin_rva: entry.end_rva - entry.begin_rva
+             for entry in image.pe.exception_entries
+             if entry.end_rva > entry.begin_rva})
         self.xrefs = {}
         self.undecodable = set()
         self.indirect_sites = {}
