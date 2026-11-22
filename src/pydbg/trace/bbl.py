@@ -75,6 +75,9 @@ class TraceSummary:
     'events' counts BLOCK events recorded; 'blocks' counts the *distinct* block
     starts among them, because a loop can execute one block a thousand times.
 
+    'instructions' counts INSTR events. It is 0 for a block, memory or probe
+    trace, which records no instructions.
+
     'reason' is the stop reason, one of the STOP_* constants or None when the
     loop ended without setting one. 'truncated' is not stored: it is derived
     from 'reason', so a summary cannot claim to be complete while its reason
@@ -94,6 +97,7 @@ class TraceSummary:
     blocks: int
     reason: str | None
     elapsed_ns: int
+    instructions: int = 0
     warnings: tuple[str, ...] = ()
     single_step_pending: bool = False
 

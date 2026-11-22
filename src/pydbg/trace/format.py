@@ -17,8 +17,9 @@ from ..exceptions import PydbgError
 MAGIC = b"PDBGTRC\0"
 VERSION = 1
 
-# kind: rva / a / b carry different fields per kind (docs/analysis-coverage.md §8.2)
+# kind: rva / a / b carry different fields per kind (docs/analysis-coverage.md §8.2, §9.2)
 BLOCK, API, MARK, MEM_READ, MEM_WRITE = 1, 2, 3, 4, 5
+INSTR = 6
 
 # The v1 vocabulary, kept beside the numbers it names so the two cannot drift.
 # A kind absent from this map is still a valid int in a record; exporting it as
@@ -29,6 +30,7 @@ KIND_NAMES = {
     MARK: "MARK",
     MEM_READ: "MEM_READ",
     MEM_WRITE: "MEM_WRITE",
+    INSTR: "INSTR",
 }
 
 _HEADER = struct.Struct("<8sHH")
@@ -58,6 +60,8 @@ class TraceEvent:
     API: rva is the return address, a is the hook id.
     MARK: a is the caller's mark.
     MEM_READ / MEM_WRITE: a is the address, b is the size.
+    INSTR: rva is the instruction address, a is its length in bytes (0 when
+        it could not be decoded), b is 0.
     """
 
     kind: int

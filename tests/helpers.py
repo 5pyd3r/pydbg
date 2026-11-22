@@ -24,6 +24,21 @@ def create_debugger(target=TEST_TARGET_PATH):
     return dbg, pid, tid
 
 
+def stop_at(dbg, addr, timeout_ms=5000):
+    """Run to addr with a temporary breakpoint, then finish its single-step.
+
+    Leaves the target paused on the single-step debug event, with no pending
+    breakpoint single-step. The caller resumes it with continue_event().
+    """
+    dbg.run_until(addr, max_wait_ms=timeout_ms, max_idle_timeouts=3)
+    pid, tid = dbg._session.pid, dbg._session.tid
+    dbg.continue_event(pid, tid)
+    event = dbg.wait_event(timeout_ms)
+    if event is None or not dbg.handle_ss_manual(tid):
+        raise AssertionError("expected the temporary breakpoint's single-step")
+    return event
+
+
 def teardown(dbg):
     """Robust teardown: terminate, drain events, close handles. Never raises."""
     try:
