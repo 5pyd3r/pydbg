@@ -5,7 +5,7 @@ sits, and whether the sections look like a packer wrote them. Keeping them
 here — rather than on `PE` — leaves the format parser a format parser, and
 keeps the result records importable without the Windows extension (ADR-0001).
 
-Every failure path returns an empty list or 0.0. A truncated or malformed
+Every failure path returns an empty list or None. A truncated or malformed
 image is ordinary input for this module: it is the shape of the thing being
 analysed, not an error worth aborting a scan for.
 """
@@ -38,13 +38,17 @@ class FoundString:
 class SectionEntropy:
     """One section's Shannon entropy, and how many bytes it was measured over.
 
-    `size` is the number of readable bytes, not the section's declared span:
-    the two differ whenever the file is truncated, and an entropy figure whose
-    denominator is an assumption is worse than one that states it.
+    `entropy` is None when the section had no readable bytes (`size` is 0
+    then). It used to be 0.0 for both an unreadable section and an all-zero
+    one, which spelled "not measured" as "measured, no entropy" — the exact
+    confusion this field exists to prevent. `size` is the number of readable
+    bytes, not the section's declared span: the two differ whenever the file
+    is truncated, and an entropy figure whose denominator is an assumption is
+    worse than one that states it.
     """
 
     name: str
-    entropy: float
+    entropy: float | None
     size: int
 
 
@@ -197,17 +201,19 @@ def section_entropy(pe):
     """Shannon entropy per section, in section-table order.
 
     Measured over the readable bytes, which for a section with a
-    virtual-only tail is its file-backed prefix rather than nothing. A section
-    with no readable bytes is reported at 0.0 with size 0 rather than dropped:
+    virtual-only tail is its file-backed prefix rather than nothing: when the
+    full span is unreadable and ``0 < size_of_raw_data < span``, the raw
+    prefix is measured and its size reported. A section with no readable
+    bytes at all is reported with entropy None and size 0 rather than dropped:
     a section missing from the list and a clean section would look alike to a
-    caller wondering where the high-entropy evidence went, and `size` says
-    what the number was actually computed over.
+    caller wondering where the high-entropy evidence went, and None keeps
+    "not measured" distinct from an all-zero section's measured 0.0.
     """
     found = []
     for section in pe.sections:
         data = _section_bytes(pe, section)
         if not data:
-            found.append(SectionEntropy(section.name, 0.0, 0))
+            found.append(SectionEntropy(section.name, None, 0))
             continue
         found.append(SectionEntropy(section.name, _shannon_entropy(data),
                                     len(data)))
@@ -230,7 +236,8 @@ def packing_hints(pe, entropy_threshold=7.0, low_import_threshold=8):
     entropies = section_entropy(pe)
     return PackingHints(
         high_entropy_sections=[section.name for section in entropies
-                               if section.entropy >= entropy_threshold],
+                               if section.entropy is not None
+                               and section.entropy >= entropy_threshold],
         write_exec_sections=[section.name for section in pe.sections
                              if section.is_executable and section.is_writable],
         low_import_count=len(pe.imports) < low_import_threshold,
