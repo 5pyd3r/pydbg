@@ -6,4 +6,4 @@ option('enable-llvm-instrument',
 option('llvm-config',
   type : 'string',
   value : '',
-  description : 'Path to llvm-config binary. Default: search prebuilt LLVM 22 locations.')
+  description : 'Path to llvm-config. Default: search llvm-config on PATH.')

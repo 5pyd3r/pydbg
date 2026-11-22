@@ -118,6 +118,8 @@ CI：`pull_request` 与 `push(master)`；`build-and-test` 用 MSVC 构建并跑�
 
 ## 已知限制
 
+- `instrument` 特性自 v0.2 冻结：不新增功能；LLVM 路径由 `-Dllvm-config`
+  指定（或 PATH 上的 `llvm-config`），后端是可选构建，核心安装不链接 LLVM。
 - x64 目标的 trampoline 不修正 RIP-relative 指令。
 - `instrument` 的 C 子集只支持 `int`/`void`；`&&`/`||` 不保留短路求值。
 - 多线程安全由调用方负责（插桩/inline hook 需自行挂起其他线程）。
