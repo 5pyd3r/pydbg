@@ -132,8 +132,8 @@
    启发；无 `.pdata` 时行为不变。
 2. **S9 核心**：`analysis/decompile/`（`ir.py` / `expr.py` / `render.py`），公开
    `decompile_function(result, rva)`。S0 取范围、S1 降 IR、S2 块内表达式、S5 文本。
-3. **S9 结构化**：`structure.py`——支配树、区间、`if/else`、`while`、`do-while`、`switch`、
-   不可约 `goto`。
+3. **S9 结构化**：`structure.py`——支配树 + 自然循环（区间法是可选替代，本实现不用它）、
+   `if/else`、`while`、`do-while`、`switch`、不可约 `goto`。
 
 ### 7.3 API
 
@@ -146,7 +146,8 @@ DecompiledFunction(rva, text, blocks, extra_blocks, complete, unhandled, warning
 - `extra_blocks`：跳表命名的、CFG 从未构建的块起点，升序；非空时 `warnings` 含
   `jump-table blocks`。两者分开，调用方拿 `blocks` 与 `build_function_cfg` 对照时不会
   因为并入而自动成立。
-- `text`：C 风格，带地址注释；命名用 `sub_<rva>` / `field_<n>` / `arg_<n>`。
+- `text`：C 风格，带地址注释；函数命名用 `sub_<rva>`，内存操作数保持原始
+  `[base + disp]` 形状，不做变量/字段命名——变量与结构体恢复属 Phase 5，本阶段不承诺。
 - `unhandled`：`(rva, mnemonic)` 元组，数量与 `text` 里 `// unhandled:` 行数一致。
 - `complete=False`：CFG 有未解析边或被截断；`warnings` 说明原因。
 
@@ -155,11 +156,13 @@ DecompiledFunction(rva, text, blocks, extra_blocks, complete, unhandled, warning
 整数指令：`mov` / `lea` / `add` / `sub` / `and` / `or` / `xor` / `imul` / `inc` / `dec` /
 `neg` / `not` / `cmp` / `test` / `jcc` / `jmp` / `call` / `ret` / `push` / `pop`。
 EFLAGS 作为伪寄存器：写指令声明写全 6 个标志，`jcc` 声明读它实际需要的子集；子寄存器别名
-（`al/ax/eax/rax` 等）归一。栈指针只用于识别参数/局部变量，不做完整帧还原。
+（`al/ax/eax/rax` 等）归一。`push`/`pop` 可能降成显式的栈指针调整；栈指针不用于参数/局部变量
+恢复（属 Phase 5），也不做完整帧还原。
 
 ### 7.5 验收
 
-1. 五类控制流各有 golden 测试：`if/else`、`while`、`do-while`、嵌套 `for` + `break/continue`、4 分支 `switch`。
+1. 五类控制流各有 golden 测试：`if/else`、`while`、`do-while`、嵌套循环（C 的 `for` 与
+   `while` 共用一种形状）+ `break/continue`、4 分支 `switch`。
 2. 输出引用的 RVA 集合 ==（CFG 块的指令集合 ∪ `extra_blocks` 的指令集合），且
    CFG 块的指令集合 ⊆ 输出；不静默丢，switch 也按此等式验收（不排除）。
 3. `// unhandled:` 行数 == IR 里 `Opaque` 语句数。
