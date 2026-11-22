@@ -208,6 +208,62 @@ def build_bound_image(declared_size=None):
     return builder.build()
 
 
+def build_load_config_image(magic=0x20B, declared_size=None, dir_size=None):
+    """Image with an IMAGE_LOAD_CONFIG_DIRECTORY32/64 at RVA_RDATA.
+
+    Every field is written at the offset winnt.h gives it, not at an offset the
+    parser also computes: the 64-bit form widens every pointer and moves
+    ProcessAffinityMask ahead of ProcessHeapFlags, so a parser that reused the
+    32-bit offsets would return plausible-looking wrong numbers here.
+    """
+    builder, _ = _base_image(magic)
+    is64 = magic == 0x20B
+    if declared_size is None:
+        declared_size = 0x94 if is64 else 0x5C
+    blob = bytearray(0x94 if is64 else 0x5C)
+
+    fields = [
+        (0x04, "<I", 0x5A000000),       # TimeDateStamp
+        (0x08, "<H", 2),                # MajorVersion
+        (0x0A, "<H", 5),                # MinorVersion
+        (0x0C, "<I", 0x11),             # GlobalFlagsClear
+        (0x10, "<I", 0x22),             # GlobalFlagsSet
+    ]
+    if is64:
+        fields += [
+            (0x58, "<Q", 0x140001000),  # SecurityCookie
+            (0x60, "<Q", 0x2000),       # SEHandlerTable
+            (0x68, "<Q", 3),            # SEHandlerCount
+            (0x70, "<Q", 0x1010),       # GuardCFCheckFunctionPointer
+            (0x78, "<Q", 0x1020),       # GuardCFDispatchFunctionPointer
+            (0x80, "<Q", 0x1030),       # GuardCFFunctionTable
+            (0x88, "<Q", 4),            # GuardCFFunctionCount
+            (0x90, "<I", 0x100),        # GuardFlags
+        ]
+    else:
+        fields += [
+            (0x3C, "<I", 0x40001000),   # SecurityCookie
+            (0x40, "<I", 0x2000),       # SEHandlerTable
+            (0x44, "<I", 3),            # SEHandlerCount
+            (0x48, "<I", 0x1010),       # GuardCFCheckFunctionPointer
+            (0x4C, "<I", 0x1020),       # GuardCFDispatchFunctionPointer
+            (0x50, "<I", 0x1030),       # GuardCFFunctionTable
+            (0x54, "<I", 4),            # GuardCFFunctionCount
+            (0x58, "<I", 0x100),        # GuardFlags
+        ]
+
+    struct.pack_into("<I", blob, 0, declared_size)
+    for offset, fmt, value in fields:
+        struct.pack_into(fmt, blob, offset, value)
+
+    rdata = bytearray(0x400)
+    _place(rdata, RVA_RDATA, bytes(blob))
+    builder.add_section(".rdata", bytes(rdata), RVA_RDATA, 0x40000040)
+    size = len(blob) if dir_size is None else dir_size
+    builder.add_dir(10, RVA_RDATA, size)
+    return builder.build()
+
+
 def build_rich_image(key=0x12345678, pairs=((0x0101, 5), (0x0202, 3))):
     builder, _ = _base_image()
     blob = struct.pack("<I", 0x536E6144 ^ key)          # "DanS", encoded
@@ -612,6 +668,91 @@ class TestBoundImports(unittest.TestCase):
 
         builder, _ = _base_image()
         self.assertEqual(PE(builder.build()).bound_imports, [])
+
+
+class TestLoadConfig(unittest.TestCase):
+    """Data directory 10 — IMAGE_LOAD_CONFIG_DIRECTORY32/64.
+
+    Its first field is its own size, so the structure is versioned: fields an
+    older version does not define must not be reported as zero. The 32-bit and
+    64-bit layouts also diverge, which is what the two layout tests pin down.
+    """
+
+    def test_pe32plus_fields_use_the_64_bit_layout(self):
+        from pydbg.pe import PE
+
+        config = PE(build_load_config_image(0x20B)).load_config
+        self.assertIsNotNone(config)
+        self.assertEqual(config.size, 0x94)
+        self.assertEqual(config.timestamp, 0x5A000000)
+        self.assertEqual((config.major_version, config.minor_version), (2, 5))
+        self.assertEqual(config.global_flags_clear, 0x11)
+        self.assertEqual(config.global_flags_set, 0x22)
+        self.assertEqual(config.security_cookie, 0x140001000)
+        self.assertEqual(config.se_handler_table, 0x2000)
+        self.assertEqual(config.se_handler_count, 3)
+        self.assertEqual(config.guard_cf_check_function, 0x1010)
+        self.assertEqual(config.guard_cf_dispatch_function, 0x1020)
+        self.assertEqual(config.guard_cf_function_table, 0x1030)
+        self.assertEqual(config.guard_cf_function_count, 4)
+        self.assertEqual(config.guard_flags, 0x100)
+
+    def test_pe32_fields_use_the_32_bit_layout(self):
+        from pydbg.pe import PE
+
+        config = PE(build_load_config_image(0x10B)).load_config
+        self.assertIsNotNone(config)
+        self.assertEqual(config.size, 0x5C)
+        self.assertEqual(config.timestamp, 0x5A000000)
+        self.assertEqual((config.major_version, config.minor_version), (2, 5))
+        self.assertEqual(config.global_flags_clear, 0x11)
+        self.assertEqual(config.global_flags_set, 0x22)
+        self.assertEqual(config.security_cookie, 0x40001000)
+        self.assertEqual(config.se_handler_table, 0x2000)
+        self.assertEqual(config.se_handler_count, 3)
+        self.assertEqual(config.guard_cf_check_function, 0x1010)
+        self.assertEqual(config.guard_cf_dispatch_function, 0x1020)
+        self.assertEqual(config.guard_cf_function_table, 0x1030)
+        self.assertEqual(config.guard_cf_function_count, 4)
+        self.assertEqual(config.guard_flags, 0x100)
+
+    def test_truncated_directory_keeps_the_readable_fields(self):
+        """Half a directory parses half a struct; the tail is None, not zero."""
+        from pydbg.pe import PE
+
+        config = PE(build_load_config_image(dir_size=0x50)).load_config
+        self.assertIsNotNone(config)
+        self.assertEqual(config.size, 0x94)
+        self.assertEqual(config.global_flags_set, 0x22)
+        self.assertIsNone(config.security_cookie)
+        self.assertIsNone(config.se_handler_table)
+        self.assertIsNone(config.guard_flags)
+
+    def test_declared_size_bounds_the_fields(self):
+        """An older version's Size excludes fields whose bytes may still exist."""
+        from pydbg.pe import PE
+
+        config = PE(build_load_config_image(declared_size=0x40)).load_config
+        self.assertIsNotNone(config)
+        self.assertEqual(config.size, 0x40)
+        self.assertEqual(config.global_flags_set, 0x22)
+        self.assertIsNone(config.security_cookie)
+        self.assertIsNone(config.guard_flags)
+
+    def test_absent_directory_is_none(self):
+        from pydbg.pe import PE
+
+        builder, _ = _base_image()
+        self.assertIsNone(PE(builder.build()).load_config)
+
+    def test_all_zero_directory_is_none(self):
+        """A zero Size field is not a struct of version zero — it is no struct."""
+        from pydbg.pe import PE
+
+        data = build_load_config_image()
+        data = bytearray(data)
+        data[RVA_RDATA:RVA_RDATA + 0x94] = b"\x00" * 0x94
+        self.assertIsNone(PE(bytes(data)).load_config)
 
 
 def build_broken_rich_image(blob):

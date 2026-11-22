@@ -5,7 +5,7 @@ import struct
 from .types import (
     DosHeader, FileHeader, OptionalHeader, DataDirectory,
     SectionHeader, ExportEntry, ImportEntry, DelayImport,
-    BoundImport, BoundImportForwarder,
+    BoundImport, BoundImportForwarder, LoadConfig,
     RelocationEntry, RelocationBlock, TLSDirectory, DebugEntry,
     CodeViewInfo, ExceptionEntry, RichHeader, RichHeaderEntry,
 )
@@ -21,6 +21,7 @@ DIR_SECURITY = 4
 DIR_BASERELOC = 5
 DIR_DEBUG = 6
 DIR_TLS = 9
+DIR_LOAD_CONFIG = 10
 DIR_BOUND_IMPORT = 11
 DIR_DELAY_IMPORT = 13
 
@@ -49,6 +50,50 @@ MAX_DELAY_IMPORTS = 4096
 # cap below is telemetry about a lie rather than the format's own limit.
 MAX_BOUND_IMPORTS = 4096
 MAX_BOUND_FORWARDERS = 4096
+
+# IMAGE_LOAD_CONFIG_DIRECTORY32/64 through GuardFlags. The offsets are
+# winnt.h's, and there is one table per magic because the layouts diverge from
+# ProcessAffinityMask onward: the 64-bit form widens every pointer and puts
+# ProcessAffinityMask ahead of ProcessHeapFlags. Reusing one table for both
+# would return plausible-looking wrong numbers rather than fail.
+_LOAD_CONFIG_64 = (
+    ('size', 0x00, '<I'),
+    ('timestamp', 0x04, '<I'),
+    ('major_version', 0x08, '<H'),
+    ('minor_version', 0x0A, '<H'),
+    ('global_flags_clear', 0x0C, '<I'),
+    ('global_flags_set', 0x10, '<I'),
+    ('security_cookie', 0x58, '<Q'),
+    ('se_handler_table', 0x60, '<Q'),
+    ('se_handler_count', 0x68, '<Q'),
+    ('guard_cf_check_function', 0x70, '<Q'),
+    ('guard_cf_dispatch_function', 0x78, '<Q'),
+    ('guard_cf_function_table', 0x80, '<Q'),
+    ('guard_cf_function_count', 0x88, '<Q'),
+    ('guard_flags', 0x90, '<I'),
+)
+
+_LOAD_CONFIG_32 = (
+    ('size', 0x00, '<I'),
+    ('timestamp', 0x04, '<I'),
+    ('major_version', 0x08, '<H'),
+    ('minor_version', 0x0A, '<H'),
+    ('global_flags_clear', 0x0C, '<I'),
+    ('global_flags_set', 0x10, '<I'),
+    ('security_cookie', 0x3C, '<I'),
+    ('se_handler_table', 0x40, '<I'),
+    ('se_handler_count', 0x44, '<I'),
+    ('guard_cf_check_function', 0x48, '<I'),
+    ('guard_cf_dispatch_function', 0x4C, '<I'),
+    ('guard_cf_function_table', 0x50, '<I'),
+    ('guard_cf_function_count', 0x54, '<I'),
+    ('guard_flags', 0x58, '<I'),
+)
+
+_LOAD_CONFIG_LAYOUT = {
+    0x20B: (_LOAD_CONFIG_64, 0x94),
+    0x10B: (_LOAD_CONFIG_32, 0x5C),
+}
 
 
 def _format_guid(raw: bytes) -> str:
@@ -455,6 +500,38 @@ class PEParser:
             if truncated:
                 break
         return entries
+
+    def parse_load_config(self, data_dirs: dict, magic: int):
+        """Load-config directory (data directory 10), or None when absent.
+
+        The structure's first field is its own size, and that size is the
+        version marker: a field whose offset the declared version — or the
+        readable bytes — does not cover comes back as None. The 64-bit and
+        32-bit layouts differ, so 'magic' selects the table to read by.
+        """
+        dd = data_dirs.get(DIR_LOAD_CONFIG)
+        if dd is None or dd.virtual_address == 0 or dd.size == 0:
+            return None
+
+        layout, full_size = _LOAD_CONFIG_LAYOUT.get(
+            magic, (_LOAD_CONFIG_64, 0x94))
+        raw = self._read_rva(dd.virtual_address, min(dd.size, full_size))
+        if raw is None or len(raw) < 8:
+            return None
+
+        declared = struct.unpack_from('<I', raw, 0)[0]
+        if declared < 8:
+            return None                     # zero Size is no struct at all
+
+        end = min(declared, len(raw))
+        values = {}
+        for name, offset, fmt in layout:
+            field_size = struct.calcsize(fmt)
+            if offset + field_size <= end:
+                values[name] = struct.unpack_from(fmt, raw, offset)[0]
+            else:
+                values[name] = None
+        return LoadConfig(**values)
 
     # ── data directories 3, 5, 6, 9 and the Rich header ────────
     #

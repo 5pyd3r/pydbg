@@ -4,7 +4,7 @@ from .types import (
     IMAGE_SCN_MEM_EXECUTE, IMAGE_SCN_MEM_WRITE,
     DosHeader, FileHeader, OptionalHeader, DataDirectory,
     SectionHeader, ExportEntry, ImportEntry, DelayImport,
-    BoundImport, BoundImportForwarder,
+    BoundImport, BoundImportForwarder, LoadConfig,
     RelocationEntry, RelocationBlock, TLSDirectory, DebugEntry,
     CodeViewInfo, ExceptionEntry, RichHeader, RichHeaderEntry,
 )
@@ -119,6 +119,13 @@ class PE:
             self.optional_header.data_directories))
 
     @property
+    def load_config(self):
+        """Load-config directory (data directory 10), or None."""
+        return self._cached('load_config', lambda: self._parser.parse_load_config(
+            self.optional_header.data_directories,
+            self.optional_header.magic))
+
+    @property
     def relocations(self):
         """Base relocation blocks (data directory 5)."""
         return self._cached('relocations', lambda: self._parser.parse_relocations(
@@ -228,7 +235,7 @@ __all__ = [
     'PE',
     'DosHeader', 'FileHeader', 'OptionalHeader', 'DataDirectory',
     'SectionHeader', 'ExportEntry', 'ImportEntry', 'DelayImport',
-    'BoundImport', 'BoundImportForwarder',
+    'BoundImport', 'BoundImportForwarder', 'LoadConfig',
     'IMAGE_SCN_MEM_EXECUTE', 'IMAGE_SCN_MEM_WRITE',
     'RelocationEntry', 'RelocationBlock', 'TLSDirectory', 'DebugEntry',
     'CodeViewInfo', 'ExceptionEntry', 'RichHeader', 'RichHeaderEntry',

@@ -144,6 +144,33 @@ class BoundImport:
 
 
 @dataclass
+class LoadConfig:
+    """The common subset of IMAGE_LOAD_CONFIG_DIRECTORY32/64 (directory 10).
+
+    'size' is the structure's own declared Size, which is its version marker:
+    a field the declared version does not define — or a truncated directory
+    does not reach — is None rather than a fabricated zero. A zero
+    SecurityCookie and "this build predates SecurityCookie" are different
+    findings and must not be spelled the same way.
+    """
+
+    size: int
+    timestamp: int
+    major_version: int | None
+    minor_version: int | None
+    global_flags_clear: int | None
+    global_flags_set: int | None
+    security_cookie: int | None
+    se_handler_table: int | None
+    se_handler_count: int | None
+    guard_cf_check_function: int | None
+    guard_cf_dispatch_function: int | None
+    guard_cf_function_table: int | None
+    guard_cf_function_count: int | None
+    guard_flags: int | None
+
+
+@dataclass
 class RelocationEntry:
     """One IMAGE_REL_BASED_* fixup within a relocation block."""
 
