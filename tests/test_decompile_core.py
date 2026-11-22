@@ -176,6 +176,21 @@ class TestUnhandled(unittest.TestCase):
         self.assertEqual(result.text.count("// unhandled:"),
                          len(result.unhandled))
 
+    def test_a_control_register_destination_is_opaque_not_a_dead_write(self):
+        """`mov cr0, rax` changes the machine, so it cannot be a dead write.
+
+        cr0 is not a general-purpose register: the integer model has no value
+        for it and writing it has hardware effects a removed statement would
+        erase. It belongs in the honest `// unhandled:` form, not in the
+        `// dead:` comment that says "this instruction did nothing".
+        """
+        result = decompile(bytes.fromhex("0f22c0c3"))     # mov cr0, rax
+
+        self.assertEqual(result.unhandled, ((TEXT_RVA, "mov"),))
+        self.assertIn("// unhandled: mov cr0, rax", result.text)
+        self.assertNotIn("// dead:", result.text)
+        self.assertNotIn("cr0 =", result.text)
+
     def test_the_supported_subset_produces_no_opaque_statements(self):
         """mov/lea/add/cmp/test/jcc/call/ret/push/pop/nop are all modelled."""
         result = decompile(bytes.fromhex(

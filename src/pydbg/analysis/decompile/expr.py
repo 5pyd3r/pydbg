@@ -353,14 +353,20 @@ def _pure_destination(stmt):
     instructions also writes EFLAGS: a later conditional branch may be reading
     the flags of a write whose register value is dead, and removing it would
     silently change which instruction the branch is about. A memory read can
-    fault, so `Load` is never called dead either.
+    fault, so `Load` is never called dead either. The destination must be a
+    known GPR family: a control, debug or segment register is not an integer
+    value, and its write has machine effects that this pass cannot see.
     """
     if isinstance(stmt, Assign):
-        return None if _has_memory(stmt.src) else family(stmt.dst)
-    if isinstance(stmt, UnOp) and stmt.op == "~":
-        if _has_memory(stmt.operand):
+        destination = family(stmt.dst)
+        if destination not in FAMILIES or _has_memory(stmt.src):
             return None
-        return family(stmt.dst)
+        return destination
+    if isinstance(stmt, UnOp) and stmt.op == "~":
+        destination = family(stmt.dst)
+        if destination not in FAMILIES or _has_memory(stmt.operand):
+            return None
+        return destination
     return None
 
 

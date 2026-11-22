@@ -420,6 +420,20 @@ def _opaque(insn, rva):
     return Opaque(rva=rva, text=text, mnemonic=insn.mnemonic)
 
 
+def _is_general_register(name):
+    """Whether 'name' is one of the general-purpose registers the model knows.
+
+    `expr` owns the register-alias table, but it imports this module, so the
+    lookup is local to this function. A control, debug or segment register is
+    not a GPR: writing one changes machine state the integer model does not
+    describe, so `mov` to it must stay Opaque rather than become a statement
+    the dead-write pass is free to discard.
+    """
+    from .expr import FAMILIES, family
+
+    return family(name) in FAMILIES
+
+
 def _lower_mov(decoder, image, insn, rva):
     ops = insn.operands
     if len(ops) != 2:
@@ -427,6 +441,8 @@ def _lower_mov(decoder, image, insn, rva):
     dst, src = ops
     if dst.kind == OP_REG:
         name = decoder.reg_name(dst.reg)
+        if not _is_general_register(name):
+            return None
         if src.kind == OP_MEM:
             return (Load(rva=rva, dst=name, addr=_mem(decoder, src)),)
         return (Assign(rva=rva, dst=name, src=_operand(decoder, src)),)
