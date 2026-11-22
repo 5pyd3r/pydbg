@@ -5,6 +5,7 @@ from .types import (
     DosHeader, FileHeader, OptionalHeader, DataDirectory,
     SectionHeader, ExportEntry, ImportEntry, DelayImport,
     BoundImport, BoundImportForwarder, LoadConfig, CLRHeader,
+    AuthenticodeLocation,
     RelocationEntry, RelocationBlock, TLSDirectory, DebugEntry,
     CodeViewInfo, ExceptionEntry, RichHeader, RichHeaderEntry,
 )
@@ -132,6 +133,12 @@ class PE:
             self.optional_header.data_directories))
 
     @property
+    def authenticode(self):
+        """Authenticode certificate location (data directory 4), or None."""
+        return self._cached('authenticode', lambda: self._parser.parse_security(
+            self.optional_header.data_directories))
+
+    @property
     def relocations(self):
         """Base relocation blocks (data directory 5)."""
         return self._cached('relocations', lambda: self._parser.parse_relocations(
@@ -242,6 +249,7 @@ __all__ = [
     'DosHeader', 'FileHeader', 'OptionalHeader', 'DataDirectory',
     'SectionHeader', 'ExportEntry', 'ImportEntry', 'DelayImport',
     'BoundImport', 'BoundImportForwarder', 'LoadConfig', 'CLRHeader',
+    'AuthenticodeLocation',
     'IMAGE_SCN_MEM_EXECUTE', 'IMAGE_SCN_MEM_WRITE',
     'RelocationEntry', 'RelocationBlock', 'TLSDirectory', 'DebugEntry',
     'CodeViewInfo', 'ExceptionEntry', 'RichHeader', 'RichHeaderEntry',

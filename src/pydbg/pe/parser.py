@@ -6,6 +6,7 @@ from .types import (
     DosHeader, FileHeader, OptionalHeader, DataDirectory,
     SectionHeader, ExportEntry, ImportEntry, DelayImport,
     BoundImport, BoundImportForwarder, LoadConfig, CLRHeader,
+    AuthenticodeLocation,
     RelocationEntry, RelocationBlock, TLSDirectory, DebugEntry,
     CodeViewInfo, ExceptionEntry, RichHeader, RichHeaderEntry,
 )
@@ -580,6 +581,20 @@ class PEParser:
             else:
                 values[name] = None
         return CLRHeader(**values)
+
+    def parse_security(self, data_dirs: dict):
+        """Authenticode certificate location (data directory 4), or None.
+
+        This directory is the odd one out: its VirtualAddress is a *file
+        offset*, not an RVA, because the certificate is not part of the mapped
+        image. It is reported verbatim; the certificate is not validated or
+        decoded here, which is what keeps "there is a signature at N bytes"
+        separate from "that signature verifies".
+        """
+        dd = data_dirs.get(DIR_SECURITY)
+        if dd is None or dd.virtual_address == 0 or dd.size == 0:
+            return None
+        return AuthenticodeLocation(offset=dd.virtual_address, size=dd.size)
 
     # ── data directories 3, 5, 6, 9 and the Rich header ────────
     #

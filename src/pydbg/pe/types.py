@@ -193,6 +193,20 @@ class CLRHeader:
 
 
 @dataclass
+class AuthenticodeLocation:
+    """Where the image's WIN_CERTIFICATE lives (data directory 4).
+
+    'offset' is a file offset, not an RVA: the certificate sits outside the
+    mapped image. It is reported exactly as the directory stores it, and the
+    bytes are not validated or decoded here — this locates a signature, it
+    does not verify one.
+    """
+
+    offset: int
+    size: int
+
+
+@dataclass
 class RelocationEntry:
     """One IMAGE_REL_BASED_* fixup within a relocation block."""
 

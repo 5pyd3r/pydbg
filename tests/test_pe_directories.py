@@ -286,6 +286,26 @@ def build_clr_image(dir_size=None):
     return builder.build()
 
 
+def build_security_image(cert_size=0x10, declared_size=None):
+    """Image whose security directory points at an appended WIN_CERTIFICATE.
+
+    The blob is appended past the last section, so its file offset is not a
+    valid RVA. A parser that ran it through the RVA view would find nothing —
+    which is exactly the trap this directory sets.
+    """
+    builder, _ = _base_image()
+    base = builder.build()
+    offset = len(base)
+    certificate = (struct.pack("<IHH", cert_size, 0x0200, 0x0002)
+                   + b"\xAA" * max(0, cert_size - 8))
+    builder.add_dir(4, offset, cert_size if declared_size is None
+                    else declared_size)
+    data = builder.build()
+    if len(data) != offset:
+        raise AssertionError("adding a directory changed the image size")
+    return data + certificate, offset
+
+
 def build_rich_image(key=0x12345678, pairs=((0x0101, 5), (0x0202, 3))):
     builder, _ = _base_image()
     blob = struct.pack("<I", 0x536E6144 ^ key)          # "DanS", encoded
@@ -826,6 +846,53 @@ class TestCLRHeader(unittest.TestCase):
         data = bytearray(build_clr_image())
         data[RVA_RDATA:RVA_RDATA + 0x48] = b"\x00" * 0x48
         self.assertIsNone(PE(bytes(data)).clr_header)
+
+
+class TestAuthenticodeLocation(unittest.TestCase):
+    """Data directory 4 — the Authenticode certificate location.
+
+    Its VirtualAddress is a file offset, not an RVA: the certificate sits
+    outside the mapped image. The parser reports that location verbatim and
+    does not validate the signature.
+    """
+
+    def test_offset_is_a_file_offset_and_size_is_the_certificate_length(self):
+        from pydbg.pe import PE
+
+        data, offset = build_security_image(cert_size=0x10)
+        pe = PE(data)
+        location = pe.authenticode
+        self.assertIsNotNone(location)
+        self.assertEqual(location.offset, offset)
+        self.assertEqual(location.size, 0x10)
+        # The first dword of WIN_CERTIFICATE is dwLength, the blob's own size.
+        raw = pe.source.try_read(location.offset, 4)
+        self.assertEqual(struct.unpack_from("<I", raw, 0)[0], 0x10)
+        # Control: treating the offset as an RVA finds nothing, because the
+        # blob is past the last section. This is why the directory exists.
+        self.assertIsNone(pe.read_rva(offset, 4))
+
+    def test_absent_directory_is_none(self):
+        from pydbg.pe import PE
+
+        builder, _ = _base_image()
+        self.assertIsNone(PE(builder.build()).authenticode)
+
+    def test_zero_size_directory_is_none(self):
+        from pydbg.pe import PE
+
+        data, _ = build_security_image(cert_size=0x10, declared_size=0)
+        self.assertIsNone(PE(data).authenticode)
+
+    def test_a_size_past_the_file_is_still_reported_verbatim(self):
+        """Locating is this directory's job; validating is not."""
+        from pydbg.pe import PE
+
+        data, offset = build_security_image(cert_size=0x10,
+                                            declared_size=0x100)
+        location = PE(data).authenticode
+        self.assertIsNotNone(location)
+        self.assertEqual((location.offset, location.size), (offset, 0x100))
 
 
 def build_broken_rich_image(blob):
