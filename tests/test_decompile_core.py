@@ -100,6 +100,27 @@ class TestBlockExpressions(unittest.TestCase):
         self.assertIn("rcx = rdx;", result.text)
         self.assertNotIn("rcx = rax;", result.text)
 
+    def test_rip_relative_operand_resolves_like_refs_memory_address(self):
+        """A fixed-address operand is resolved by the analysis's one converter.
+
+        `refs.memory_address` is the single place an operand becomes an RVA.
+        The lift must not recompute `next_instruction + disp` and the renderer
+        must not print a `[rip + disp]` the reader has to finish resolving: the
+        address is computed once and carried as an RVA.
+        """
+        from pydbg.analysis.refs import memory_address
+        from pydbg.disasm.engine import OP_MEM
+        code = bytes.fromhex("8b0500000000" "c3")     # mov eax, [rip]
+        result = analyze(code)
+        insn = result.decoder.decode_one(TEXT_RVA)
+        operand = next(op for op in insn.operands if op.kind == OP_MEM)
+
+        expected = memory_address(insn, operand, result.image)
+        decompiled = decompile(code)
+
+        self.assertEqual(expected, TEXT_RVA + 6)
+        self.assertIn(f"[0x{expected:x}]", decompiled.text)
+
     def test_constant_is_folded_into_an_unrelated_destination(self):
         """A known constant on a source operand folds: `imul eax,ecx,4` -> 20.
 
@@ -140,6 +161,23 @@ class TestBlockExpressions(unittest.TestCase):
         self.assertNotIn("// dead:", result.text)
 
 
+class TestBlockSet(unittest.TestCase):
+    """`blocks` is the CFG's own block set, not the renderer's block set."""
+
+    def test_blocks_are_the_cfg_starts_and_extra_blocks_is_empty(self):
+        """Without a jump table there is nothing the CFG did not build."""
+        from pydbg.analysis import build_function_cfg, decompile_function
+        code = bytes.fromhex("85c07704" "83c001" "c3" "55" "c3")
+        result = analyze(code)
+        cfg = build_function_cfg(result.decoder, result.image,
+                                 result.functions, TEXT_RVA)
+
+        decompiled = decompile_function(result, TEXT_RVA)
+
+        self.assertEqual(decompiled.blocks, tuple(sorted(cfg.blocks)))
+        self.assertEqual(decompiled.extra_blocks, ())
+
+
 class TestUnhandled(unittest.TestCase):
     """Instructions outside the model stay visible and are counted once."""
 
@@ -158,6 +196,21 @@ class TestUnhandled(unittest.TestCase):
                          ((TEXT_RVA, "cpuid"), (TEXT_RVA + 2, "syscall")))
         self.assertEqual(result.text.count("// unhandled:"),
                          len(result.unhandled))
+
+    def test_a_control_register_destination_is_opaque_not_a_dead_write(self):
+        """`mov cr0, rax` changes the machine, so it cannot be a dead write.
+
+        cr0 is not a general-purpose register: the integer model has no value
+        for it and writing it has hardware effects a removed statement would
+        erase. It belongs in the honest `// unhandled:` form, not in the
+        `// dead:` comment that says "this instruction did nothing".
+        """
+        result = decompile(bytes.fromhex("0f22c0c3"))     # mov cr0, rax
+
+        self.assertEqual(result.unhandled, ((TEXT_RVA, "mov"),))
+        self.assertIn("// unhandled: mov cr0, rax", result.text)
+        self.assertNotIn("// dead:", result.text)
+        self.assertNotIn("cr0 =", result.text)
 
     def test_the_supported_subset_produces_no_opaque_statements(self):
         """mov/lea/add/cmp/test/jcc/call/ret/push/pop/nop are all modelled."""
@@ -303,6 +356,14 @@ class TestFailureAndHonesty(unittest.TestCase):
 class TestFlagDeclarations(unittest.TestCase):
     """The EFLAGS pseudo-register contract the spec states in ir.py."""
 
+    def lower_first(self, code):
+        """The statements one instruction lowers to, inside a decodable image."""
+        from pydbg.analysis.decompile import ir
+
+        result = analyze(code + RET)
+        insn = result.decoder.decode_one(TEXT_RVA)
+        return ir.lower_instruction(result.decoder, result.image, insn)
+
     def test_arithmetic_declares_all_six_flags(self):
         from pydbg.analysis.decompile import ir
 
@@ -320,6 +381,55 @@ class TestFlagDeclarations(unittest.TestCase):
         from pydbg.analysis.decompile import ir
 
         self.assertEqual(ir.flags_written("not"), ())
+
+    def test_flag_writing_statements_carry_the_flags(self):
+        """The declaration has to reach the statements, or it is decorative.
+
+        `add`, `cmp` and `test` all write all six flags in the conservative
+        model; the statement they lower to says so.
+        """
+        from pydbg.analysis.decompile import ir
+
+        for name, code in (("add", "83c003"), ("cmp", "83f805"),
+                           ("test", "85c0")):
+            with self.subTest(instruction=name):
+                stmt = self.lower_first(bytes.fromhex(code))[0]
+                self.assertEqual(stmt.flags_written, ir.ALL_FLAGS)
+
+    def test_a_branch_statement_carries_the_flags_it_reads(self):
+        """A branch reads the condition table's subset, not all six."""
+        for code, expected in (("7400", ("zf",)), ("7700", ("cf", "zf"))):
+            with self.subTest(condition=expected):
+                stmt = self.lower_first(bytes.fromhex(code))[0]
+                self.assertEqual(stmt.flags_read, expected)
+
+    def test_a_branch_carries_the_operator_from_the_condition_table(self):
+        """The structure pass folds with this field, not a second copy of the table."""
+        self.assertEqual(self.lower_first(bytes.fromhex("7400"))[0].comparison,
+                         "==")                                  # je
+        self.assertIsNone(self.lower_first(bytes.fromhex("7700"))[0].comparison)
+        self.assertEqual(self.lower_first(bytes.fromhex("7c00"))[0].comparison,
+                         "<")                                   # jl
+
+    def test_not_carries_no_flags_through_recovery(self):
+        """`not` has no flag effect, and expression recovery keeps that fact."""
+        from pydbg.analysis.decompile import expr, ir
+
+        stmt = self.lower_first(bytes.fromhex("f7d0"))[0]
+        self.assertEqual(stmt.flags_written, ())
+        block = ir.IRBlock(rva=TEXT_RVA, stmts=(stmt,))
+        recovered = expr.recover({TEXT_RVA: block}, "x64")
+        self.assertEqual(recovered[TEXT_RVA].stmts[0].flags_written, ())
+
+    def test_arithmetic_flags_survive_expression_recovery(self):
+        """Recovery rebuilds the statement; it must carry the declaration over."""
+        from pydbg.analysis.decompile import expr, ir
+
+        stmt = self.lower_first(bytes.fromhex("83c003"))[0]
+        block = ir.IRBlock(rva=TEXT_RVA, stmts=(stmt,))
+        recovered = expr.recover({TEXT_RVA: block}, "x64")
+        self.assertEqual(recovered[TEXT_RVA].stmts[0].flags_written,
+                         ir.ALL_FLAGS)
 
 
 class TestArchitecture(unittest.TestCase):

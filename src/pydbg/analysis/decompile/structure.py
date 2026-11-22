@@ -178,34 +178,6 @@ class Structured:
 
 # ── condition knowledge ────────────────────────────────────────
 
-_ZF = Reg("eflags.zf", 1)
-_SF = Reg("eflags.sf", 1)
-_OF = Reg("eflags.of", 1)
-
-
-def _comparison_op(condition):
-    """The C operator a `jcc` condition means, or None when it is not folded.
-
-    Only the sign/zero relations with an exact C spelling are listed. Unsigned
-    relations (`jb`/`ja`/...) are deliberately absent: `eax < 5` would silently
-    claim a signedness the instruction did not state, and the `eflags.*` form
-    P5 prints does not have that problem.
-    """
-    if condition == _ZF:
-        return "=="
-    if condition == UnExpr("!", _ZF):
-        return "!="
-    if condition == BinExpr("!=", _SF, _OF):
-        return "<"
-    if condition == BinExpr("==", _SF, _OF):
-        return ">="
-    if condition == BinExpr("||", _ZF, BinExpr("!=", _SF, _OF)):
-        return "<="
-    if condition == BinExpr("&&", UnExpr("!", _ZF), BinExpr("==", _SF, _OF)):
-        return ">"
-    return None
-
-
 _INVERT = {"==": "!=", "!=": "==", "<": ">=", ">=": "<", ">": "<=", "<=": ">"}
 
 
@@ -218,18 +190,19 @@ def negate(condition):
     return UnExpr("!", condition)
 
 
-def fold_compare(cmp_stmt, condition):
+def fold_compare(cmp_stmt, comparison):
     """Fold a `cmp`/`test` statement into an `if`-style condition, or None.
 
-    'condition' is the branch's flag expression. The fold is only attempted
-    when the branch means an operator with an exact C spelling, so a folded
-    condition never says more than the flags said.
+    'comparison' is the branch's C operator as the lift recorded it from the
+    condition table (`None` when the condition has no exact C spelling). Using
+    that field instead of comparing flag expressions keeps this pass from
+    re-deriving a second copy of the table, which would silently stop folding
+    whenever the first copy changed. A folded condition never says more than
+    the flags did: unsigned relations are not in the table at all.
     """
-    if not isinstance(cmp_stmt, Cmp) or condition is None:
+    if not isinstance(cmp_stmt, Cmp) or comparison is None:
         return None
-    op = _comparison_op(condition)
-    if op is None:
-        return None
+    op = comparison
     if cmp_stmt.op == "cmp":
         return BinExpr(op, cmp_stmt.left, cmp_stmt.right)
     if cmp_stmt.op == "test":
@@ -275,6 +248,19 @@ class _SwitchPlan:
     cases: tuple          # ((slot_index, target_rva), ...)
     default: int | None
     merge: int | None
+
+
+def _slot_targets(table, image):
+    """(slot index, target RVA or None) for every slot a jump table names.
+
+    Both readers of a SlotTable -- switch recognition here and the extra-block
+    discovery in `jump_table_targets` -- must decode the slots the same way.
+    Sharing the loop is what keeps two copies of the stride arithmetic from
+    drifting; the target stays None when a slot does not hold an RVA.
+    """
+    for index in range(table.count):
+        value = image.read_pointer(table.base + index * table.stride)
+        yield index, None if value is None else image.va_to_rva(value)
 
 
 def _block_end(block):
@@ -643,9 +629,7 @@ class _Builder:
             return None
 
         cases = []
-        for index in range(table.count):
-            value = self.image.read_pointer(table.base + index * table.stride)
-            target = None if value is None else self.image.va_to_rva(value)
+        for index, target in _slot_targets(table, self.image):
             if target is None or target not in self.blocks:
                 return None
             cases.append((index, target))
@@ -737,7 +721,7 @@ class _Builder:
             return None
         if len(stmts) < 2 or not isinstance(stmts[-1], Branch):
             return None
-        if stmts[-1].kind != "jcc":
+        if stmts[-1].kind != JCC:
             return None
         if len(stmts) != 2 or not isinstance(stmts[0], Cmp):
             return None
@@ -769,7 +753,8 @@ class _Builder:
         if (branch is not None and len(stmts) >= 2
                 and isinstance(stmts[-2], Cmp)):
             cmp_stmt = stmts[-2]
-        folded = fold_compare(cmp_stmt, condition)
+        comparison = branch.comparison if branch is not None else None
+        folded = fold_compare(cmp_stmt, comparison)
         if folded is not None:
             return (Statements(block, folded=(cmp_stmt.rva,)), folded,
                     (cmp_stmt.rva, branch.rva))
@@ -839,6 +824,17 @@ class _Builder:
             jump = self._jump_target(cur)
             if conditional is not None:
                 target, fall = conditional
+                if self._condition(block)[1] is None:
+                    # The terminator branches conditionally, but the lift did
+                    # not model its condition (`loop`, say). There is no truth
+                    # value to put in an `if`, and inventing one would print
+                    # `if (!?)` while the result still claimed completeness.
+                    self.warnings.add("condition not modeled")
+                    items.append(Flat(block,
+                                      fall if fall in self.blocks else None))
+                    self.done.add(cur)
+                    cur = fall
+                    continue
                 rva = self._branch_rva(block)
                 if (ctx is not None and target == ctx.break_target
                         and fall != ctx.break_target):
@@ -959,6 +955,13 @@ class _Builder:
         if target in stop and fall in stop:
             return None
         header, expression, rvas = self._condition(block)
+        if expression is None:
+            # A conditional with no modelled condition has no `if` to build.
+            # Returning None leaves the flat form, which names the edge and
+            # says the condition is not modeled; the warning carries the same
+            # statement out of the text.
+            self.warnings.add("condition not modeled")
+            return None
 
         if target in stop:
             body, after, elided = self._region(fall, stop, ctx)
@@ -1141,14 +1144,11 @@ class _Builder:
 def build(entry, blocks, successors, slot_tables=(), decoder=None, image=None):
     """Structure one function. 'blocks' maps RVA -> IRBlock (recovered).
 
-    The blocks are expected to be already normalised (see `normalize_blocks`);
-    a mapping of raw `CFGBlock`s is normalised here as a convenience. The
-    caller that lowered the blocks owns the successor map, so the split edges
-    must come from the same normalisation it did.
+    The blocks must already be normalised (see `normalize_blocks`). The caller
+    that lowered them owns the successor map, and the split edges in that map
+    must come from the same normalisation; normalising a raw `CFGBlock` mapping
+    here would produce edges the caller never built.
     """
-    sample = next(iter(blocks.values()), None)
-    if sample is not None and hasattr(sample, "instructions"):
-        blocks = normalize_blocks(blocks)
     builder = _Builder(entry, blocks, successors,
                        slot_tables=slot_tables, decoder=decoder, image=image)
     return builder.build()
@@ -1183,9 +1183,7 @@ def jump_table_targets(blocks, successors, slot_tables, decoder=None,
         if not any(kind == INDIRECT
                    for kind, _ in successors.get(dispatch, ())):
             continue
-        for index in range(table.count):
-            value = image.read_pointer(table.base + index * table.stride)
-            target = None if value is None else image.va_to_rva(value)
+        for _, target in _slot_targets(table, image):
             if target is not None and image.is_exec(target):
                 targets.add(target)
     return tuple(sorted(targets))

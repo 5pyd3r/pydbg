@@ -70,6 +70,22 @@ class TestExactExtents(unittest.TestCase):
         table.invalidate()
         self.assertEqual(table.extent_of(0x1000), 0x30)
 
+    def test_a_zero_size_is_ignored_by_set_exact_extents(self):
+        """`end == begin` describes no function; the old rule must survive.
+
+        The range check lives in `set_exact_extents`, so a caller that hands it
+        a degenerate record gets the same answer as one that filtered the
+        record out first: the extent rule, not a zero-byte function.
+        """
+        from pydbg.analysis.functions import FunctionTable
+
+        table = FunctionTable()
+        table.add_start(0x1000, confident=True)
+        table.note_instruction(0x1000, 0x20)
+        table.set_exact_extents({0x1000: 0})
+
+        self.assertEqual(table.extent_of(0x1000), 0x20)
+
     def test_an_exact_range_for_an_unknown_start_invents_nothing(self):
         """A record whose begin the analysis never decoded is not a function."""
         from pydbg.analysis.functions import FunctionTable
@@ -162,6 +178,27 @@ class TestPdataExtents(unittest.TestCase):
 
         self.assertNotIn(0x2000, result.functions.starts)
         self.assertNotIn(0x2000, result.functions.extents())
+
+    def test_a_pe32_image_ignores_the_exception_directory(self):
+        """`.pdata` is an x64 structure; PE32 must keep the old extent rule.
+
+        A PE32 image cannot really carry directory 3, so the fixture is
+        deliberately impossible: it pins that the analyzer gates on the image
+        mode rather than on the directory merely being present. Without the
+        gate the exact range here would cut A from 0x50 to 0x30.
+        """
+        from pydbg.analysis import analyze_bytes
+        builder = PEBuilder(magic=0x10B, image_base=0x400000,
+                            entry_rva=TEXT_RVA)
+        builder.add_section(".text", build_text(), TEXT_RVA)
+        payload = struct.pack("<III", 0x1000, 0x1030, 0)
+        builder.add_section(".pdata", payload, PDATA_RVA, 0x40000040)
+        builder.add_dir(3, PDATA_RVA, len(payload))
+
+        result = analyze_bytes(builder.build())
+
+        self.assertEqual(result.functions.extent_of(0x1000), 0x50,
+                         "a PE32 image must not adopt x64 .pdata ranges")
 
     def test_records_that_end_at_or_before_begin_are_ignored(self):
         """A record that cannot describe a range must not shrink a function.

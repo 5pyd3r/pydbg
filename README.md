@@ -20,9 +20,12 @@ Windows 原生二进制调试器 —— 基于 Cython 封装 Win32 Debug API，�
   位置、CLR 头与版本信息资源
 - **异常信息** — 结构化解析访问违规等异常详情（访问类型与故障地址来自 ExceptionInformation）
 - **窗口探测** — 判定目标窗口是否仍在处理消息、是否卡在模态对话框
-- **静态分析** — `pydbg.analysis`：线性扫描、函数起点、交叉引用、基址相对访问与结构体
-  证据、取值集合（含“查不到”的拒绝语义）、未覆盖字节归因、名字工作区，以及字符串提取
-  （ASCII/UTF-16LE）与按节熵/壳启发
+- **静态分析** — `pydbg.analysis`：线性扫描、函数起点（x64 优先用 `.pdata` 的 begin/end
+  精确边界）、交叉引用、基址相对访问与结构体证据、取值集合（含“查不到”的拒绝语义）、
+  未覆盖字节归因、名字工作区，以及字符串提取（ASCII/UTF-16LE）与按节熵/壳启发
+- **反编译 MVP** — `pydbg.analysis.decompile_function(result, rva)`：单函数伪代码
+  （表达式、`if/else`、`while`/`do-while`、`switch`），未建模处如实降级为
+  `// unhandled:` 与 `goto`；不做类型/变量恢复
 
 ## 安装
 

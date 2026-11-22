@@ -86,12 +86,17 @@ def _annotate(code, rvas):
     return f"{code}  {comment}" if comment else code
 
 
+def _hex(value):
+    """An address as `0x...`, with the sign outside the prefix."""
+    return f"0x{value:x}" if value >= 0 else f"-0x{-value:x}"
+
+
 def render_expr(expr, parent_prec=0, side="left"):
     """An expression as C-ish text, bracketed only where precedence needs it."""
     if isinstance(expr, Const):
         return str(expr.value)
     if isinstance(expr, Addr):
-        return f"0x{expr.value:x}" if expr.value >= 0 else f"-0x{-expr.value:x}"
+        return _hex(expr.value)
     if isinstance(expr, Reg):
         return expr.name
     if isinstance(expr, Mem):
@@ -113,6 +118,11 @@ def render_expr(expr, parent_prec=0, side="left"):
 
 
 def _render_mem(mem):
+    if mem.addr is not None:
+        # A fixed-address operand arrives as its RVA: the lift resolved it
+        # once and this module must not repeat `rip + size + disp`.
+        prefix = f"{mem.segment}:" if mem.segment else ""
+        return f"{prefix}[{_hex(mem.addr)}]"
     parts = []
     if mem.base is not None:
         parts.append(render_expr(mem.base))
@@ -131,7 +141,7 @@ def _render_mem(mem):
         elif mem.disp < 0:
             text += f" - {-mem.disp}"
     elif mem.disp:
-        text = f"0x{mem.disp:x}" if mem.disp >= 0 else f"-0x{-mem.disp:x}"
+        text = _hex(mem.disp)
     else:
         text = "0"
 
@@ -222,7 +232,7 @@ def _edge_lines(block, successors, next_rva, entry, indent="  "):
             rva = _edge_rva(terminator, block)
             cond = (terminator.cond
                     if isinstance(terminator, Branch)
-                    and terminator.kind == "jcc" else None)
+                    and terminator.kind == JCC else None)
             if target is None:
                 lines.append(f"{indent}// conditional edge: target unknown  "
                              f"{_at_comment(rva)}")

@@ -196,6 +196,47 @@ CROSS_EDGE = bytes.fromhex(
 )
 
 
+# A switch whose last case ends exactly where `.pdata` says its function ends.
+# Function A is [0x1000, 0x101D); 0x101D..0x102F is 0x90 padding and function B
+# starts at 0x1030. Case 1's body has no terminator, so a block that is not
+# bounded by A's end follows its fall-through into the padding and then B.
+def _bounded_switch_code():
+    code = bytearray(b"\x90" * 0x40)
+    code[0x00:0x03] = bytes.fromhex("83f801")            # cmp eax, 1
+    code[0x03:0x05] = bytes.fromhex("7707")              # ja 0x100c
+    code[0x05:0x0c] = bytes.fromhex("ff24c500204000")    # jmp [rax*8+table]
+    code[0x0c:0x0e] = bytes.fromhex("31c0")              # default: xor eax,eax
+    code[0x0e] = 0xC3                                    # ret
+    code[0x10:0x15] = bytes.fromhex("b807000000")        # case 0: eax = 7
+    code[0x18:0x1d] = bytes.fromhex("b808000000")        # case 1: eax = 8
+    code[0x30:0x35] = bytes.fromhex("b809000000")        # B: eax = 9
+    code[0x35] = 0xC3                                    # B: ret
+    return bytes(code)
+
+
+BOUNDED_SWITCH = _bounded_switch_code()
+BOUNDED_FUNCTION_END = 0x101D
+BOUNDED_NEXT_FUNCTION = 0x1030
+BOUNDED_CASE_RVAS = (0x1010, 0x1018)
+
+
+def bounded_switch_image():
+    """A PE whose `.pdata` ends A before the padding and function B."""
+    builder = PEBuilder(magic=0x20B, image_base=SWITCH_BASE,
+                        entry_rva=TEXT_RVA)
+    builder.add_section(".text", BOUNDED_SWITCH, TEXT_RVA)
+    builder.add_section(
+        ".rdata",
+        struct.pack("<QQ", *[SWITCH_BASE + rva for rva in BOUNDED_CASE_RVAS]),
+        SWITCH_TABLE_RVA, 0x40000040)
+    pdata = (struct.pack("<III", TEXT_RVA, BOUNDED_FUNCTION_END, 0)
+             + struct.pack("<III", BOUNDED_NEXT_FUNCTION,
+                           BOUNDED_NEXT_FUNCTION + 7, 0))
+    builder.add_section(".pdata", pdata, 0x3000, 0x40000040)
+    builder.add_dir(3, 0x3000, len(pdata))
+    return builder.build()
+
+
 def switch_table(base=SWITCH_BASE, rvas=SWITCH_CASE_RVAS):
     """The jump table's slots, as VAs the image base makes absolute."""
     return struct.pack("<" + "Q" * len(rvas),
@@ -207,8 +248,35 @@ def switch_extra(base=SWITCH_BASE, rvas=SWITCH_CASE_RVAS):
              0x40000040),)
 
 
+# Full-text goldens for the two smallest canonical shapes. They are the spec's
+# "golden" acceptance written down: keyword assertions keep the other shapes
+# readable, but these two pin the exact bytes a caller receives.
+IF_ELSE_TEXT = """\
+sub_1000:
+  if (eax == 1) {  // @0x1000, @0x1003, @0x100a
+    eax = 2;  // @0x1005
+  } else {
+    eax = 3;  // @0x100c
+  }
+  return rax;  // @0x1011
+"""
+
+WHILE_TEXT = """\
+sub_1000:
+  eax = 0;  // @0x1000
+  while (eax < 5) {  // @0x1005, @0x1008, @0x100d
+    eax = eax + 1;  // @0x100a
+  }
+  return rax;  // @0x100f
+"""
+
+
 class TestIfElse(unittest.TestCase):
     """A branch with two merge arms becomes an if/else, not two gotos."""
+
+    def test_the_whole_text_is_the_golden(self):
+        """Byte-for-byte: the construct, its indentation and its comments."""
+        self.assertEqual(decompile(IF_ELSE).text, IF_ELSE_TEXT)
 
     def test_both_arms_appear_inside_one_if(self):
         """`jne` + two assignments + a join is the canonical if/else.
@@ -249,6 +317,10 @@ class TestIfElse(unittest.TestCase):
 
 class TestWhile(unittest.TestCase):
     """A natural loop whose latch jumps back to its test is a `while`."""
+
+    def test_the_whole_text_is_the_golden(self):
+        """Byte-for-byte: the test at the top, no goto, one return."""
+        self.assertEqual(decompile(WHILE).text, WHILE_TEXT)
 
     def test_the_test_becomes_the_loop_condition(self):
         """`jge exit` becomes `while (eax < 5)`: the exit edge is negated."""
@@ -344,6 +416,29 @@ class TestSwitch(unittest.TestCase):
         self.assertIn("eax = 99;", result.text)          # the default body
         self.assertIn(0x1038, result.blocks)             # the merge
 
+    def test_blocks_are_cfg_starts_and_extra_blocks_hold_case_starts(self):
+        """The CFG never built the case blocks; they are reported separately.
+
+        `blocks` is the CFG's block set and nothing else, so a caller comparing
+        the decompiler against `build_function_cfg` is comparing like with
+        like. The jump-table targets live in `extra_blocks`, and the warning
+        says the block set grew.
+        """
+        from pydbg.analysis import build_function_cfg, decompile_function
+        result = analyze(SWITCH, image_base=SWITCH_BASE,
+                         extra_sections=switch_extra())
+        cfg = build_function_cfg(result.decoder, result.image,
+                                 result.functions, TEXT_RVA)
+
+        decompiled = decompile_function(result, TEXT_RVA)
+
+        self.assertEqual(decompiled.blocks, tuple(sorted(cfg.blocks)))
+        self.assertEqual(tuple(sorted(decompiled.extra_blocks)),
+                         SWITCH_CASE_RVAS)
+        self.assertIn("jump-table blocks", decompiled.warnings)
+        for case_rva in SWITCH_CASE_RVAS:
+            self.assertNotIn(case_rva, decompiled.blocks)
+
     def test_the_unresolved_dispatch_edge_is_still_reported(self):
         """Structuring a switch does not make the CFG's window dressing true.
 
@@ -380,6 +475,58 @@ class TestSwitchFallback(unittest.TestCase):
             self.assertIn(rva, text_addresses(result.text), result.text)
 
 
+class TestJumpTableBound(unittest.TestCase):
+    """A jump-table case block still belongs to the function that owns it."""
+
+    def test_a_case_body_stops_at_the_function_end(self):
+        """Without a bound, the last case swallows padding and the next function.
+
+        The case at 0x1018 has no terminator; its bytes run into 0x90 padding
+        at 0x101D and into function B at 0x1030. `.pdata` says A ends at
+        0x101D, and that is where the case block must stop -- B is a different
+        function and the padding is not code.
+        """
+        from pydbg.analysis import analyze_pe, decompile_function
+        result = analyze_pe(PE(bounded_switch_image()))
+
+        decompiled = decompile_function(result, TEXT_RVA)
+
+        self.assertIsNotNone(decompiled)
+        addresses = text_addresses(decompiled.text)
+        self.assertIn(0x1018, addresses, decompiled.text)
+        self.assertNotIn(BOUNDED_FUNCTION_END, addresses, decompiled.text)
+        self.assertNotIn(BOUNDED_NEXT_FUNCTION, addresses, decompiled.text)
+        self.assertFalse(addresses & set(range(BOUNDED_FUNCTION_END,
+                                               BOUNDED_NEXT_FUNCTION + 7)),
+                         decompiled.text)
+
+
+class TestUnmodeledCondition(unittest.TestCase):
+    """A terminator with no modelled condition is not invented into an `if`."""
+
+    # test eax,eax / loop 0x100a / nop / jmp 0x100b / nops / ret.
+    # `loop` is a conditional jump to capstone, but it is outside the condition
+    # table, so the lift keeps it as an Opaque statement.
+    LOOP_TERMINATED = bytes.fromhex("85c0e20690eb04" "90909090" "c3")
+
+    def test_a_loop_terminator_stays_flat_and_says_why(self):
+        """`complete=True` with `if (!?)` was a claim the analysis could not back.
+
+        The block's condition was never lowered, so there is no truth value to
+        test. The flat form states the edge and its reason; the warning says
+        the same thing to a caller that reads the result instead of the text.
+        """
+        result = decompile(self.LOOP_TERMINATED)
+
+        self.assertIsNotNone(result)
+        self.assertNotIn("if (", result.text)
+        self.assertNotIn("!?", result.text)
+        self.assertIn("condition not modeled", result.text)
+        self.assertIn("condition not modeled", result.warnings)
+        self.assertEqual(result.text.count("// unhandled:"),
+                         len(result.unhandled))
+
+
 class TestIrreducible(unittest.TestCase):
     """A cycle with two entries cannot be a loop; labels and gotos are honest."""
 
@@ -413,14 +560,34 @@ class TestNoSilentDrop(unittest.TestCase):
     """The P5 set equality survives every structuring decision."""
 
     def test_every_cfg_instruction_is_still_addressable(self):
-        for name, code in (("if/else", IF_ELSE), ("while", WHILE),
-                           ("do-while", DO_WHILE), ("nested", NESTED),
-                           ("irreducible", IRREDUCIBLE),
-                           ("cross edge", CROSS_EDGE)):
+        """Acceptance 2, switch included: the CFG's set plus the extra blocks.
+
+        A switch is the one shape whose case blocks the CFG never built, so its
+        expected set is the CFG instructions *union* the instructions of the
+        jump-table blocks the result names. Including it here keeps the
+        equality from being true only for the shapes that need no help.
+        """
+        from pydbg.analysis import build_function_cfg, decompile_function
+        cases = (
+            ("if/else", IF_ELSE, {}),
+            ("while", WHILE, {}),
+            ("do-while", DO_WHILE, {}),
+            ("nested", NESTED, {}),
+            ("irreducible", IRREDUCIBLE, {}),
+            ("cross edge", CROSS_EDGE, {}),
+            ("switch", SWITCH, {"image_base": SWITCH_BASE,
+                                "extra_sections": switch_extra()}),
+        )
+        for name, code, kwargs in cases:
             with self.subTest(shape=name):
-                result = analyze(code)
-                decompiled = decompile(code)
+                result = analyze(code, **kwargs)
+                decompiled = decompile_function(result, TEXT_RVA)
                 expected = cfg_instructions(result)
+                for extra in decompiled.extra_blocks:
+                    extra_cfg = build_function_cfg(
+                        result.decoder, result.image, result.functions, extra)
+                    expected |= {addr for block in extra_cfg.blocks.values()
+                                 for addr in block.instructions}
                 covered = (text_addresses(decompiled.text)
                            | text_labels(decompiled.text))
                 self.assertEqual(covered, expected, decompiled.text)
