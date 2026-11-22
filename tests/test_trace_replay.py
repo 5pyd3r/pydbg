@@ -6,11 +6,15 @@ them (which ones happened, which blocks ran, and how do I hand the trace to a
 tool that speaks JSONL) without a live process.
 """
 
+import json
+import os
+import shutil
+import tempfile
 import unittest
 
 from pydbg.trace import (
-    API, BLOCK, MARK, MEM_READ, MEM_WRITE, TraceEvent,
-    block_coverage, filter_events,
+    API, BLOCK, MARK, MEM_READ, MEM_WRITE, TraceEvent, TraceWriter,
+    block_coverage, filter_events, read_trace, to_jsonl,
 )
 
 
@@ -130,6 +134,95 @@ class TestBlockCoverage(unittest.TestCase):
         events = mixed_events()
         self.assertEqual(block_coverage(filter_events(events, tid=1)),
                          {0x401000: 1, 0x401020: 1})
+
+
+class JsonlFileTest(unittest.TestCase):
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+
+    def tearDown(self):
+        shutil.rmtree(self.dir, ignore_errors=True)
+
+    def path(self, name="trace.jsonl"):
+        return os.path.join(self.dir, name)
+
+    def read_bytes(self, name="trace.jsonl"):
+        with open(self.path(name), "rb") as stream:
+            return stream.read()
+
+
+class TestToJsonl(JsonlFileTest):
+
+    def test_each_event_is_one_json_object_with_its_kind_named(self):
+        events = [
+            TraceEvent(MARK, 2, 0x401008, 103, a=42),
+            TraceEvent(BLOCK, 1, 0x401000, 100, a=3),
+            TraceEvent(MEM_WRITE, 2, 0x500010, 105, a=0x500010, b=16),
+        ]
+        to_jsonl(events, self.path())
+
+        with open(self.path(), encoding="utf-8") as stream:
+            lines = stream.read().splitlines()
+        self.assertEqual(len(lines), 3)
+        self.assertEqual([json.loads(line) for line in lines], [
+            {"kind": MARK, "kind_name": "MARK", "tid": 2, "rva": 0x401008,
+             "ts": 103, "a": 42, "b": 0},
+            {"kind": BLOCK, "kind_name": "BLOCK", "tid": 1, "rva": 0x401000,
+             "ts": 100, "a": 3, "b": 0},
+            {"kind": MEM_WRITE, "kind_name": "MEM_WRITE", "tid": 2,
+             "rva": 0x500010, "ts": 105, "a": 0x500010, "b": 16},
+        ])
+
+    def test_every_v1_kind_gets_its_documented_name(self):
+        kinds = (BLOCK, API, MARK, MEM_READ, MEM_WRITE)
+        to_jsonl([TraceEvent(kind, 1, 0, 0) for kind in kinds], self.path())
+
+        with open(self.path(), encoding="utf-8") as stream:
+            rows = [json.loads(line) for line in stream]
+        self.assertEqual([row["kind_name"] for row in rows],
+                         ["BLOCK", "API", "MARK", "MEM_READ", "MEM_WRITE"])
+        self.assertEqual([row["kind"] for row in rows], list(kinds))
+
+    def test_a_line_is_compact_with_sorted_keys_and_a_final_newline(self):
+        """Pinned literally: tools diff these files, so layout is a contract."""
+        to_jsonl([TraceEvent(BLOCK, 7, 0x401000, 123, a=3)], self.path())
+        self.assertEqual(
+            self.read_bytes(),
+            b'{"a":3,"b":0,"kind":1,"kind_name":"BLOCK",'
+            b'"rva":4198400,"tid":7,"ts":123}\n')
+
+    def test_the_same_events_written_twice_give_identical_files(self):
+        events = mixed_events()
+        to_jsonl(events, self.path("first.jsonl"))
+        to_jsonl(events, self.path("second.jsonl"))
+        self.assertEqual(self.read_bytes("first.jsonl"),
+                         self.read_bytes("second.jsonl"))
+
+    def test_an_unknown_kind_is_exported_without_an_invented_name(self):
+        """`kind` is the fact; naming a kind v1 does not define would be a guess."""
+        to_jsonl([TraceEvent(99, 1, 0x401000, 7)], self.path())
+
+        with open(self.path(), encoding="utf-8") as stream:
+            row = json.loads(stream.readline())
+        self.assertEqual(row["kind"], 99)
+        self.assertIsNone(row["kind_name"])
+
+    def test_an_empty_trace_exports_to_an_empty_file(self):
+        to_jsonl([], self.path())
+        self.assertEqual(os.path.getsize(self.path()), 0)
+
+    def test_events_that_came_from_a_trace_file_export_the_same(self):
+        """The file and the in-memory stream must be interchangeable inputs."""
+        events = mixed_events()
+        with TraceWriter(self.path("trace.bin")) as writer:
+            for event in events:
+                writer.write(event)
+
+        to_jsonl(read_trace(self.path("trace.bin")), self.path("from_file.jsonl"))
+        to_jsonl(events, self.path("direct.jsonl"))
+        self.assertEqual(self.read_bytes("from_file.jsonl"),
+                         self.read_bytes("direct.jsonl"))
 
 
 if __name__ == "__main__":

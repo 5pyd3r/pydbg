@@ -6,7 +6,17 @@ filtered stream is still in recording order, coverage counts only what actually
 ran, and the JSONL export is stable enough to diff two runs byte for byte.
 """
 
-from .format import BLOCK
+import json
+
+from .format import API, BLOCK, MARK, MEM_READ, MEM_WRITE
+
+_KIND_NAMES = {
+    BLOCK: "BLOCK",
+    API: "API",
+    MARK: "MARK",
+    MEM_READ: "MEM_READ",
+    MEM_WRITE: "MEM_WRITE",
+}
 
 
 def filter_events(events, kinds=None, tid=None, rva_min=None, rva_max=None):
@@ -41,3 +51,26 @@ def block_coverage(events):
         if event.kind == BLOCK:
             counts[event.rva] = counts.get(event.rva, 0) + 1
     return counts
+
+
+def to_jsonl(events, path):
+    """Write the events as JSONL: one compact object per line, keys sorted.
+
+    Every line carries `kind` (the int from the file) and `kind_name` (its v1
+    name), plus tid/rva/ts/a/b. The name is None for a kind v1 does not define:
+    the integer is the fact, and inventing a label would hide the surprise.
+    Output is ASCII, LF-terminated, and ends with a newline, so two exports of
+    the same events compare equal byte for byte.
+    """
+    with open(path, "w", encoding="utf-8", newline="\n") as stream:
+        for event in events:
+            stream.write(json.dumps({
+                "kind": event.kind,
+                "kind_name": _KIND_NAMES.get(event.kind),
+                "tid": event.tid,
+                "rva": event.rva,
+                "ts": event.ts,
+                "a": event.a,
+                "b": event.b,
+            }, separators=(",", ":"), sort_keys=True))
+            stream.write("\n")
