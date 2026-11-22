@@ -10,12 +10,19 @@ ran, and the JSONL export is stable enough to diff two runs byte for byte.
 def filter_events(events, kinds=None, tid=None, rva_min=None, rva_max=None):
     """Yield the events matching every given criterion, in recording order.
 
-    `kinds` is None or an iterable of ints. `rva_min` is inclusive and
-    `rva_max` is exclusive, either may be omitted. The result is lazy: it pulls
-    from `events` one event at a time and only as far as the caller consumes.
+    `kinds` is None or an iterable of ints; `tid` keeps a single thread.
+    `rva_min` is inclusive and `rva_max` is exclusive, either may be omitted.
+    The result is lazy: it pulls from `events` one event at a time and only as
+    far as the caller consumes.
     """
     wanted = None if kinds is None else frozenset(kinds)
     for event in events:
         if wanted is not None and event.kind not in wanted:
+            continue
+        if tid is not None and event.tid != tid:
+            continue
+        if rva_min is not None and event.rva < rva_min:
+            continue
+        if rva_max is not None and event.rva >= rva_max:
             continue
         yield event

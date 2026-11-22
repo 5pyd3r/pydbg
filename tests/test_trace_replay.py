@@ -47,6 +47,35 @@ class TestFilterEvents(unittest.TestCase):
         self.assertEqual(list(filter_events(events, kinds=(API, MARK))),
                          [events[1], events[3]])
 
+    def test_one_threads_events_can_be_isolated(self):
+        events = mixed_events()
+        self.assertEqual(list(filter_events(events, tid=1)),
+                         [events[0], events[3], events[5]])
+
+    def test_criteria_combine_and_narrow_rather_than_widen(self):
+        events = mixed_events()
+        self.assertEqual(list(filter_events(events, kinds=[BLOCK], tid=2)),
+                         [events[2]])
+
+    def test_the_rva_range_includes_its_minimum(self):
+        events = [TraceEvent(BLOCK, 1, rva, ts)
+                  for ts, rva in enumerate((0x1000, 0x1010, 0x1020))]
+        self.assertEqual(list(filter_events(events, rva_min=0x1010)),
+                         [events[1], events[2]])
+
+    def test_the_rva_range_excludes_its_maximum(self):
+        events = [TraceEvent(BLOCK, 1, rva, ts)
+                  for ts, rva in enumerate((0x1000, 0x1010, 0x1020))]
+        self.assertEqual(list(filter_events(events, rva_max=0x1020)),
+                         [events[0], events[1]])
+
+    def test_both_rva_bounds_keep_only_the_half_open_interval(self):
+        events = [TraceEvent(BLOCK, 1, rva, ts)
+                  for ts, rva in enumerate((0x1000, 0x1010, 0x1020, 0x1030))]
+        self.assertEqual(
+            list(filter_events(events, rva_min=0x1010, rva_max=0x1030)),
+            [events[1], events[2]])
+
 
 if __name__ == "__main__":
     unittest.main()
