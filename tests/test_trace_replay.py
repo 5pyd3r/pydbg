@@ -36,6 +36,27 @@ def mixed_events():
     ]
 
 
+class TestKindVocabulary(unittest.TestCase):
+    """The kind numbers and their v1 names are one fact, kept in one place."""
+
+    def test_the_names_live_next_to_the_kind_constants(self):
+        from pydbg.trace import format as trace_format
+
+        self.assertEqual(trace_format.KIND_NAMES, {
+            BLOCK: "BLOCK",
+            API: "API",
+            MARK: "MARK",
+            MEM_READ: "MEM_READ",
+            MEM_WRITE: "MEM_WRITE",
+        })
+
+    def test_replay_uses_the_one_mapping_instead_of_a_second_copy(self):
+        from pydbg.trace import format as trace_format
+        from pydbg.trace import replay
+
+        self.assertIs(replay.KIND_NAMES, trace_format.KIND_NAMES)
+
+
 class TestFilterEvents(unittest.TestCase):
 
     def test_only_the_requested_kinds_survive_in_their_original_order(self):

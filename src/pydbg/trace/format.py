@@ -20,6 +20,17 @@ VERSION = 1
 # kind: rva / a / b carry different fields per kind (docs/analysis-coverage.md §8.2)
 BLOCK, API, MARK, MEM_READ, MEM_WRITE = 1, 2, 3, 4, 5
 
+# The v1 vocabulary, kept beside the numbers it names so the two cannot drift.
+# A kind absent from this map is still a valid int in a record; exporting it as
+# `kind_name: null` is the honest answer for a version that does not define it.
+KIND_NAMES = {
+    BLOCK: "BLOCK",
+    API: "API",
+    MARK: "MARK",
+    MEM_READ: "MEM_READ",
+    MEM_WRITE: "MEM_WRITE",
+}
+
 _HEADER = struct.Struct("<8sHH")
 _RECORD = struct.Struct("<B3xIIQQQ")
 
