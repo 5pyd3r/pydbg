@@ -237,3 +237,24 @@ class TestTraceWriterLifecycle(TraceFileTest):
             stream.seek(10)
             stream.write(b"\x34\x12")
         self.assertEqual(list(read_trace(self.path())), [event])
+
+
+class TestTraceScale(TraceFileTest):
+
+    def test_ten_thousand_blocks_round_trip_without_losing_one(self):
+        """The size is exact: 12 + 36 per record, no index, no padding."""
+        count = 10000
+        events = [
+            TraceEvent(BLOCK, 1, 0x400000 + i * 0x10, 1000 + i, a=i % 7)
+            for i in range(count)
+        ]
+        with TraceWriter(self.path()) as writer:
+            for event in events:
+                writer.write(event)
+
+        self.assertEqual(os.path.getsize(self.path()),
+                         HEADER_SIZE + count * RECORD_SIZE)
+        read_back = list(read_trace(self.path()))
+        self.assertEqual(len(read_back), count)
+        self.assertEqual(read_back[0], events[0])
+        self.assertEqual(read_back[-1], events[-1])
