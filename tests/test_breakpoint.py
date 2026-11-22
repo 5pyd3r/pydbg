@@ -279,6 +279,94 @@ class TestBreakpointLifecycle(unittest.TestCase):
 class TestSoftwareBreakpointManagerFixes(unittest.TestCase):
     """Regression tests for SoftwareBreakpointManager bug fixes."""
 
+    @staticmethod
+    def _manager():
+        from pydbg.core.session import DebugSession
+        from pydbg.breakpoint.software import SoftwareBreakpointManager
+        return SoftwareBreakpointManager(DebugSession())
+
+    def test_every_write_sequence_restores_protection_after_a_failure(self):
+        """A failed write must not leave the page writable.
+
+        The three protect→write→restore sequences are set, restore-byte and
+        re-arm. All three used to skip the restore when the write raised; the
+        page then stayed PAGE_EXECUTE_READWRITE, which is both a behavioural
+        side effect and a detection surface.
+        """
+        from unittest import mock
+        from pydbg.exceptions import BreakpointError
+
+        sequences = {
+            "set": lambda mgr: mgr.set_handle(0x1234, 0x401000),
+            "restore": lambda mgr: mgr._restore_byte_handle(
+                0x1234, 0x401000, b"\x90"),
+            "re-arm": lambda mgr: mgr._write_int3_handle(0x1234, 0x401000),
+        }
+        for name, call in sequences.items():
+            with self.subTest(sequence=name):
+                mgr = self._manager()
+                protect = mock.Mock(side_effect=[0x20, None])
+                with mock.patch(
+                        "pydbg.breakpoint.software._pydbg.read_process_memory",
+                        return_value=b"\x90"), \
+                     mock.patch(
+                        "pydbg.breakpoint.software._pydbg.virtual_protect_ex",
+                        protect), \
+                     mock.patch(
+                        "pydbg.breakpoint.software._pydbg.write_process_memory",
+                        side_effect=OSError(5, "denied")):
+                    with self.assertRaises(BreakpointError):
+                        call(mgr)
+                self.assertEqual(
+                    protect.call_count, 2,
+                    f"{name}: protection was not restored after the failure")
+
+    def test_a_failed_restore_is_reported_with_the_write_error(self):
+        """Both failures are named; dropping either hides one of them."""
+        from unittest import mock
+        from pydbg.exceptions import BreakpointError
+
+        mgr = self._manager()
+        protect = mock.Mock(side_effect=[0x20, OSError(5, "cannot restore")])
+        with mock.patch(
+                "pydbg.breakpoint.software._pydbg.read_process_memory",
+                return_value=b"\x90"), \
+             mock.patch(
+                "pydbg.breakpoint.software._pydbg.virtual_protect_ex",
+                protect), \
+             mock.patch(
+                "pydbg.breakpoint.software._pydbg.write_process_memory",
+                side_effect=OSError(5, "denied")):
+            with self.assertRaises(BreakpointError) as caught:
+                mgr.set_handle(0x1234, 0x401000)
+
+        message = str(caught.exception)
+        self.assertIn("denied", message)
+        self.assertIn("restoring protection also failed", message)
+
+    def test_a_restore_failure_after_a_successful_write_is_reported(self):
+        """The byte landed; the page did not go back. That must not be silent."""
+        from unittest import mock
+        from pydbg.exceptions import BreakpointError
+
+        mgr = self._manager()
+        protect = mock.Mock(side_effect=[0x20, OSError(5, "cannot restore")])
+        with mock.patch(
+                "pydbg.breakpoint.software._pydbg.read_process_memory",
+                return_value=b"\x90"), \
+             mock.patch(
+                "pydbg.breakpoint.software._pydbg.virtual_protect_ex",
+                protect), \
+             mock.patch(
+                "pydbg.breakpoint.software._pydbg.write_process_memory",
+                return_value=None):
+            with self.assertRaises(BreakpointError) as caught:
+                mgr.set_handle(0x1234, 0x401000)
+
+        message = str(caught.exception)
+        self.assertIn("restoring protection failed", message)
+        self.assertNotIn("denied", message)
+
     def test_remove_does_not_pop_on_type_mismatch(self):
         """remove() must not mutate breakpoints dict when type is wrong."""
         from pydbg.breakpoint.model import Breakpoint
