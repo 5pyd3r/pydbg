@@ -137,12 +137,17 @@ class Function:
 
 @dataclass
 class CoverageReport:
-    """How much of each executable section was decoded, told honestly.
+    """How much of one executable section was decoded, told honestly.
 
-    'overlap_bytes' is bytes claimed by more than one instruction. Without it
-    the covered count is the sum of instruction sizes, which reads high and is
-    how a 94% figure can be reported as 99.5%: misaligned decoding inflates the
-    total while looking like success.
+    'overlap_bytes' is overlap *within this section*: bytes claimed by more
+    than one instruction. Without it the covered count is the sum of
+    instruction sizes, which reads high and is how a 94% figure can be reported
+    as 99.5%: misaligned decoding inflates the total while looking like
+    success.
+
+    The per-section numbers add up to AnalysisStats.overlap_bytes. They used to
+    all carry that global total, so summing the sections multiplied it by the
+    number of executable sections.
     """
 
     covered: int = 0

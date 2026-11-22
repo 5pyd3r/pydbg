@@ -21,6 +21,10 @@ class InstructionDecoder:
         self.engine = DisasmEngine(mode=mode or image.mode)
         self._size_at = bytearray(image.span)
         self._covered = bytearray(image.span)
+        # Overlap per byte, so a section can report its own share. The global
+        # counter answers "how much", this answers "where", and the coverage
+        # report needs the second to say anything per section.
+        self._overlap_at = bytearray(image.span)
         self._bad = set()
         # rva -> why it would not decode. Kept alongside `_bad` so a scan that
         # reports a gap can say what the gap was made of; "it did not decode"
@@ -153,6 +157,7 @@ class InstructionDecoder:
             if self._covered[offset]:
                 self.overlap_bytes += 1
                 self.overlap_conflicts += 1
+                self._overlap_at[offset] += 1
                 other = self.origin_of_byte(offset)
                 key = (other or "?", origin or "?")
                 self.overlap_by_origin[key] = (
@@ -200,6 +205,21 @@ class InstructionDecoder:
         for (existing, new), count in self.overlap_by_origin.items():
             merged[(existing, new)] = merged.get((existing, new), 0) + count
         return dict(sorted(merged.items(), key=lambda item: -item[1]))
+
+    def overlapped_in(self, start, end):
+        """Overlap claimed within [start, end): the per-section counterpart.
+
+        Same definition as the overlap_bytes counter — every re-claim bumps
+        both — so the sections add up to the global total. The coverage report
+        used to copy that global counter into every section, which multiplies
+        the number by the count of executable sections as soon as anyone sums
+        them.
+        """
+        start = max(start, 0)
+        end = min(end, len(self._covered))
+        if end <= start:
+            return 0
+        return sum(self._overlap_at[start:end])
 
     def covered_in(self, start, end):
         """Bytes claimed at least once within [start, end)."""

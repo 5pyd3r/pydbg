@@ -157,6 +157,21 @@ class TestOverlapAttribution(unittest.TestCase):
             self.assertNotEqual(existing, "?")
             self.assertNotEqual(new, "?")
 
+    def test_section_overlap_adds_up_to_the_global_total(self):
+        """The per-section figure used to be the global one, copied in.
+
+        Every executable section carried AnalysisStats.overlap_bytes, so adding
+        the sections up — the most natural thing a caller does with coverage —
+        multiplied the overlap by the number of sections.
+        """
+        result = analyze(OVERLAP_CODE)
+        self.assertGreater(result.stats.overlap_bytes, 0)
+        per_section = sum(report.overlap_bytes
+                          for report in result.coverage.values())
+        self.assertEqual(per_section, result.stats.overlap_bytes)
+        for name, report in result.coverage.items():
+            self.assertLessEqual(report.overlap_bytes, report.covered, name)
+
     def test_no_overlap_means_nothing_to_attribute(self):
         result = analyze()
         if result.stats.overlap_bytes:

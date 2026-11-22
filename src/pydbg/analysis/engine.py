@@ -492,12 +492,16 @@ class StaticAnalyzer:
         for section in self.image.sections:
             if not section.is_exec:
                 continue
+            # The span a decoder can actually reach is max(virtual, raw): the
+            # tail of a section can be raw-only, and bytes decoded there were
+            # previously left out of both the numerator and the denominator.
+            span = max(section.virtual_size, section.size_of_raw_data)
             start = section.virtual_address
-            end = start + section.virtual_size
+            end = start + span
             report[section.name] = CoverageReport(
                 covered=self.decoder.covered_in(start, end),
-                total=max(section.virtual_size, 0),
-                overlap_bytes=self.decoder.overlap_bytes,
+                total=span,
+                overlap_bytes=self.decoder.overlapped_in(start, end),
             )
         return report
 
