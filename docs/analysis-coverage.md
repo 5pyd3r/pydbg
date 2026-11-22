@@ -411,7 +411,120 @@ pydbg.trace.ProbeCall(tid, rva, args, ts)
 - 返回值捕获、BBL/指令级插桩、RIP-relative 重定位、多线程指令窗口。
 - 时间戳精度承诺、把窗口 trace 变成覆盖率报告。
 
-## 10. 明确不做
+## 10. Phase 5：符号与类型（S7 + S6）
+
+目标：把 PDB 变成两条可查询的事实——地址的名字、结构体的字段表——并且**没有 PDB 时结构画像仍然可用**。
+`S7` 的判据是「名字统一进 `NameTable`，来源可查」，`S6` 的是「结构画像可导出字段表（宽度、访问次数），不伪造类型名」。
+
+### 10.1 边界与路线
+
+- **读取路线：dbghelp 离线（ctypes）+ 自研 MSF 校验壳**。dbghelp 对 GUID/age 不匹配的 PDB **静默接受**
+  （只吐 3 条地址错误的 publics，`lasterr=0`），所以校验必须自己做；反过来，自研 TPI/Publics 解析器是
+  3–4k 行的长尾工程，本阶段不做。`pydbg/pdb/` 的入口保持协议形状，将来换实现不动调用方。
+- 只做**名字 + 类型**。行号 / 源文件映射（dbghelp 顺手能读到，但 `S7` 判据不含、本阶段不验收）、
+  FLIRT / YARA 签名匹配、符号服务器下载、Go `pclntab` / Rust v0 名字恢复、32 位 PDB 都不做。
+- 纯 Python：不 import `_pydbg`、不 import capstone（ADR-0001 延伸）。`pyproject.toml` 不加依赖。
+
+### 10.2 硬约束（来自前置实测，见本地 `research/pdb-format.md`）
+
+1. GUID/age 只比**原始字节**：info stream `+8 Age`、`+12 Guid`（16 B），与镜像 `RSDS` 逐字节相同；
+   字符串化用 `bytes_le=` 或与 `pe.parser` 的 8-4-4-4-12 形式一致。
+2. dbghelp 从 `System32\dbghelp.dll` 显式加载（`LoadLibraryExW` + `LOAD_LIBRARY_SEARCH_SYSTEM32`）；
+   进程级、非可重入 → 库内 `RLock` 串行。
+3. `SymSetOptions(0x204)`（`DEFERRED_LOADS|FAIL_CRITICAL_ERRORS`）；**不设 `SYMOPT_UNDNAME`**；要裸名时对
+   `?` 开头的名字调 `UnDecorateSymbolName(name, ..., 0x1000)`。
+4. `TypeIndex` 是**会话内不透明 id**（不是 CodeView 的 `0x1000` 基索引），禁止跨会话缓存、
+   禁止写进结果或 workspace。
+5. `lasterr` 只在返回 FALSE 时可信；`SYMBOL_INFOW.NameLen` **含**结尾 NUL；`TI_GET_SYMNAME` 返回
+   `LocalAlloc` 指针，取完必须 `LocalFree`。
+6. **空枚举 / 只有 publics 不得当成功**：它必须与校验结果一起解释；`symbols()==()` 时 `analysis` 记
+   `"pdb: no symbols"` 警告，不静默。
+7. MSF：块大小只接受 512 / 1024 / 2048 / 4096；`NumBlocks * BlockSize == 文件长度`；
+   `Unknown1 != 0` 判显式 unknown（拒绝）。
+
+### 10.3 API
+
+```python
+pydbg.pdb.find(pe_or_image, search_paths=()) -> PdbLookup
+pydbg.pdb.open_for(pe_or_image, search_paths=()) -> Pdb | None      # find(...).pdb 的便捷形式
+pydbg.pdb.Pdb(path)
+    .matches(pe_or_image) -> bool
+    .symbols() -> tuple[PdbSymbol, ...]
+    .structs() -> tuple[StructLayout, ...]
+    .layout_of(name_or_type_index) -> StructLayout | None
+
+PdbLookup(pdb, path, reason)      # reason: None | "no codeview" | "not found"
+                                  #         | "pdb mismatch" | "pdb 2.0 unsupported" | "bad pdb"
+PdbSymbol(rva, name, size, kind, is_public)      # kind: "function" | "data" | "public" | "unknown"
+StructLayout(name, size, fields, source, truncated=False)    # source: "pdb" | "profile"
+Field(offset, name, type_name, size, bit_position=None, bit_width=None)
+```
+
+- `find()` 的查找顺序：显式 `search_paths` → 镜像 CodeView 记录的绝对路径 → 镜像所在目录下的同名 `.pdb`。
+  只认 `RSDS`；`NB10` 返回 `"pdb 2.0 unsupported"`（不按路径猜）。
+- `symbols()` 按 `(rva, name)` 去重；`rva = Address - ImageBase`，必须落在 `[0, image_size)`；
+  `kind` 只由 `Tag`（5/7/10）决定，`unknown` 原样上报。
+- `structs()` 只返回**能完整读出的** UDT；读不出的成员保留在 `fields` 里，`name`/`type_name` 为 `None`、
+  `size` 为 0，并置 `truncated=True`——不猜宽度、不丢字段。
+- 位域：`bit_position` + `bit_width`，`offset` 是存储单元偏移。
+
+### 10.4 名字并入 analysis
+
+- `NameTable` 新增 `SOURCE_PDB = "pdb"`，优先级定为 `user > export > pdb > import > auto`：
+  `export` 之上不动（有没有 PDB 不改变既有名字），`pdb` 压过 `import`/`auto`
+  （每 build 精确的编译器符号强于 thunk 推导名）。
+- `auto_names(result, function_starts=True, pdb=None)`；`resolve(result, names=None, pdb=None)`；
+  `resolve_for(result, workspace=None, pdb=None)`。默认 `pdb=None` 时行为与现在逐字节一致。
+- PDB 名字**只进 `NameTable`**，不改 `result.functions`（函数起点仍由代码发现决定，两套真相不并存）。
+- `analysis` 对 `pydbg.pdb` 是单向依赖；`pydbg.pdb` 不认识 `analysis`。
+
+### 10.5 类型与结构画像
+
+- **无 PDB**：`analysis/types.py` 把现有 `StructureProfile`（`access.py`）暴露成字段表——`name` 用
+  `"<function_rva>:<base_reg>"` 的标签，字段只报 `offset` / 宽度 / 读写次数 / 是否函数指针，
+  **不发明字段名**。
+- **有 PDB**：`StructLayout(source="pdb")` 直接来自 TPI。
+- 两轨对齐：`field_report(layout, profile)` 逐 offset 给出 `present_in ∈ {"pdb", "profile", "both"}`，
+  对不上的偏移照样列出。
+
+```python
+pydbg.analysis.types.structs(result, pdb=None) -> tuple[StructLayout, ...]
+pydbg.analysis.types.layout_of(result, key, pdb=None) -> StructLayout | None    # key: 名字或 RVA
+pydbg.analysis.types.field_report(layout, profile) -> tuple[FieldReport, ...]
+FieldReport(offset, name, type_name, size, reads, writes, called, present_in)
+```
+
+反编译**不**消费类型（见 §10.7）；字段表本身已可查询。
+
+### 10.6 验收
+
+1. MSF：合成 fixture 覆盖 512/1024/2048/4096、空流、跨块流；坏 magic、坏块大小、截断、
+   `NumBlocks` 与文件长度不符、`Unknown1 != 0` → `PdbFormatError`（带原因），不抛未捕获异常。
+2. 校验：真实 PDB → `find().pdb` 非空、`reason is None`；换异 build PDB → `reason == "pdb mismatch"`、
+   `open_for() is None`；目录里没有 → `"not found"`；镜像无 CodeView → `"no codeview"`。
+3. 名字：导出的、静态的、数据的符号都在；名字未修饰；`(rva, name)` 去重；`rva ∈ [0, image_size)`；
+   `NameTable` 优先级单测（user > export > pdb > import > auto）。
+4. 类型：`Point` → `size=8`、`x@0` / `y@4`；位域 `bit_position` / `bit_width` 正确；数组字段的
+   `type_name` 带宽度（如 `int[4]`）；读不出的成员 `truncated=True` 且不猜宽度；未知名字 → `None`。
+5. 集成：`auto_names(result, pdb=...)` 把 PDB 名字并进结果且**不改变** `functions.starts`；
+   `types.structs` 有/无 PDB 两轨都能出表；`field_report` 对 profile-only 的偏移给
+   `present_in="profile"`。
+6. 性能：测试 PDB 的 `find + symbols + structs` < 2 s（实测数字写进测试输出，不设更紧阈值避免 CI 抖动）。
+7. Phase 5 整体：新测试全绿、`flake8 --max-line-length=120` 干净、`pyproject.toml` 无改动、现有测试全绿。
+8. 测试目标：meson 构建 `pdb_target`（C）与 `pdb_target_cpp`（C++，`/Zi /DEBUG`），测试经
+   `TEST_PDB_TARGET_PATH` / `TEST_PDB_PATH` 等环境变量取；缺失时按 `target not built:` 跳过。
+
+### 10.7 与 05 的偏差
+
+- **反编译不消费类型**：`decompile_function` 仍输出 `[base + disp]`。把字段名写进文本要求
+  「基址寄存器 → 参数/局部变量」的映射，那是变量恢复，本阶段没做；字段表已可查询。留 Phase 6。
+
+### 10.8 不做
+
+行号 / 源映射、FLIRT / YARA、符号服务器、Go / Rust 名字恢复、32 位 PDB、PDB-only（无镜像）分析、
+自研 TPI/Publics 解析器、反编译的类型渲染。
+
+## 11. 明确不做
 
 GUI、正式 CLI、插件机制、AArch64、.NET/CLR 分析、内核/ETW、自建 DBI 引擎、BinDiff、
 一键自动脱壳、商业类型库与签名库本体。
