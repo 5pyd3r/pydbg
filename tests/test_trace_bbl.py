@@ -424,5 +424,39 @@ class TestBblTracerEventHonesty(_LiveTestCase):
         self.assertTrue(summary.single_step_pending)
 
 
+@unittest.skipUnless(_has_cython, "optional dependency: Cython extension")
+class TestBblTracerIdleTimeout(_LiveTestCase):
+    """A quiet target must end the run with a reason, not spin forever."""
+
+    def idle_tracer(self):
+        from pydbg.exceptions import TimeoutError as PydbgTimeoutError
+
+        proxy = _ScriptedDebugger(
+            self.dbg, error=PydbgTimeoutError("no debug event arrived"))
+        tracer = BblTracer(proxy)
+        self.assertGreater(tracer.plan(), 0)
+        self.assertGreater(tracer.arm(), 0)
+        return tracer, proxy
+
+    def test_an_idle_timeout_is_reported_as_a_truncated_stop(self):
+        tracer, proxy = self.idle_tracer()
+
+        summary = tracer.run(max_idle_timeouts=7)
+
+        self.assertEqual(proxy.run_calls[-1].get("max_idle_timeouts"), 7)
+        self.assertEqual(summary.reason, STOP_IDLE_TIMEOUT)
+        self.assertTrue(summary.truncated)
+        self.assertEqual(summary.events, 0)
+        self.assertEqual(summary.warnings, ())
+        self.assertFalse(summary.single_step_pending)
+
+    def test_the_idle_budget_defaults_to_three_consecutive_waits(self):
+        tracer, proxy = self.idle_tracer()
+
+        tracer.run()
+
+        self.assertEqual(proxy.run_calls[-1].get("max_idle_timeouts"), 3)
+
+
 if __name__ == "__main__":
     unittest.main()

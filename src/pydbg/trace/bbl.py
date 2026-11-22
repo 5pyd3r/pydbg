@@ -43,7 +43,9 @@ from ..analysis import analyze_process
 from ..analysis.cfg import cfg_of
 from ..constants import EXCEPTION_BREAKPOINT, STATUS_WX86_BREAKPOINT
 from ..core.status import ExitReason
-from ..exceptions import BreakpointError, ProcessError, PydbgError
+from ..exceptions import (
+    BreakpointError, ProcessError, PydbgError, TimeoutError as PydbgTimeoutError,
+)
 from .format import BLOCK, TraceEvent
 
 # GetExitCodeProcess answers this while the process is still running.
@@ -332,7 +334,7 @@ class BblTracer:
 
     # ── running ────────────────────────────────────────────────
 
-    def run(self):
+    def run(self, max_idle_timeouts=3):
         """Arm if needed, run the target, record hits, remove own INT3s.
 
         The documented sequence is plan() -> arm() -> continue the pending
@@ -345,6 +347,14 @@ class BblTracer:
         Plans first when no plan exists. When there is nothing to trace it
         returns a summary whose `reason` is STOP_NO_BLOCKS instead of
         pretending an empty trace means the target ran nothing.
+
+        Args:
+            max_idle_timeouts: Consecutive empty WaitForDebugEvent waits
+                tolerated before the debugger gives up. Three waits (30 s at
+                the default timeout) is long enough for a busy target and
+                short enough that an idle or wedged one does not spin forever.
+                A timeout stops the trace with reason STOP_IDLE_TIMEOUT and
+                `truncated` True, rather than propagating as an error.
 
         A run stopped by `max_events` (or by an idle timeout) leaves the debug
         event uncontinued and the target paused. The summary says so in
@@ -368,10 +378,16 @@ class BblTracer:
             else:
                 if not self._armed_ids:
                     self.arm()
-                status = self.dbg.run(self._on_event)
-                if (status is not None
-                        and status.reason is ExitReason.TARGET_EXITED):
-                    self._reason = STOP_TARGET_EXITED
+                try:
+                    status = self.dbg.run(
+                        self._on_event,
+                        max_idle_timeouts=max_idle_timeouts)
+                except PydbgTimeoutError:
+                    self._reason = STOP_IDLE_TIMEOUT
+                else:
+                    if (status is not None
+                            and status.reason is ExitReason.TARGET_EXITED):
+                        self._reason = STOP_TARGET_EXITED
         finally:
             arming_warnings = list(self._arming_warnings)
             cleanup_warnings = self.disarm()
