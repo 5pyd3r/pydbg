@@ -223,7 +223,7 @@ class TestDataSectionPointers(unittest.TestCase):
     def test_the_stat_counts_the_index_not_the_reads(self):
         """Two readers can name one slot; the index holds it once."""
         result = self.analyze(_pointer_image()[0])
-        counted = sum(1 for refs in result.xrefs.values() for ref in refs
+        counted = sum(1 for found in result.xrefs.values() for ref in found
                       if ref.kind == 5)
 
         self.assertEqual(result.stats.data_refs, counted)

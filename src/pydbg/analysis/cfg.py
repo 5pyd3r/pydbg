@@ -158,6 +158,21 @@ def build_function_cfg(decoder, image, functions, entry, max_blocks=4096):
     return cfg
 
 
+def cfg_of(result, rva, max_blocks=4096):
+    """The CFG of the function containing 'rva', or None if there is none.
+
+    `FunctionTable.containing` is the lookup, deliberately unbounded: an
+    address past the last function would otherwise answer None where the
+    caller asked "which function is this in" and meant the nearest preceding
+    one. A caller that needs a bounded answer uses owners.function_of.
+    """
+    entry = result.functions.containing(rva)
+    if entry is None:
+        return None
+    return build_function_cfg(result.decoder, result.image, result.functions,
+                              entry, max_blocks=max_blocks)
+
+
 def cfg_to_dot(cfg, name=None):
     """Render a CFG as Graphviz source.
 

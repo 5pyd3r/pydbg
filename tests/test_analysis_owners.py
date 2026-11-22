@@ -16,6 +16,7 @@ displacement and never becomes a boundary of its own.
 import unittest
 
 from pydbg.analysis import owners
+from pydbg.analysis.scan import linear_scan
 from tests.pe_builder import PEBuilder
 
 IMAGE_BASE = 0x400000
@@ -115,7 +116,7 @@ class TestTheFixture(unittest.TestCase):
 
     def test_the_scan_straddles_the_table_end(self):
         result = analyze()
-        result.scan(TABLE_RVA, TABLE_END + 8)
+        linear_scan(result.decoder, TABLE_RVA, TABLE_END + 8)
         covering = result.decoder.enclosing_instruction(TABLE_END)
         self.assertIsNotNone(covering, "nothing covers the byte after the table")
         self.assertLess(covering, TABLE_END,
@@ -135,7 +136,7 @@ class TestTheFixture(unittest.TestCase):
         findings about the same byte.
         """
         result = analyze()
-        result.scan(TABLE_RVA, TABLE_END + 8)
+        linear_scan(result.decoder, TABLE_RVA, TABLE_END + 8)
         self.assertFalse(result.decoder.is_decoded(TABLE_END))
         self.assertIsNotNone(result.decoder.enclosing_instruction(TABLE_END))
         found = owners.boundary_of(result, TABLE_END)
@@ -305,7 +306,7 @@ class TestTheStraddledByte(unittest.TestCase):
 
     def setUp(self):
         self.result = analyze()
-        self.scan = self.result.scan(TABLE_RVA, TABLE_END + 8)
+        self.scan = linear_scan(self.result.decoder, TABLE_RVA, TABLE_END + 8)
 
     def test_coverage_looks_like_success(self):
         """The figure that made this shape invisible, kept as a claim.
@@ -356,8 +357,8 @@ class TestClassifyRange(unittest.TestCase):
         self.assertFalse(report.is_fully_owned())
 
     def test_a_truncated_range_never_claims_full_ownership(self):
-        report = owners.classify_range(self.result, ENTRY_RVA, ENTRY_RVA + 0x2000,
-                                            limit=16)
+        report = owners.classify_range(self.result, ENTRY_RVA,
+                                       ENTRY_RVA + 0x2000, limit=16)
         self.assertTrue(report.truncated)
         self.assertFalse(report.is_fully_owned())
 
@@ -490,7 +491,7 @@ class TestTheDeclaredKindsHaveProducers(unittest.TestCase):
 
     def test_the_fixture_produces_every_boundary_kind(self):
         result = analyze()
-        result.scan(TABLE_RVA, TABLE_END + 8)
+        linear_scan(result.decoder, TABLE_RVA, TABLE_END + 8)
         seen = {owners.boundary_of(result, rva).kind
                 for rva in range(TEXT_RVA, TABLE_END + 8)}
         seen.add(owners.boundary_of(result, IMAGE_BASE).kind)

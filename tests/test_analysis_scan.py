@@ -9,6 +9,7 @@ the list comes out shorter, and nothing says so.
 
 import unittest
 
+from pydbg.analysis.scan import linear_scan, scan_executable, scan_section
 from tests.pe_builder import PEBuilder
 
 IMAGE_BASE = 0x400000
@@ -71,13 +72,13 @@ class TestTheFixture(unittest.TestCase):
     def test_the_guard_byte_stops_the_last_gap_byte_from_decoding(self):
         """The mistake the guard exists to prevent, stated as a test."""
         ungarded = analyze(NOP * 4 + b"\xff" * 4 + NOP * 4 + RET)
-        scan = ungarded.scan(TEXT_RVA, TEXT_RVA + 13)
+        scan = linear_scan(ungarded.decoder, TEXT_RVA, TEXT_RVA + 13)
 
         # One byte short of the gap, and the tail is a `call` — not a nop.
         self.assertEqual(scan.undecodable[0].size, 3)
 
         guarded = analyze(NOP * 4 + gap(4) + NOP * 4 + RET)
-        scan = guarded.scan(TEXT_RVA, TEXT_RVA + 14)
+        scan = linear_scan(guarded.decoder, TEXT_RVA, TEXT_RVA + 14)
         self.assertEqual(scan.undecodable[0].size, 4)
 
     def test_the_decodable_fixture_really_decodes(self):
@@ -89,7 +90,7 @@ class TestTheFixture(unittest.TestCase):
 class TestCleanScan(unittest.TestCase):
     def test_a_range_that_decodes_completely_is_complete(self):
         code = NOP * 8 + RET
-        scan = analyze(code).scan(TEXT_RVA, TEXT_RVA + len(code))
+        scan = linear_scan(analyze(code).decoder, TEXT_RVA, TEXT_RVA + len(code))
 
         self.assertTrue(scan.is_complete())
         self.assertEqual(scan.undecodable, ())
@@ -99,7 +100,7 @@ class TestCleanScan(unittest.TestCase):
 
     def test_a_complete_scan_hands_over_its_instructions(self):
         code = NOP * 8 + RET
-        scan = analyze(code).scan(TEXT_RVA, TEXT_RVA + len(code))
+        scan = linear_scan(analyze(code).decoder, TEXT_RVA, TEXT_RVA + len(code))
 
         instructions = scan.instructions()
         self.assertEqual(len(instructions), 9)
@@ -108,7 +109,7 @@ class TestCleanScan(unittest.TestCase):
 
     def test_instructions_are_non_overlapping_and_cover_the_range(self):
         code = NOP * 4 + b"\x55\x8b\xec" + RET      # push ebp; mov ebp,esp; ret
-        scan = analyze(code).scan(TEXT_RVA, TEXT_RVA + len(code))
+        scan = linear_scan(analyze(code).decoder, TEXT_RVA, TEXT_RVA + len(code))
 
         end = TEXT_RVA
         for rva, size in scan.instructions():
@@ -121,7 +122,7 @@ class TestCleanScan(unittest.TestCase):
 class TestGapsAreReported(unittest.TestCase):
     def test_a_gap_makes_the_scan_incomplete(self):
         code = NOP * 4 + gap(4) + NOP * 4 + RET
-        scan = analyze(code).scan(TEXT_RVA, TEXT_RVA + len(code))
+        scan = linear_scan(analyze(code).decoder, TEXT_RVA, TEXT_RVA + len(code))
 
         self.assertFalse(scan.is_complete())
         self.assertEqual(len(scan.undecodable), 1)
@@ -130,7 +131,7 @@ class TestGapsAreReported(unittest.TestCase):
     def test_a_gap_is_one_run_not_one_entry_per_byte(self):
         """A 16-byte hole is one finding. Reporting 16 buries it."""
         code = NOP * 4 + gap(16) + NOP * 4 + RET
-        scan = analyze(code).scan(TEXT_RVA, TEXT_RVA + len(code))
+        scan = linear_scan(analyze(code).decoder, TEXT_RVA, TEXT_RVA + len(code))
 
         runs = scan.undecodable
         self.assertEqual(len(runs), 1)
@@ -142,7 +143,7 @@ class TestGapsAreReported(unittest.TestCase):
         from pydbg.exceptions import PydbgError
 
         code = NOP * 4 + gap(4) + NOP * 4 + RET      # 4 + 5 + 4 + 1
-        scan = analyze(code).scan(TEXT_RVA, TEXT_RVA + len(code))
+        scan = linear_scan(analyze(code).decoder, TEXT_RVA, TEXT_RVA + len(code))
 
         with self.assertRaises(PydbgError) as caught:
             scan.instructions()
@@ -155,7 +156,7 @@ class TestGapsAreReported(unittest.TestCase):
 
     def test_the_same_scan_hands_them_over_when_asked_explicitly(self):
         code = NOP * 4 + gap(4) + NOP * 4 + RET
-        scan = analyze(code).scan(TEXT_RVA, TEXT_RVA + len(code))
+        scan = linear_scan(analyze(code).decoder, TEXT_RVA, TEXT_RVA + len(code))
 
         self.assertEqual(rvas(scan, allow_incomplete=True),
                          [TEXT_RVA + i for i in range(4)]
@@ -164,7 +165,7 @@ class TestGapsAreReported(unittest.TestCase):
     def test_an_unreadable_region_is_reported_as_a_gap_too(self):
         """Past the last section there is nothing to decode — also a gap."""
         code = NOP * 4
-        scan = analyze(code).scan(TEXT_RVA, TEXT_RVA + 64)
+        scan = linear_scan(analyze(code).decoder, TEXT_RVA, TEXT_RVA + 64)
 
         self.assertFalse(scan.is_complete())
         self.assertEqual(len(scan.undecodable), 1)
@@ -177,7 +178,7 @@ class TestResyncExposure(unittest.TestCase):
 
     def test_resync_records_where_it_stopped_and_resumed(self):
         code = NOP * 4 + gap(4) + NOP * 4 + RET
-        scan = analyze(code).scan(TEXT_RVA, TEXT_RVA + len(code))
+        scan = linear_scan(analyze(code).decoder, TEXT_RVA, TEXT_RVA + len(code))
 
         self.assertEqual(len(scan.resyncs), 1)
         resync = scan.resyncs[0]
@@ -188,7 +189,7 @@ class TestResyncExposure(unittest.TestCase):
 
     def test_bytes_decoded_after_a_resync_are_flagged_as_unproven(self):
         code = NOP * 4 + gap(4) + NOP * 4 + RET
-        scan = analyze(code).scan(TEXT_RVA, TEXT_RVA + len(code))
+        scan = linear_scan(analyze(code).decoder, TEXT_RVA, TEXT_RVA + len(code))
 
         runs = scan.unproven_runs()
         self.assertEqual(len(runs), 1)
@@ -200,13 +201,13 @@ class TestResyncExposure(unittest.TestCase):
     def test_a_clean_scan_has_nothing_unproven(self):
         """The other half of the claim: no resync means no exposure."""
         code = NOP * 8 + RET
-        scan = analyze(code).scan(TEXT_RVA, TEXT_RVA + len(code))
+        scan = linear_scan(analyze(code).decoder, TEXT_RVA, TEXT_RVA + len(code))
 
         self.assertEqual(scan.unproven_runs(), ())
 
     def test_two_gaps_give_two_exposures_not_one_long_one(self):
         code = NOP * 2 + gap(2) + NOP * 2 + gap(2) + NOP * 2
-        scan = analyze(code).scan(TEXT_RVA, TEXT_RVA + len(code))
+        scan = linear_scan(analyze(code).decoder, TEXT_RVA, TEXT_RVA + len(code))
 
         self.assertEqual(len(scan.resyncs), 2)
         runs = scan.unproven_runs()
@@ -228,7 +229,7 @@ class TestAccounting(unittest.TestCase):
         }
         for name, (code, scanned) in cases.items():
             with self.subTest(case=name):
-                scan = analyze(code).scan(TEXT_RVA, TEXT_RVA + scanned)
+                scan = linear_scan(analyze(code).decoder, TEXT_RVA, TEXT_RVA + scanned)
                 self.assertEqual(scan.unaccounted_bytes(), 0)
                 self.assertEqual(
                     scan.covered_bytes
@@ -236,14 +237,14 @@ class TestAccounting(unittest.TestCase):
                     scan.scanned_bytes)
 
     def test_a_gap_at_the_end_of_the_range_needs_no_resync(self):
-        scan = analyze(NOP * 4 + gap(4)).scan(TEXT_RVA, TEXT_RVA + 8)
+        scan = linear_scan(analyze(NOP * 4 + gap(4)).decoder, TEXT_RVA, TEXT_RVA + 8)
 
         self.assertEqual(len(scan.undecodable), 1)
         self.assertEqual(scan.resyncs, ())
 
     def test_a_truncated_scan_says_so_instead_of_stopping_quietly(self):
         code = NOP * 8 + RET
-        scan = analyze(code).scan(TEXT_RVA, TEXT_RVA + len(code), limit=3)
+        scan = linear_scan(analyze(code).decoder, TEXT_RVA, TEXT_RVA + len(code), limit=3)
 
         self.assertTrue(scan.truncated)
         self.assertFalse(scan.is_complete())
@@ -252,7 +253,7 @@ class TestAccounting(unittest.TestCase):
 
     def test_a_truncated_scan_is_not_called_complete_even_though_it_hit_no_gap(self):
         """Truncation and cleanliness are independent, and both must be said."""
-        scan = analyze(NOP * 8).scan(TEXT_RVA, TEXT_RVA + 8, limit=3)
+        scan = linear_scan(analyze(NOP * 8).decoder, TEXT_RVA, TEXT_RVA + 8, limit=3)
 
         self.assertEqual(scan.undecodable, ())
         self.assertEqual(scan.resyncs, ())
@@ -260,14 +261,14 @@ class TestAccounting(unittest.TestCase):
 
     def test_coverage_is_measured_against_the_range_not_the_image(self):
         code = NOP * 8 + RET
-        scan = analyze(code).scan(TEXT_RVA, TEXT_RVA + 4)
+        scan = linear_scan(analyze(code).decoder, TEXT_RVA, TEXT_RVA + 4)
 
         self.assertEqual(scan.scanned_bytes, 4)
         self.assertEqual(scan.covered_bytes, 4)
         self.assertEqual(scan.coverage_percent(), 100.0)
 
     def test_an_empty_range_is_complete_rather_than_an_error(self):
-        scan = analyze(NOP * 8).scan(TEXT_RVA, TEXT_RVA)
+        scan = linear_scan(analyze(NOP * 8).decoder, TEXT_RVA, TEXT_RVA)
 
         self.assertEqual(scan.decoded, ())
         self.assertTrue(scan.is_complete())
@@ -276,7 +277,7 @@ class TestAccounting(unittest.TestCase):
 class TestEntryPoints(unittest.TestCase):
     def test_scan_section_by_name(self):
         result = analyze(NOP * 8 + RET)
-        scan = result.scan_section(".text")
+        scan = scan_section(result.image, result.decoder, ".text")
 
         self.assertEqual(scan.start, TEXT_RVA)
         self.assertTrue(scan.is_complete())
@@ -286,11 +287,11 @@ class TestEntryPoints(unittest.TestCase):
 
         result = analyze(NOP * 8 + RET)
         with self.assertRaises(PydbgError):
-            result.scan_section(".nope")
+            scan_section(result.image, result.decoder, ".nope")
 
     def test_scan_text_returns_one_scan_per_executable_section(self):
         result = analyze(NOP * 8 + RET)
-        scans = result.scan_text()
+        scans = scan_executable(result.image, result.decoder)
 
         self.assertEqual([name for name, _ in scans], [".text"])
         self.assertTrue(scans[0][1].is_complete())
@@ -307,7 +308,7 @@ class TestEntryPoints(unittest.TestCase):
 
         result = analyze(code)
         self.assertEqual(result.decoder.covered_in(*region), 0)
-        result.scan(*region)
+        linear_scan(result.decoder, *region)
         self.assertEqual(result.decoder.covered_in(*region), 0)
 
     def test_a_scan_can_claim_the_bytes_it_decoded_when_asked(self):
@@ -315,7 +316,7 @@ class TestEntryPoints(unittest.TestCase):
         region = (TEXT_RVA + 1, TEXT_RVA + 5)
 
         result = analyze(code)
-        scan = result.scan(*region, mark_covered=True)
+        scan = linear_scan(result.decoder, *region, mark_covered=True)
 
         self.assertTrue(scan.is_complete())
         self.assertEqual(result.decoder.covered_in(*region), 4)
@@ -340,7 +341,7 @@ class TestIndependenceFromTheSweep(unittest.TestCase):
         # bytes — asserting afterwards would be asserting about the scan.
         self.assertEqual(result.decoder.size_of(TEXT_RVA + 1), 0)
 
-        scan = result.scan(TEXT_RVA + 1, TEXT_RVA + len(code))
+        scan = linear_scan(result.decoder, TEXT_RVA + 1, TEXT_RVA + len(code))
         self.assertTrue(scan.is_complete())
         self.assertEqual(len(scan.instructions()), 9)
 

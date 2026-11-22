@@ -10,7 +10,7 @@ because it reads as a finding.
 import struct
 import unittest
 
-from pydbg.analysis import report
+from pydbg.analysis import attribute_coverage, report
 from tests.pe_builder import PEBuilder
 
 TEXT_RVA = 0x1000
@@ -48,7 +48,7 @@ OVERLAP_CODE = (b"\xb8\x78\x56\x34\x12"
 class TestUncoveredClassification(unittest.TestCase):
 
     def breakdown(self, result):
-        return result.attribution().sections[".text"]
+        return attribute_coverage(result).sections[".text"]
 
     # A bare `ret` as the entry: nothing branches into the fill, so it stays
     # uncovered. CODE's call would land inside it and decode it.
@@ -101,7 +101,7 @@ class TestUncoveredClassification(unittest.TestCase):
         builder.add_section(".text", bytes(text), TEXT_RVA)
         builder.add_section(".data", b"\x00" * 16, DATA_RVA, 0xC0000040)
         result = analyze_bytes(builder.build())
-        breakdown = result.attribution().sections[".text"]
+        breakdown = attribute_coverage(result).sections[".text"]
         self.assertGreaterEqual(
             breakdown.data, 1,
             "the pointer target was not counted as data")
@@ -109,7 +109,7 @@ class TestUncoveredClassification(unittest.TestCase):
     def test_totals_add_up_to_the_section(self):
         result = analyze(tail=b"\xcc" * 8 + b"\xc3\x90\xc3")
         breakdown = self.breakdown(result)
-        attribution = result.attribution()
+        attribution = attribute_coverage(result)
 
         classified = sum(end - origin
                          for origin, end, _kind in attribution.runs[".text"])
@@ -126,7 +126,7 @@ class TestUncoveredClassification(unittest.TestCase):
         a stray two-byte gap cannot look like evidence of missed code.
         """
         result = analyze()
-        attribution = result.attribution(min_run=4)
+        attribution = attribute_coverage(result, min_run=4)
         for start, end, kind in attribution.runs[".text"]:
             if end - start < 4:
                 self.assertEqual(kind, "unknown")
@@ -139,7 +139,7 @@ class TestOverlapAttribution(unittest.TestCase):
         result = analyze(OVERLAP_CODE)
         self.assertGreater(result.stats.overlap_bytes, 0)
 
-        attribution = result.attribution()
+        attribution = attribute_coverage(result)
         self.assertTrue(attribution.overlap_by_origin,
                         "overlap happened but was not attributed")
         total = sum(attribution.overlap_by_origin.values())
@@ -152,7 +152,7 @@ class TestOverlapAttribution(unittest.TestCase):
         without saying which seed class to change is what this replaced.
         """
         result = analyze(OVERLAP_CODE)
-        attribution = result.attribution()
+        attribution = attribute_coverage(result)
         self.assertTrue(attribution.overlap_by_origin)
         for (existing, new) in attribution.overlap_by_origin:
             self.assertNotEqual(existing, "?")
@@ -177,7 +177,7 @@ class TestOverlapAttribution(unittest.TestCase):
         result = analyze()
         if result.stats.overlap_bytes:
             self.skipTest("environment: fixture produced overlap")
-        self.assertEqual(result.attribution().overlap_by_origin, {})
+        self.assertEqual(attribute_coverage(result).overlap_by_origin, {})
 
 
 class TestDeltas(unittest.TestCase):
@@ -229,7 +229,7 @@ class TestRealImageAttribution(unittest.TestCase):
             raise unittest.SkipTest(f"environment: no system DLL at {path}")
         from pydbg.analysis import analyze_file
         cls.result = analyze_file(path)
-        cls.attribution = cls.result.attribution()
+        cls.attribution = attribute_coverage(cls.result)
 
     def setUp(self):
         if not hasattr(self.__class__, "attribution"):

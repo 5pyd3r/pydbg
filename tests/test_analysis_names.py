@@ -12,7 +12,7 @@ import struct
 import tempfile
 import unittest
 
-from pydbg.analysis import report
+from pydbg.analysis import names, report
 from tests.pe_builder import PEBuilder
 
 TEXT_RVA = 0x1000
@@ -92,13 +92,13 @@ class TestAutomaticNames(unittest.TestCase):
         from tests.test_pe import build_pe_with_exports
 
         result = analyze_bytes(build_pe_with_exports())
-        table = result.names()
+        table = names.resolve_for(result)
         self.assertEqual(table.name_of(0x1000), "MyExport")
         self.assertEqual(table.get(0x1000).source, "export")
 
     def test_unnamed_function_starts_get_a_made_up_label(self):
         result = analyze()
-        table = result.names()
+        table = names.resolve_for(result)
         self.assertEqual(table.name_of(TEXT_RVA), f"sub_{TEXT_RVA:06x}")
         self.assertEqual(table.get(TEXT_RVA).source, "auto")
 
@@ -226,9 +226,10 @@ class TestWorkspace(unittest.TestCase):
         workspace.name(TEXT_RVA, "WinMain")
 
         result = analyze_file(self.image_path)
-        self.assertEqual(result.names().label(TEXT_RVA), f"sub_{TEXT_RVA:06x}")
+        self.assertEqual(names.resolve_for(result).label(TEXT_RVA),
+                         f"sub_{TEXT_RVA:06x}")
 
-        table = result.names(workspace)
+        table = names.resolve_for(result, workspace)
         self.assertEqual(table.label(TEXT_RVA), "WinMain")
         self.assertEqual(table.get(TEXT_RVA).source, "user")
 
@@ -254,7 +255,7 @@ class TestRendering(unittest.TestCase):
         workspace.name(TEXT_RVA, "WinMain")
         workspace.comment(TEXT_RVA, "starts here")
         text = report.render_listing(result.image, TEXT_RVA, 8,
-                                     names=result.names(workspace),
+                                     names=names.resolve_for(result, workspace),
                                      comments=workspace.comments)
         self.assertIn("WinMain", text)
         self.assertIn("starts here", text)

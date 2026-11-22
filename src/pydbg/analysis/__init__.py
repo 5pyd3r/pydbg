@@ -27,7 +27,9 @@ from .attribution import (
     CoverageAttribution, UncoveredBreakdown, attribute_coverage, deltas,
     span_summary,
 )
-from .cfg import CFGBlock, FunctionCFG, build_function_cfg, cfg_to_dot
+from .cfg import (
+    CFGBlock, FunctionCFG, build_function_cfg, cfg_of, cfg_to_dot,
+)
 from .consts import ConstantTracker
 from .engine import (
     StaticAnalyzer, analyze_bytes, analyze_file, analyze_pe, analyze_process,
@@ -43,7 +45,7 @@ from .owners import (
     ReceiverNote, RegionOwnership, boundary_of, classify_range, container_of,
     function_of, memory_base_registers, receiver_of,
 )
-from .names import Name, NameTable, auto_names, import_names
+from .names import Name, NameTable, auto_names, import_names, resolve_for
 from .workspace import Workspace, WorkspaceError, image_fingerprint
 from .process_source import ProcessSource
 from .refs import (
@@ -66,11 +68,11 @@ __all__ = [
     'FunctionTable', 'SeedProvider', 'SeedSet', 'looks_like_entry',
     'AnalysisResult', 'AnalysisStats', 'CoverageReport', 'Function',
     'IndirectSite', 'RefKind', 'SeedConfig', 'Xref',
-    'FunctionCFG', 'CFGBlock', 'build_function_cfg', 'cfg_to_dot',
+    'FunctionCFG', 'CFGBlock', 'build_function_cfg', 'cfg_of', 'cfg_to_dot',
     'ConstantTracker',
     'CoverageAttribution', 'UncoveredBreakdown', 'attribute_coverage',
     'deltas', 'span_summary',
-    'Name', 'NameTable', 'auto_names', 'import_names',
+    'Name', 'NameTable', 'auto_names', 'import_names', 'resolve_for',
     'Access', 'FieldUse', 'StructureProfile', 'collect_accesses',
     'profiles', 'STACK_REGISTERS',
     'Workspace', 'WorkspaceError', 'image_fingerprint',

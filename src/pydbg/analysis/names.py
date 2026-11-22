@@ -180,3 +180,13 @@ def resolve(result, names=None):
         else:
             table.add(rva, name, SOURCE_USER)
     return table
+
+
+def resolve_for(result, workspace=None):
+    """`resolve` over a result, with a workspace's supplied names on top.
+
+    Built on request rather than during the run: it walks the exports and every
+    function start, which is real work for an image with thousands of them, and
+    a caller interested only in coverage should not pay for it.
+    """
+    return resolve(result, workspace.names if workspace is not None else None)

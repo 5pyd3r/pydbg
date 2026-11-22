@@ -8,7 +8,7 @@ success. Only running it against a real process distinguishes the two.
 
 import unittest
 
-from pydbg.analysis import report
+from pydbg.analysis import cfg as cfg_module, report
 from tests.pe_builder import PEBuilder
 
 TEXT_RVA = 0x1000
@@ -48,7 +48,7 @@ FALLTHROUGH = 0x1004
 class TestFunctionCFG(unittest.TestCase):
 
     def cfg_of(self, code, rva=TEXT_RVA):
-        return analyze(code).cfg_of(rva)
+        return cfg_module.cfg_of(analyze(code), rva)
 
     def test_conditional_branch_yields_two_successors(self):
         cfg = self.cfg_of(BRANCHED)
@@ -104,7 +104,7 @@ class TestFunctionCFG(unittest.TestCase):
         full = self.cfg_of(BRANCHED)
         self.assertEqual(len(full.blocks), 3)      # entry, fallthrough, target
 
-        limited = analyze(BRANCHED).cfg_of(TEXT_RVA, max_blocks=1)
+        limited = cfg_module.cfg_of(analyze(BRANCHED), TEXT_RVA, max_blocks=1)
         self.assertTrue(limited.truncated)
         self.assertFalse(limited.complete)
 
@@ -120,7 +120,7 @@ class TestDotRendering(unittest.TestCase):
     def test_unresolved_edges_appear_as_nodes(self):
         """The picture must show the gap, not merely be small."""
         from pydbg.analysis import cfg_to_dot
-        cfg = analyze(b"\xff\xe0").cfg_of(TEXT_RVA)
+        cfg = cfg_module.cfg_of(analyze(b"\xff\xe0"), TEXT_RVA)
         source = cfg_to_dot(cfg)
         self.assertIn("indirect?", source)
         self.assertIn("style=dashed", source)

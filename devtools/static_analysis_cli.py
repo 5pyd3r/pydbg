@@ -155,8 +155,9 @@ def cmd_attribution(args):
 
 
 def cmd_cfg(args):
+    from pydbg.analysis import cfg_of
     result = analyze_file(args.image)
-    cfg = result.cfg_of(args.at)
+    cfg = cfg_of(result, args.at)
     if cfg is None:
         print(f"{args.at:#x} is not inside any recovered function")
         return 1
@@ -165,9 +166,9 @@ def cmd_cfg(args):
 
 
 def cmd_dot(args):
-    from pydbg.analysis import cfg_to_dot
+    from pydbg.analysis import cfg_of, cfg_to_dot
     result = analyze_file(args.image)
-    cfg = result.cfg_of(args.at)
+    cfg = cfg_of(result, args.at)
     if cfg is None:
         print(f"{args.at:#x} is not inside any recovered function")
         return 1

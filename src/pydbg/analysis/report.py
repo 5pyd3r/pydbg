@@ -6,7 +6,9 @@ numbers these get checked against come from a separate prototype, and
 eyeballing two tables is not a comparison.
 """
 
+from .access import profiles
 from .model import RefKind
+from .names import resolve_for
 from .refs import (
     call_graph_is_complete, indirect_call_sites, ref_kinds, xrefs_are_complete,
 )
@@ -51,8 +53,8 @@ def render_structures(result, workspace=None, limit=None, function=None,
     cannot be decided statically, and a report that named a class would look
     exactly like one that had proved it.
     """
-    table = result.names(workspace) if workspace is not None else None
-    found = result.structures(min_offsets=min_offsets)
+    table = resolve_for(result, workspace) if workspace is not None else None
+    found = profiles(result, min_offsets=min_offsets)
 
     lines = []
     shown = 0
@@ -81,7 +83,7 @@ def render_names(result, workspace=None, limit=None, source=None):
     name is exact, and `sub_401000` is this analysis admitting it does not
     know. They must not look alike in the output.
     """
-    table = result.names(workspace)
+    table = resolve_for(result, workspace)
     rows = sorted(table.items())
     if source is not None:
         rows = [(rva, name) for rva, name in rows if name.source == source]
@@ -98,7 +100,7 @@ def render_functions(result, limit=None, workspace=None, names=True):
     functions = result.functions.functions()
     if limit is not None:
         functions = functions[:limit]
-    table = result.names(workspace) if names else None
+    table = resolve_for(result, workspace) if names else None
 
     lines = [f"{'rva':>10s} {'size':>6s}  conf  name"]
     for function in functions:
