@@ -277,6 +277,19 @@ class _SwitchPlan:
     merge: int | None
 
 
+def _slot_targets(table, image):
+    """(slot index, target RVA or None) for every slot a jump table names.
+
+    Both readers of a SlotTable -- switch recognition here and the extra-block
+    discovery in `jump_table_targets` -- must decode the slots the same way.
+    Sharing the loop is what keeps two copies of the stride arithmetic from
+    drifting; the target stays None when a slot does not hold an RVA.
+    """
+    for index in range(table.count):
+        value = image.read_pointer(table.base + index * table.stride)
+        yield index, None if value is None else image.va_to_rva(value)
+
+
 def _block_end(block):
     """The RVA of a block's last statement (its first address when empty)."""
     return block.stmts[-1].rva if block.stmts else block.rva
@@ -643,9 +656,7 @@ class _Builder:
             return None
 
         cases = []
-        for index in range(table.count):
-            value = self.image.read_pointer(table.base + index * table.stride)
-            target = None if value is None else self.image.va_to_rva(value)
+        for index, target in _slot_targets(table, self.image):
             if target is None or target not in self.blocks:
                 return None
             cases.append((index, target))
@@ -1201,9 +1212,7 @@ def jump_table_targets(blocks, successors, slot_tables, decoder=None,
         if not any(kind == INDIRECT
                    for kind, _ in successors.get(dispatch, ())):
             continue
-        for index in range(table.count):
-            value = image.read_pointer(table.base + index * table.stride)
-            target = None if value is None else image.va_to_rva(value)
+        for _, target in _slot_targets(table, image):
             if target is not None and image.is_exec(target):
                 targets.add(target)
     return tuple(sorted(targets))
