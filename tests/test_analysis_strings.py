@@ -246,5 +246,37 @@ class TestExtractStrings(unittest.TestCase):
                 f"{string.text!r} at {string.rva:#x} is outside every section")
 
 
+class TestDegenerateInput(unittest.TestCase):
+    """Malformed input is ordinary here, so every entry point has an answer.
+
+    A scanner that raises on a truncated section turns a bad sample into a
+    crashed run; a scanner that returns an empty list says what it could not
+    read.
+    """
+
+    def test_no_printable_bytes_yields_nothing(self):
+        self.assertEqual(strings_in_bytes(b"\x00\x01\x02\x03"), [])
+        self.assertEqual(strings_in_bytes(b""), [])
+
+    def test_min_length_one_keeps_single_characters(self):
+        self.assertEqual([s.text for s in strings_in_bytes(b"A", min_length=1)],
+                         ["A"])
+        self.assertEqual(
+            [s.text for s in strings_in_bytes(b"A\x00", min_length=1)],
+            ["A"])
+
+    def test_an_image_with_no_sections_has_no_entropy_rows(self):
+        self.assertEqual(section_entropy(PE(PEBuilder().build())), [])
+
+    def test_hints_on_a_truncated_image_are_all_negative_but_the_imports(self):
+        builder = PEBuilder(magic=0x10B, image_base=0x400000)
+        builder.add_section(".text", b"\x90" * 0x100, 0x60000020)
+        hints = packing_hints(PE(builder.build()[:-1]))
+        self.assertEqual(hints.high_entropy_sections, [])
+        self.assertEqual(hints.write_exec_sections, [])
+        self.assertEqual(hints.suspicious_section_names, [])
+        self.assertTrue(hints.low_import_count)
+
+
 if __name__ == "__main__":
     unittest.main()
