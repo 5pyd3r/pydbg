@@ -10,7 +10,9 @@ both produce output that looks like a finding.
 import os
 import unittest
 
-from pydbg.analysis import packing_hints, section_entropy, strings_in_bytes
+from pydbg.analysis import (
+    extract_strings, packing_hints, section_entropy, strings_in_bytes,
+)
 from pydbg.pe import PE
 
 from tests.pe_builder import PEBuilder, build_loaded_image_with_one_import
@@ -185,6 +187,63 @@ class TestPackingHints(unittest.TestCase):
         self.assertTrue(packing_hints(pe).low_import_count)
         self.assertFalse(
             packing_hints(pe, low_import_threshold=1).low_import_count)
+
+
+class TestExtractStrings(unittest.TestCase):
+    """Walking a PE's sections, where addresses become RVAs for real."""
+
+    def build(self):
+        builder = PEBuilder(magic=0x10B, image_base=0x400000)
+        builder.add_section(".text", b"\x00hello\x00", 0x1000)
+        builder.add_section(".rdata", b"\x00world\x00", 0x2000)
+        return PE(builder.build())
+
+    def test_every_section_is_searched_by_default(self):
+        found = extract_strings(self.build())
+        self.assertEqual([(s.rva, s.text) for s in found],
+                         [(0x1001, "hello"), (0x2001, "world")])
+
+    def test_a_named_subset_limits_the_search(self):
+        pe = self.build()
+        self.assertEqual(
+            [s.text for s in extract_strings(pe, sections=[".rdata"])],
+            ["world"])
+        self.assertEqual(extract_strings(pe, sections=[".missing"]), [])
+
+    def test_min_length_reaches_the_per_section_scan(self):
+        self.assertEqual(extract_strings(self.build(), min_length=6), [])
+
+    def test_results_are_in_address_order_not_section_order(self):
+        """The section table is not a promise about RVAs; the output is."""
+        builder = PEBuilder(magic=0x10B, image_base=0x400000)
+        builder.add_section(".late", b"\x00late\x00", 0x3000)
+        builder.add_section(".early", b"\x00early\x00", 0x1000)
+        found = extract_strings(PE(builder.build()))
+        self.assertEqual([s.text for s in found], ["early", "late"])
+        self.assertEqual([s.rva for s in found], [0x1001, 0x3001])
+
+    def test_an_unreadable_section_is_skipped_rather_than_raised(self):
+        builder = PEBuilder(magic=0x10B, image_base=0x400000)
+        builder.add_section(".text", b"\x00hello\x00", 0x1000)
+        pe = PE(builder.build()[:-1])
+        self.assertEqual(extract_strings(pe), [])
+
+    @unittest.skipUnless(
+        os.path.exists(TARGET_X64),
+        "target not built: tests/target/simple_target_x64.exe")
+    def test_every_string_on_a_real_image_lands_in_a_section(self):
+        """The RVA is usable only if it points back into the image."""
+        pe = PE.from_file(TARGET_X64)
+        found = extract_strings(pe)
+        self.assertGreaterEqual(len(found), 1)
+        ranges = [(section.virtual_address,
+                   section.virtual_address + section.span)
+                  for section in pe.sections]
+        for string in found:
+            self.assertIn(string.encoding, ("ascii", "utf-16le"))
+            self.assertTrue(
+                any(start <= string.rva < end for start, end in ranges),
+                f"{string.text!r} at {string.rva:#x} is outside every section")
 
 
 if __name__ == "__main__":

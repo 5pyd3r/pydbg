@@ -134,6 +134,28 @@ def strings_in_bytes(data, base_rva=0, min_length=4):
     return found
 
 
+def extract_strings(pe, min_length=4, sections=None):
+    """Printable runs in the image's sections, in address order.
+
+    `sections` is None for every section the file stores, or a list of section
+    names to limit the search. A section that cannot be read is skipped, which
+    is `read_rva`'s contract: a truncated image yields the strings before the
+    truncation and nothing else, rather than an exception.
+    """
+    wanted = None if sections is None else set(sections)
+    found = []
+    for section in pe.sections:
+        if wanted is not None and section.name not in wanted:
+            continue
+        data = pe.read_rva(section.virtual_address, section.span)
+        if not data:
+            continue
+        found.extend(strings_in_bytes(data, base_rva=section.virtual_address,
+                                      min_length=min_length))
+    found.sort(key=lambda string: (string.rva, string.encoding))
+    return found
+
+
 def _shannon_entropy(data):
     """-Σ p·log2(p) over the byte distribution; 0.0 when there are no bytes."""
     counts = Counter(data)
