@@ -85,7 +85,8 @@
 - **Phase 1（本规格）**：S1 补全、S8 字符串/熵/壳启发。纯 Python，无新依赖。
 - **Phase 2**：S2 边界（`.pdata` 的 `end_rva` 精确定界；UNWIND_INFO 的帧信息留到 Phase 5 的变量恢复）+ S9 反编译器（按 `decompiler-options` 的 S0–S5）。
 - **Phase 3a**：D5 块级追踪——软件断点 + v1 记录格式 + 回放/过滤/覆盖率。
-- **Phase 3b**：D6 插桩与指令/内存级 trace（复用现有 LLVM 后端；未启用构建时跳过）。
+- **Phase 3b**：D5 延续（指令级窗口 trace、硬件 watchpoint 内存观察）+ D6 函数级探针（见 §9；
+  探针用硬件执行断点，不做 detour/LLVM，理由写在 §9.1）。
 - **Phase 4**：D8 dump 与 PE 重建。
 - **Phase 5**：S6/S7 类型与符号（PDB）。
 - **Phase 6**：D2/D9/D10 补齐与 X3/X4 收口。
@@ -268,7 +269,145 @@ TraceSummary(events, blocks, reason, elapsed_ns,
 指令级/内存级记录（3b，需要 D6 插桩）、跨进程与内核 trace、时间戳精度承诺、把 trace 变成覆盖率
 （`block_coverage` 只是汇总，不替代静态 `CoverageReport`）。
 
-## 9. 明确不做
+## 9. Phase 3b：指令级窗口、内存观察与函数级探针（D5 延续 + D6）
+
+目标：在 Phase 3a 的块级事件之外，补上三类**可落盘的事实**：一个线程窗口内执行了哪些指令、
+被观察的内存地址何时被写、某个函数被调用了几次。三者与 `BblTracer` 共用同一套 v1 记录格式、
+`TraceEvent`、`TraceSummary` 与 replay，不新增记录格式版本。
+
+### 9.1 边界与决策（与 `06-trace-instrumentation` 的差异已记录）
+
+- **窗口，不是全量**：指令 trace 是单线程、单次运行的窗口（默认上限 10^4 条）；全量指令/内存
+  trace 需要 code cache 或静态重写，等于自建 DBI，仍在 out of scope。多线程窗口不做。
+- **不新增依赖**：capstone 已是 `disasm` extra；`pyproject.toml` 不动。`import pydbg.trace`
+  仍不加载 `_pydbg`（ADR-0001）。
+- **D6 的实现形态改为硬件执行断点探针**，不是 `instrument/` 的 LLVM detour。原决定的 detour
+  方案要求 payload 把调用事实送回来，而现有 C 子集没有指针/extern 全局，pydbg 与目标之间没有
+  通道；本机也没有 LLVM 后端，detour 版本只能靠 CI 验证。硬件探针不写目标字节、不引入 LLVM、
+  本机可完整测试，代价是**最多 4 个调试寄存器槽位**（与 §9.4 的 watch 共享）、只在函数入口观察、
+  拿不到返回值。返回值与 BBL 级 detour 一起留到 Phase 3c。
+- **`MEM_READ` 不产生**：Windows 的硬件数据断点只有 write 与 read/write 两种条件；read/write
+  命中时事件里没有方向信息，把读写都标成 `MEM_READ` 就是猜。本阶段只提供写观察（`MEM_WRITE`），
+  `MEM_READ` 留给 Phase 3c 的插桩路径。这符合仓库「拒绝而不是猜」的边界语义。
+- **已知行为**：硬件断点在初始 loader 断点处写入会被随后的 continue 丢弃（实测不触发）；三个
+  新入口都要求在**正常停止点**（例如 `run_until` 之后）arm/watch。
+- **诚实停止**：窗口离开模块、遇到调用方的断点、遇到异常，都以 `TraceSummary.reason` 显式停止，
+  不把「没记录到」说成「没发生」。预算截断时事件不 continue，`single_step_pending` 为真，
+  调用方拥有那个未 continue 的调试事件。
+
+### 9.2 记录格式 v1 扩展
+
+- 新增 `INSTR = 6`：`rva` = 指令地址的 RVA，`a` = 指令长度（字节；解码失败记 0），`b` = 0。
+- `KIND_NAMES` 同步加 `6: "INSTR"`。读取器不认识的 kind 仍然原样交出（整数是事实，
+  `kind_name` 为 `None`），所以新文件对旧读取器是「未知种类」而不是坏文件。
+- `TraceSummary` 增加 `instructions: int = 0`（INSTR 事件数；块/内存/探针 trace 为 0）。
+  这是向后兼容的默认字段，`blocks` 仍是「命中的不同 BLOCK 起点数」。
+
+### 9.3 API
+
+```python
+pydbg.trace.InstructionTracer(dbg, module=None, max_instructions=10_000, sink=None)
+    .run(start=None, max_idle_timeouts=3) -> TraceSummary
+
+pydbg.trace.MemoryWatch(dbg, addr, length=4, max_events=10_000, tid=None, sink=None)
+    .arm() -> int
+    .disarm() -> tuple[str, ...]
+    .run(max_idle_timeouts=3) -> TraceSummary
+
+pydbg.trace.FunctionProbe(dbg, addr, params=0, module=None, max_calls=10_000,
+                          tid=None, sink=None)
+    .arm() -> int
+    .disarm() -> tuple[str, ...]
+    .run(max_idle_timeouts=3) -> ProbeSummary
+
+pydbg.trace.ProbeSummary(calls, reason, elapsed_ns, warnings=(), single_step_pending=False)
+pydbg.trace.ProbeCall(tid, rva, args, ts)
+```
+
+停止原因复用 `STOP_MAX_EVENTS` / `STOP_IDLE_TIMEOUT` / `STOP_TARGET_EXITED`，并新增（导出）：
+
+- `STOP_LEFT_MODULE = "left_module"`（下一条指令离开模块）
+- `STOP_BREAKPOINT = "breakpoint"`（窗口内命中调用方断点）
+- `STOP_EXCEPTION = "exception"`（窗口内出现非单步异常）
+- `STOP_NO_MODULE = "no module"`（拿不到模块基址/大小）
+- `STOP_NO_TARGET = "no target"`（没有 attach 的目标）
+
+`truncated` 仍只由预算原因（`max_events`、`idle_timeout`）推导；`left_module` 等是「窗口按规则
+结束」，不是预算截断。
+
+### 9.4 InstructionTracer
+
+- `module` 同 `BblTracer`：模块 dict、`(base_address, size)` 元组或 `None`（主模块）；拿不到
+  基址或大小时返回 0 事件 + `STOP_NO_MODULE`，不抛。
+- `start`（绝对地址）：先在**未下断点**时解码该地址的第一条指令得到长度，再用
+  `dbg.run_until(start)` 跑到它，完成它留下的断点单步，把 `INSTR(start - base, len)` 记为
+  第一事件，然后从下一条指令开始单步。`start=None` 时要求目标已停在一个调试事件上，窗口从
+  当前 RIP 之后的第一条指令开始（当前指令已被停住，不补记）。
+- 单步机制：每次继续前读 RIP 作为 `cursor`、置 TF；收到单步事件时 `executed = cursor`，
+  在该地址解码长度并记 `INSTR(executed - base, len)`，`cursor = event.exception_addr`
+  （单步事件的 ExceptionAddress 是**下一条**指令），再置 TF、继续。TF 在异常交付时被清掉，
+  所以每一步都要重设，不能设一次。
+- 预算在记录前检查；`max_instructions=0` 记录 0 条并以 `STOP_MAX_EVENTS` 截断。
+- 下一条指令落在模块外 → 记完当前条后以 `STOP_LEFT_MODULE` 停止；`rva` 因此始终落在
+  `[0, size)`。
+- 窗口内命中断点 → `STOP_BREAKPOINT`；出现其他异常 → `STOP_EXCEPTION`；目标退出 →
+  `STOP_TARGET_EXITED`；空闲超时 → `STOP_IDLE_TIMEOUT`。后两者之外的停止都不 continue 事件。
+- 解码失败（capstone 缺失除外）→ 该条 `a=0`，`warnings` 记一次 `"undecodable instruction"`，
+  继续走；capstone 未安装时 `DisasmEngine` 自己抛 `PydbgError`，不静默。
+
+### 9.5 MemoryWatch
+
+- 只观察**写**：`dbg.set_hw_breakpoint(addr, "w", length, slot, tid)`；`length ∈ {1,2,4,8}`
+  且 `addr % length == 0`，不满足抛 `BreakpointError`（8 字节在 x86 目标上由 manager 拒绝）。
+- `arm()` 自动挑一个空闲槽（0–3）；4 个都占用时抛 `BreakpointError`
+  `"no free debug-register slot"`。`tid=None` 为进程级（含 CREATE_THREAD 复制）。
+- `run()` 不自动 disarm（watch 可跨多次 run）；`disarm()` 只移除自己 arm 的那个 bp，
+  清理失败的语义与 `BblTracer.disarm()` 一致（`"breakpoint left"` /
+  `"target exited during cleanup"`）。
+- 命中判定：事件的异常码是单步，且该线程 `dr6` 的槽位位为 1；记录 `MEM_WRITE(a=addr, b=length,
+  rva=0)` 后把 `dr6` 清零（下一次命中才可区分）。清不掉时报 `"could not clear dr6"` 并停止。
+  数据断点在访问**之后**触发，事件地址是下一条指令，所以 MEM 事件的 `rva` 刻意是 0。
+- `sink` 为 None 时只统计不落盘；预算在记录前检查，0 表示第一次命中就停（0 条事件）。
+
+### 9.6 FunctionProbe
+
+- 硬件执行断点 `dbg.set_hw_breakpoint(addr, "x", 1, slot, tid)`；`tid` 缺省取
+  `session.tid`（**单线程**探针，不做多线程聚合）。
+- 命中：读 `dr6` 槽位位；返回地址取 `[rsp]`（x64，8 字节）或 `[esp]`（x86，4 字节）；
+  `params` 个 `int` 参数按 ABI 取 `rcx/rdx/r8/r9`（x64）或 `[esp+4+4*i]`（x86），
+  取低 32 位。记 `ProbeCall(tid, rva, args, ts)`；`rva = 返回地址 - 模块基址`，不在模块内记 0
+  并 warning。`sink` 收到 `TraceEvent(kind=API, tid, rva, ts, a=hook_id)`，`hook_id` 即断点 id。
+- 步过舞蹈：命中后把该槽地址清零、`dr6` 清零、置 TF，让原指令执行；下一条单步事件里恢复
+  槽地址与 `dr7` 使能位、清 `dr6`。预算用尽时不清地址、不置 TF，直接停（继续后目标正常执行）。
+- `disarm()` 移除 bp；槽位释放后可被 watch/另一个 probe 复用。
+- 已知限制（写进 docstring 与 `KNOWN_ISSUES`）：4 槽共享；无返回值；单线程；不写目标字节，
+  因此不做 detour、也不需要 RIP-relative 重定位。
+
+### 9.7 验收
+
+1. 格式：`INSTR` 五字段 round-trip；`KIND_NAMES[INSTR]` 与 `to_jsonl` 的 `kind_name` 正确；
+   旧读取器（不认识 6）仍能读出整数。
+2. 指令 trace：对 `instrument_target`（meson 构建，`TEST_INSTRUMENT_TARGET_PATH`；见附录）
+   的导出 `add_numbers` 入口 `run(start=...)`，事件数 ≥ 3、全部 `0 <= rva < size`、第一事件
+   `rva == start - base` 且 `a >= 1`；`max_instructions=2` 时恰好 2 条、`truncated` 为真、
+   `single_step_pending` 为真；writer 计数 == reader 计数；
+   `summary.instructions == events`、`summary.blocks == 0`；之后目标可正常终止。
+3. 内存观察：`instrument_target` 的 `g_sum`（4 字节，正常停止点 arm）连续两次写 →
+   两条 `MEM_WRITE`，`a == g_sum`、`b == 4`、值确实前进；`max_events=1` 截断；
+   没有空闲槽位时报 `BreakpointError`；disarm 后 `verify_breakpoints() == []`。
+4. 函数探针：`add_numbers(1, 2)` 连续 3 次调用 → 3 条 `API` 事件，`a` 为 hook id，
+   `rva == 返回地址 - base`，`args == (1, 2)`；`max_calls=1` 截断；disarm 后无残留；
+   槽位冲突报错。
+5. Phase 3b 整体：新测试全绿、`flake8 --max-line-length=120` 干净、`pyproject.toml` 无改动、
+   现有测试（含 `test_trace_bbl.py`、`test_trace_format.py`）全绿。
+
+### 9.8 不做
+
+- 全量指令/内存 trace、rep 前缀展开、寄存器差分、`MEM_READ` 的产生。
+- 返回值捕获、BBL/指令级插桩、RIP-relative 重定位、多线程指令窗口。
+- 时间戳精度承诺、把窗口 trace 变成覆盖率报告。
+
+## 10. 明确不做
 
 GUI、正式 CLI、插件机制、AArch64、.NET/CLR 分析、内核/ETW、自建 DBI 引擎、BinDiff、
 一键自动脱壳、商业类型库与签名库本体。
@@ -286,3 +425,23 @@ $env:PYTHONPATH = "<worktree>\src;$sp"
 
 `-S` 让 `.pth` 里的 editable loader 不加载，从而绕开 `build/` 写权限；`$ext` 在工作区外（Medium 完整性），
 工作区内的 venv python 是 Low 完整性、连临时目录都建不了。扩展相关测试在本阶段不跑。
+
+Live 测试（BblTracer / InstructionTracer / MemoryWatch / FunctionProbe）需要已编译的 cp313 扩展和真实目标。
+在 worktree 里这样 staging（`<main>` 是主工作区，那里有 `build/base-py`）：
+
+```powershell
+$stage = "$env:TEMP\pydbg-p3b-stage"
+if (Test-Path $stage) { Remove-Item -Recurse -Force $stage }
+New-Item -ItemType Directory -Force "$stage\pydbg" | Out-Null
+Copy-Item -Recurse <worktree>\src\pydbg\* "$stage\pydbg"
+Get-ChildItem -Recurse "$stage\pydbg" -Filter *.pyd | Remove-Item -Force
+Copy-Item <main>\build\base-py\src\pydbg\cython\_pydbg.cp313-win_amd64.pyd "$stage\pydbg\_pydbg.pyd"
+$sp = '<main>\venv-x64\Lib\site-packages'
+$env:PYTHONPATH = "$stage;<worktree>;$sp"
+$env:TEST_TARGET_PATH = '<main>\tests\target\simple_target.exe'
+$env:TEST_INSTRUMENT_TARGET_PATH = '<main>\build\base-py\tests\instrument_target.exe'
+& 'C:\Users\spyder\AppData\Local\Programs\Python\Python313\python.exe' -S -m pytest <tests> -q -p no:cacheprovider
+```
+
+staging 后改了 `src/pydbg` 必须重新 copy；`$PYTHONPATH` 里 stage 在最前面，所以 `pydbg` 来自 stage，
+`tests` 来自 worktree。
