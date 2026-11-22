@@ -15,6 +15,9 @@ from .parser import PEParser
 from .resource import (
     PEResourceParser, ResourceEntry, RESOURCE_TYPES,
 )
+from .version import (
+    FixedFileInfo, VersionInfo, RT_VERSION, read_version_info,
+)
 
 
 class PE:
@@ -172,6 +175,11 @@ class PE:
         return self.resource_parser().parse()
 
     @property
+    def version_info(self):
+        """Decoded RT_VERSION resource: fixed info, strings, translations."""
+        return self._cached('version_info', lambda: read_version_info(self))
+
+    @property
     def codeview_entries(self):
         """Decoded CodeView payloads: the PDB path, GUID and age per record.
 
@@ -257,4 +265,5 @@ __all__ = [
     'View', 'FileView', 'LoadedView',
     'PEParser',
     'PEResourceParser', 'ResourceEntry', 'RESOURCE_TYPES',
+    'FixedFileInfo', 'VersionInfo', 'RT_VERSION',
 ]
