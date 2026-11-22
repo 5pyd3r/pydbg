@@ -12,17 +12,42 @@ test can pin `ts` and the same events always produce the same bytes.
 import struct
 from dataclasses import dataclass
 
+from ..exceptions import PydbgError
+
 MAGIC = b"PDBGTRC\0"
 VERSION = 1
 
 # kind: rva / a / b carry different fields per kind (docs/analysis-coverage.md §8.2)
 BLOCK, API, MARK, MEM_READ, MEM_WRITE = 1, 2, 3, 4, 5
 
+# The v1 vocabulary, kept beside the numbers it names so the two cannot drift.
+# A kind absent from this map is still a valid int in a record; exporting it as
+# `kind_name: null` is the honest answer for a version that does not define it.
+KIND_NAMES = {
+    BLOCK: "BLOCK",
+    API: "API",
+    MARK: "MARK",
+    MEM_READ: "MEM_READ",
+    MEM_WRITE: "MEM_WRITE",
+}
+
 _HEADER = struct.Struct("<8sHH")
 _RECORD = struct.Struct("<B3xIIQQQ")
 
+# Inclusive maxima of the unsigned fields the record packs.
+_U8_MAX = 0xFF
+_U32_MAX = 0xFFFFFFFF
+_U64_MAX = 0xFFFFFFFFFFFFFFFF
+
 HEADER_SIZE = _HEADER.size
 RECORD_SIZE = _RECORD.size
+
+
+def _check_uint(name, value, limit):
+    """Require an int in [0, limit]; ValueError names the offending field."""
+    if not isinstance(value, int) or not 0 <= value <= limit:
+        raise ValueError(
+            f"{name} must be an integer in 0..{limit}, got {value!r}")
 
 
 @dataclass(frozen=True)
@@ -43,8 +68,13 @@ class TraceEvent:
     b: int = 0
 
 
-class TraceFormatError(ValueError):
-    """A trace file is not format v1, or ends mid-record."""
+class TraceFormatError(PydbgError, ValueError):
+    """A trace file is not format v1, or ends mid-record.
+
+    A ValueError because the bytes are malformed, and a PydbgError because it
+    is this package refusing its own file — a caller that catches PydbgError
+    should not have to know about the trace subpackage separately.
+    """
 
 
 class TraceWriter:
@@ -54,6 +84,11 @@ class TraceWriter:
     buffered records to the file, and closing twice is harmless; writing after
     close raises ValueError rather than appending to a file that is already
     inconsistent.
+
+    write() checks every field against the unsigned width the record gives it
+    before appending anything: kind is a u8, tid and rva are u32, ts/a/b are
+    u64. A value outside its field raises ValueError naming the field, so a
+    caller sees its own mistake instead of a struct.error from the packer.
     """
 
     def __init__(self, path):
@@ -61,7 +96,18 @@ class TraceWriter:
         self._stream.write(_HEADER.pack(MAGIC, VERSION, 0))
 
     def write(self, event):
-        """Append one event. `ts` is used as given, never re-stamped."""
+        """Append one event. `ts` is used as given, never re-stamped.
+
+        Raises:
+            ValueError: a field does not fit its unsigned record width, or the
+                writer is closed. No record is appended in either case.
+        """
+        _check_uint("kind", event.kind, _U8_MAX)
+        _check_uint("tid", event.tid, _U32_MAX)
+        _check_uint("rva", event.rva, _U32_MAX)
+        _check_uint("ts", event.ts, _U64_MAX)
+        _check_uint("a", event.a, _U64_MAX)
+        _check_uint("b", event.b, _U64_MAX)
         self._stream.write(_RECORD.pack(event.kind, event.tid, event.rva,
                                         event.ts, event.a, event.b))
 

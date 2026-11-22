@@ -8,15 +8,7 @@ ran, and the JSONL export is stable enough to diff two runs byte for byte.
 
 import json
 
-from .format import API, BLOCK, MARK, MEM_READ, MEM_WRITE
-
-_KIND_NAMES = {
-    BLOCK: "BLOCK",
-    API: "API",
-    MARK: "MARK",
-    MEM_READ: "MEM_READ",
-    MEM_WRITE: "MEM_WRITE",
-}
+from .format import BLOCK, KIND_NAMES
 
 
 def filter_events(events, kinds=None, tid=None, rva_min=None, rva_max=None):
@@ -66,7 +58,7 @@ def to_jsonl(events, path):
         for event in events:
             stream.write(json.dumps({
                 "kind": event.kind,
-                "kind_name": _KIND_NAMES.get(event.kind),
+                "kind_name": KIND_NAMES.get(event.kind),
                 "tid": event.tid,
                 "rva": event.rva,
                 "ts": event.ts,
