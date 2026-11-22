@@ -13,6 +13,7 @@ and §A5 for the reason strings a failed lookup reports.
 import os
 from dataclasses import dataclass
 
+from .dbghelp import symbols as read_symbols
 from .errors import PdbFormatError
 from .msf import MSFFile
 
@@ -178,8 +179,8 @@ def find(pe_or_image, search_paths=()):
     if reason is not None:
         return PdbLookup(None, None, reason)
 
-    candidates = _candidate_paths(entry, _image_path(pe_or_image, image),
-                                  search_paths)
+    image_path = _image_path(pe_or_image, image)
+    candidates = _candidate_paths(entry, image_path, search_paths)
     selected = None
     for candidate in candidates:
         if os.path.isfile(candidate):
@@ -192,7 +193,7 @@ def find(pe_or_image, search_paths=()):
     image_base = getattr(image, "image_base", None)
     if image_base is None:
         image_base = getattr(pe_or_image, "image_base", None)
-    pdb = Pdb(selected, image_base=image_base)
+    pdb = Pdb(selected, image_path=image_path, image_base=image_base)
     try:
         info = pdb._info()
     except (PdbFormatError, OSError) as exc:
@@ -221,15 +222,21 @@ class Pdb:
 
     Construction only records where the file is; reading it happens when an
     identity is needed, so a lookup can hand back a Pdb without paying for the
-    parse until the caller asks something. `image_base` is the base the
-    symbols' addresses are relative to (the preferred base for a file); it is
-    not used by the identity check and is kept for the symbol reader.
+    parse until the caller asks something. `image_path` is the image the PDB
+    belongs to — dbghelp needs it to locate the PDB and to bound the symbols'
+    RVAs, so `symbols()` refuses to guess when it is absent. `image_base` is
+    the base the symbols' addresses are relative to (the preferred base for a
+    file); it is not used by the identity check and is kept for the symbol
+    reader, which passes it to SymLoadModuleExW.
     """
 
-    def __init__(self, path, image_base=None):
+    def __init__(self, path, image_path=None, image_base=None):
         self.path = os.fspath(path)
+        self.image_path = (os.fspath(image_path)
+                           if image_path is not None else None)
         self.image_base = image_base
         self._msf = None
+        self._symbols = None
 
     def _file(self):
         if self._msf is None:
@@ -238,6 +245,28 @@ class Pdb:
 
     def _info(self):
         return self._file().info
+
+    def symbols(self):
+        """Every named address in this PDB, sorted by (rva, name).
+
+        The first call runs the offline dbghelp session; the tuple is cached,
+        so repeated calls are idempotent and cost nothing. A PDB with no image
+        cannot be enumerated: dbghelp needs the image to find the file and to
+        know the image's size, and guessing either would produce wrong RVAs.
+
+        Returns:
+            tuple[PdbSymbol, ...]: empty when dbghelp enumerated nothing; that
+            is not proof the PDB was read, and the analysis layer reports
+            "pdb: no symbols" rather than treating it as success.
+
+        Raises:
+            PdbError: no image path was given, the image is missing or
+                unreadable, or dbghelp failed.
+        """
+        if self._symbols is None:
+            self._symbols = read_symbols(self.path, self.image_path,
+                                         self.image_base)
+        return self._symbols
 
     def matches(self, pe_or_image):
         """Whether this PDB is the same build as 'pe_or_image'.

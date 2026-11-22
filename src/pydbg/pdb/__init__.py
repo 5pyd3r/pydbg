@@ -7,9 +7,10 @@ handle. It is pure Python (ADR-0001), so it must keep working on a machine with
 no compiled extension.
 """
 
+from .dbghelp import PdbSymbol
 from .errors import PdbError, PdbFormatError
 from .lookup import Pdb, PdbLookup, find, open_for
 from .msf import MSFFile, PdbInfo
 
 __all__ = ['MSFFile', 'Pdb', 'PdbError', 'PdbFormatError', 'PdbInfo',
-           'PdbLookup', 'find', 'open_for']
+           'PdbLookup', 'PdbSymbol', 'find', 'open_for']
