@@ -721,7 +721,7 @@ class _Builder:
             return None
         if len(stmts) < 2 or not isinstance(stmts[-1], Branch):
             return None
-        if stmts[-1].kind != "jcc":
+        if stmts[-1].kind != JCC:
             return None
         if len(stmts) != 2 or not isinstance(stmts[0], Cmp):
             return None

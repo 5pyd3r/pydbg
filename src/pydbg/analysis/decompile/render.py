@@ -232,7 +232,7 @@ def _edge_lines(block, successors, next_rva, entry, indent="  "):
             rva = _edge_rva(terminator, block)
             cond = (terminator.cond
                     if isinstance(terminator, Branch)
-                    and terminator.kind == "jcc" else None)
+                    and terminator.kind == JCC else None)
             if target is None:
                 lines.append(f"{indent}// conditional edge: target unknown  "
                              f"{_at_comment(rva)}")

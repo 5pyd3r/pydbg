@@ -20,6 +20,7 @@ declares only the flags its condition actually reads.
 from dataclasses import dataclass
 
 from ...disasm.engine import OP_IMM, OP_MEM, OP_REG
+from ..cfg import INDIRECT, JCC, JMP
 from ..refs import branch_target, is_indirect_branch, memory_address
 
 # ── expressions ────────────────────────────────────────────────
@@ -625,17 +626,17 @@ def _lower_jcc(decoder, image, insn, rva):
     if cond is None:
         return None
     return (Branch(rva=rva, cond=cond,
-                   target=branch_target(insn, image), kind="jcc",
+                   target=branch_target(insn, image), kind=JCC,
                    text=insn.op_str, flags_read=flags_read(insn.mnemonic),
                    comparison=comparison_for(insn.mnemonic)),)
 
 
 def _lower_jmp(decoder, image, insn, rva):
     if is_indirect_branch(insn) or branch_target(insn, image) is None:
-        return (Branch(rva=rva, cond=None, target=None, kind="indirect",
+        return (Branch(rva=rva, cond=None, target=None, kind=INDIRECT,
                        text=insn.op_str),)
     return (Branch(rva=rva, cond=None,
-                   target=branch_target(insn, image), kind="jmp",
+                   target=branch_target(insn, image), kind=JMP,
                    text=insn.op_str),)
 
 
