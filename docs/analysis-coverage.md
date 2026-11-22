@@ -65,7 +65,8 @@
 （深度来自 2026-11-22 的逐族核查，证据见 `research/inventory.md`。）
 
 - real：S2、S3、S4、S10；D1、D3（无分配）、D4；X2。
-- partial：S1（16 目录只解析 7 个）、S5、S6、S7、S8；D2、D6、D7、D9、D10、D11；X1、X3、X4。
+- partial：S1（16 目录解析 12 个：0–6、9–11、13、14；缺 7、8、12、15）、S5、S6、S7、
+  S8（已有字符串、按节熵与壳启发；无签名/YARA）；D2、D6、D7、D9、D10、D11；X1、X3、X4。
 - stub：D5（`StepTracer` 只置 TF，`CallTree` 未接入）、D8（只读 minidump）。
 - absent：S9。
 
@@ -99,6 +100,7 @@
 
 - 纯 Python；`import pydbg` 与 `pydbg.analysis` 不加载 `_pydbg`（ADR-0001）。
 - 失败语义与现有 `read_rva` / 目录解析一致：目录不存在 → `None` / 空列表；截断 → 返回已解析部分并停止；不抛未捕获异常。
+- 不可读的节跨度按文件内的 `size_of_raw_data` 前缀测熵并报告该 size；完全不可读的节 `entropy=None`、`size=0`。
 - 新公开入口各一句 docstring；README 由集成阶段统一更新（不单独开 ticket）。
 - 不给 `pyproject.toml` 增加依赖。
 
