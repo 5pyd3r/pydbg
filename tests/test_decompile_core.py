@@ -100,6 +100,27 @@ class TestBlockExpressions(unittest.TestCase):
         self.assertIn("rcx = rdx;", result.text)
         self.assertNotIn("rcx = rax;", result.text)
 
+    def test_rip_relative_operand_resolves_like_refs_memory_address(self):
+        """A fixed-address operand is resolved by the analysis's one converter.
+
+        `refs.memory_address` is the single place an operand becomes an RVA.
+        The lift must not recompute `next_instruction + disp` and the renderer
+        must not print a `[rip + disp]` the reader has to finish resolving: the
+        address is computed once and carried as an RVA.
+        """
+        from pydbg.analysis.refs import memory_address
+        from pydbg.disasm.engine import OP_MEM
+        code = bytes.fromhex("8b0500000000" "c3")     # mov eax, [rip]
+        result = analyze(code)
+        insn = result.decoder.decode_one(TEXT_RVA)
+        operand = next(op for op in insn.operands if op.kind == OP_MEM)
+
+        expected = memory_address(insn, operand, result.image)
+        decompiled = decompile(code)
+
+        self.assertEqual(expected, TEXT_RVA + 6)
+        self.assertIn(f"[0x{expected:x}]", decompiled.text)
+
     def test_constant_is_folded_into_an_unrelated_destination(self):
         """A known constant on a source operand folds: `imul eax,ecx,4` -> 20.
 

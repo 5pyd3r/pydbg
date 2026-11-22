@@ -20,7 +20,7 @@ declares only the flags its condition actually reads.
 from dataclasses import dataclass
 
 from ...disasm.engine import OP_IMM, OP_MEM, OP_REG
-from ..refs import branch_target, is_indirect_branch
+from ..refs import branch_target, is_indirect_branch, memory_address
 
 # ── expressions ────────────────────────────────────────────────
 
@@ -62,7 +62,15 @@ class Reg(Expr):
 
 @dataclass(frozen=True)
 class Mem(Expr):
-    """A memory operand: segment, base, index, scale, displacement, width."""
+    """A memory operand: segment, base, index, scale, displacement, width.
+
+    A fixed-address operand (`[disp]` or `[rip + disp]`) is resolved once, in
+    the lift, through `refs.memory_address` -- the analysis's single operand-to-
+    RVA conversion point -- and carried as `addr`. A base/index form has no
+    `addr`: its components stay symbolic because the register values are not
+    known here. Keeping the two apart is what lets the renderer print an
+    address without repeating the `rip + size + disp` arithmetic.
+    """
 
     size: int = 0
     base: Expr | None = None
@@ -70,6 +78,7 @@ class Mem(Expr):
     scale: int = 1
     disp: int = 0
     segment: str = ""
+    addr: int | None = None
 
 
 @dataclass(frozen=True)
@@ -359,7 +368,16 @@ def _reg(decoder, reg_id, width=0):
     return Reg(decoder.reg_name(reg_id), width)
 
 
-def _mem(decoder, op):
+def _mem(decoder, image, insn, op):
+    """The memory expression an operand stands for.
+
+    A fixed-address form is resolved by `refs.memory_address` and carried as
+    an RVA; only the symbolic base/index form is composed here, because that
+    composition is the one thing the analysis cannot resolve.
+    """
+    address = memory_address(insn, op, image)
+    if address is not None:
+        return Mem(size=op.size, addr=address)
     base = _reg(decoder, op.mem_base) if op.mem_base else None
     index = _reg(decoder, op.mem_index) if op.mem_index else None
     segment = decoder.reg_name(op.mem_segment) if op.mem_segment else ""
@@ -368,30 +386,27 @@ def _mem(decoder, op):
                segment=segment)
 
 
-def _operand(decoder, op):
+def _operand(decoder, image, insn, op):
     """The expression an operand stands for, reading memory as `[mem]`."""
     if op.kind == OP_REG:
         return _reg(decoder, op.reg, op.size)
     if op.kind == OP_IMM:
         return Const(op.imm)
-    return _mem(decoder, op)
+    return _mem(decoder, image, insn, op)
 
 
 def _effective_address(decoder, image, insn, op):
     """The value `lea` would put in its destination.
 
-    A RIP-relative operand is resolved against the next instruction's address
-    and converted to an RVA, because the displacement on its own is not an
-    address and rendering it as one would be the address-space mistake this
-    package keeps out of the analysis. A base/index form stays symbolic: the
-    decompiler does not know the register's value and must not pretend to.
+    A fixed-address form is the RVA `refs.memory_address` answers: that is the
+    single place an operand becomes an RVA, and re-deriving `rip + size +
+    disp` here would be the address-space mistake the analysis already made
+    once. A base/index form stays symbolic: the decompiler does not know the
+    register's value and must not pretend to.
     """
-    if op.is_rip_relative:
-        absolute = insn.address + insn.size + op.mem_disp
-        rva = image.va_to_rva(absolute)
-        return Addr(rva if rva is not None else absolute)
-    if op.mem_base == 0 and op.mem_index == 0:
-        return Addr(op.mem_disp)
+    address = memory_address(insn, op, image)
+    if address is not None:
+        return Addr(address)
 
     parts = []
     if op.mem_base:
@@ -444,11 +459,11 @@ def _lower_mov(decoder, image, insn, rva):
         if not _is_general_register(name):
             return None
         if src.kind == OP_MEM:
-            return (Load(rva=rva, dst=name, addr=_mem(decoder, src)),)
-        return (Assign(rva=rva, dst=name, src=_operand(decoder, src)),)
+            return (Load(rva=rva, dst=name, addr=_mem(decoder, image, insn, src)),)
+        return (Assign(rva=rva, dst=name, src=_operand(decoder, image, insn, src)),)
     if dst.kind == OP_MEM:
-        return (Store(rva=rva, addr=_mem(decoder, dst),
-                      value=_operand(decoder, src)),)
+        return (Store(rva=rva, addr=_mem(decoder, image, insn, dst),
+                      value=_operand(decoder, image, insn, src)),)
     return None
 
 
@@ -470,11 +485,11 @@ def _lower_binary(decoder, image, insn, rva):
         name = decoder.reg_name(dst.reg)
         return (BinOp(rva=rva, dst=name, op=symbol,
                       left=_reg(decoder, dst.reg, dst.size),
-                      right=_operand(decoder, src)),)
+                      right=_operand(decoder, image, insn, src)),)
     if dst.kind == OP_MEM:
-        addr = _mem(decoder, dst)
+        addr = _mem(decoder, image, insn, dst)
         return (Store(rva=rva, addr=addr,
-                      value=BinExpr(symbol, addr, _operand(decoder, src))),)
+                      value=BinExpr(symbol, addr, _operand(decoder, image, insn, src))),)
     return None
 
 
@@ -487,8 +502,8 @@ def _lower_imul(decoder, image, insn, rva):
         if dst.kind != OP_REG:
             return None
         return (BinOp(rva=rva, dst=decoder.reg_name(dst.reg), op="*",
-                      left=_operand(decoder, src),
-                      right=_operand(decoder, multiplier)),)
+                      left=_operand(decoder, image, insn, src),
+                      right=_operand(decoder, image, insn, multiplier)),)
     if len(ops) != 2:
         return None
     dst, src = ops
@@ -496,11 +511,11 @@ def _lower_imul(decoder, image, insn, rva):
         name = decoder.reg_name(dst.reg)
         return (BinOp(rva=rva, dst=name, op="*",
                       left=_reg(decoder, dst.reg, dst.size),
-                      right=_operand(decoder, src)),)
+                      right=_operand(decoder, image, insn, src)),)
     if dst.kind == OP_MEM:
-        addr = _mem(decoder, dst)
+        addr = _mem(decoder, image, insn, dst)
         return (Store(rva=rva, addr=addr,
-                      value=BinExpr("*", addr, _operand(decoder, src))),)
+                      value=BinExpr("*", addr, _operand(decoder, image, insn, src))),)
     return None
 
 
@@ -519,7 +534,7 @@ def _lower_unary(decoder, image, insn, rva):
                           left=_reg(decoder, dst.reg, dst.size),
                           right=Const(1)),)
         if dst.kind == OP_MEM:
-            addr = _mem(decoder, dst)
+            addr = _mem(decoder, image, insn, dst)
             return (Store(rva=rva, addr=addr,
                           value=BinExpr(symbol, addr, Const(1))),)
         return None
@@ -529,7 +544,7 @@ def _lower_unary(decoder, image, insn, rva):
         return (UnOp(rva=rva, dst=reg_name, op=symbol,
                      operand=_reg(decoder, dst.reg, dst.size)),)
     if dst.kind == OP_MEM:
-        addr = _mem(decoder, dst)
+        addr = _mem(decoder, image, insn, dst)
         return (Store(rva=rva, addr=addr,
                       value=UnExpr(symbol, addr)),)
     return None
@@ -540,8 +555,8 @@ def _lower_cmp(decoder, image, insn, rva):
     if len(ops) != 2:
         return None
     return (Cmp(rva=rva, op=insn.mnemonic,
-                left=_operand(decoder, ops[0]),
-                right=_operand(decoder, ops[1])),)
+                left=_operand(decoder, image, insn, ops[0]),
+                right=_operand(decoder, image, insn, ops[1])),)
 
 
 def _lower_jcc(decoder, image, insn, rva):
@@ -588,7 +603,7 @@ def _lower_push(decoder, image, insn, rva):
     slot = ops[0].size or image.slot_size
     stack = _stack_pointer(image)
     addr = Mem(size=slot, base=Reg(stack, slot), disp=-slot)
-    value = _operand(decoder, ops[0])
+    value = _operand(decoder, image, insn, ops[0])
     return (Store(rva=rva, addr=addr, value=value),
             Assign(rva=rva, dst=stack,
                    src=BinExpr("-", Reg(stack, slot), Const(slot))))
@@ -610,7 +625,7 @@ def _lower_pop(decoder, image, insn, rva):
             # would move it twice.
             return (loaded,)
     elif dst.kind == OP_MEM:
-        loaded = Store(rva=rva, addr=_mem(decoder, dst), value=addr)
+        loaded = Store(rva=rva, addr=_mem(decoder, image, insn, dst), value=addr)
     else:
         return None
     return (loaded,
