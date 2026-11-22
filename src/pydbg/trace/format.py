@@ -23,8 +23,20 @@ BLOCK, API, MARK, MEM_READ, MEM_WRITE = 1, 2, 3, 4, 5
 _HEADER = struct.Struct("<8sHH")
 _RECORD = struct.Struct("<B3xIIQQQ")
 
+# Inclusive maxima of the unsigned fields the record packs.
+_U8_MAX = 0xFF
+_U32_MAX = 0xFFFFFFFF
+_U64_MAX = 0xFFFFFFFFFFFFFFFF
+
 HEADER_SIZE = _HEADER.size
 RECORD_SIZE = _RECORD.size
+
+
+def _check_uint(name, value, limit):
+    """Require an int in [0, limit]; ValueError names the offending field."""
+    if not isinstance(value, int) or not 0 <= value <= limit:
+        raise ValueError(
+            f"{name} must be an integer in 0..{limit}, got {value!r}")
 
 
 @dataclass(frozen=True)
@@ -61,6 +73,11 @@ class TraceWriter:
     buffered records to the file, and closing twice is harmless; writing after
     close raises ValueError rather than appending to a file that is already
     inconsistent.
+
+    write() checks every field against the unsigned width the record gives it
+    before appending anything: kind is a u8, tid and rva are u32, ts/a/b are
+    u64. A value outside its field raises ValueError naming the field, so a
+    caller sees its own mistake instead of a struct.error from the packer.
     """
 
     def __init__(self, path):
@@ -68,7 +85,18 @@ class TraceWriter:
         self._stream.write(_HEADER.pack(MAGIC, VERSION, 0))
 
     def write(self, event):
-        """Append one event. `ts` is used as given, never re-stamped."""
+        """Append one event. `ts` is used as given, never re-stamped.
+
+        Raises:
+            ValueError: a field does not fit its unsigned record width, or the
+                writer is closed. No record is appended in either case.
+        """
+        _check_uint("kind", event.kind, _U8_MAX)
+        _check_uint("tid", event.tid, _U32_MAX)
+        _check_uint("rva", event.rva, _U32_MAX)
+        _check_uint("ts", event.ts, _U64_MAX)
+        _check_uint("a", event.a, _U64_MAX)
+        _check_uint("b", event.b, _U64_MAX)
         self._stream.write(_RECORD.pack(event.kind, event.tid, event.rva,
                                         event.ts, event.a, event.b))
 

@@ -123,6 +123,54 @@ class TestOnDiskLayout(TraceFileTest):
                          [0, 0xFFFFFFFFFFFFFFFF])
 
 
+class TestTraceWriterValidation(TraceFileTest):
+    """write() maps a typed event onto six fixed-width fields.
+
+    A value that does not fit is the caller's mistake, and it must be named as
+    such: struct.error leaking out of pack() says which struct failed, not
+    which field or what range was expected.
+    """
+
+    def refuse(self, event, field):
+        with self.assertRaises(ValueError) as caught:
+            with TraceWriter(self.path()) as writer:
+                writer.write(event)
+        self.assertIn(field, str(caught.exception))
+
+    def test_kind_must_fit_one_byte(self):
+        self.refuse(TraceEvent(256, 1, 0, 0), "kind")
+        self.refuse(TraceEvent(-1, 1, 0, 0), "kind")
+
+    def test_tid_must_fit_an_unsigned_32_bit_field(self):
+        self.refuse(TraceEvent(BLOCK, 0x100000000, 0, 0), "tid")
+        self.refuse(TraceEvent(BLOCK, -1, 0, 0), "tid")
+
+    def test_rva_must_fit_an_unsigned_32_bit_field(self):
+        self.refuse(TraceEvent(BLOCK, 1, 0x100000000, 0), "rva")
+        self.refuse(TraceEvent(BLOCK, 1, -1, 0), "rva")
+
+    def test_timestamp_must_fit_an_unsigned_64_bit_field(self):
+        self.refuse(TraceEvent(BLOCK, 1, 0, 0x10000000000000000), "ts")
+        self.refuse(TraceEvent(BLOCK, 1, 0, -1), "ts")
+
+    def test_a_must_fit_an_unsigned_64_bit_field(self):
+        self.refuse(TraceEvent(BLOCK, 1, 0, 0, a=0x10000000000000000), "a")
+        self.refuse(TraceEvent(BLOCK, 1, 0, 0, a=-1), "a")
+
+    def test_b_must_fit_an_unsigned_64_bit_field(self):
+        self.refuse(TraceEvent(BLOCK, 1, 0, 0, b=0x10000000000000000), "b")
+        self.refuse(TraceEvent(BLOCK, 1, 0, 0, b=-1), "b")
+
+    def test_every_field_accepts_its_full_unsigned_width(self):
+        """The limits are inclusive: this is the widest record v1 can hold."""
+        event = TraceEvent(255, 0xFFFFFFFF, 0xFFFFFFFF,
+                           0xFFFFFFFFFFFFFFFF,
+                           a=0xFFFFFFFFFFFFFFFF, b=0xFFFFFFFFFFFFFFFF)
+        with TraceWriter(self.path()) as writer:
+            writer.write(event)
+        self.assertEqual(list(read_trace(self.path())), [event])
+
+
 class TestTraceFormatErrors(TraceFileTest):
 
     def write_bytes(self, data, name="trace.bin"):
