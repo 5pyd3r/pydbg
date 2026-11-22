@@ -153,3 +153,40 @@ def patch_field(data, offset, fmt, value):
     out = bytearray(data)
     struct.pack_into(fmt, out, offset, value)
     return bytes(out)
+
+
+def info_guid_offset(data):
+    """File offset of stream 1's first GUID byte in an existing container.
+
+    A real PDB cannot be mutated by patching a fixed file offset the way the
+    synthetic ones can: stream 1's bytes live on pages named by the block map
+    and the directory. This walks that documented layout (research §A1-A3) for
+    the tests, so a compiler-written file can be changed without the reader
+    code exposing its page table. The GUID sits at stream 1 + 12 (after
+    Version/Signature/Age), so that byte is returned.
+
+    Raises:
+        ValueError: the file has no stream 1, so there is no identity to edit.
+    """
+    (block_size, _free_block_map, _num_blocks, directory_bytes,
+     _unknown1, block_map_addr) = struct.unpack_from("<6I", data, 32)
+    directory_blocks = blocks_for(directory_bytes, block_size)
+    directory_pages = struct.unpack_from(
+        f"<{directory_blocks}I", data, block_map_addr * block_size)
+    directory = b"".join(
+        data[page * block_size:(page + 1) * block_size]
+        for page in directory_pages)[:directory_bytes]
+
+    stream_count = struct.unpack_from("<I", directory, 0)[0]
+    pages_offset = 4 + 4 * stream_count
+    for index in range(stream_count):
+        size = struct.unpack_from("<I", directory, 4 + 4 * index)[0]
+        block_count = (0 if size == NIL_STREAM_SIZE
+                       else blocks_for(size, block_size))
+        pages = struct.unpack_from(f"<{block_count}I", directory, pages_offset)
+        pages_offset += 4 * block_count
+        if index == 1:
+            within = 12
+            return (pages[within // block_size] * block_size
+                    + within % block_size)
+    raise ValueError("pdb has no info stream (stream 1)")
