@@ -3,7 +3,9 @@
 from .types import (
     IMAGE_SCN_MEM_EXECUTE, IMAGE_SCN_MEM_WRITE,
     DosHeader, FileHeader, OptionalHeader, DataDirectory,
-    SectionHeader, ExportEntry, ImportEntry,
+    SectionHeader, ExportEntry, ImportEntry, DelayImport,
+    BoundImport, BoundImportForwarder, LoadConfig, CLRHeader,
+    AuthenticodeLocation,
     RelocationEntry, RelocationBlock, TLSDirectory, DebugEntry,
     CodeViewInfo, ExceptionEntry, RichHeader, RichHeaderEntry,
 )
@@ -11,7 +13,10 @@ from .source import Source, FileSource, BytesSource
 from .view import View, FileView, LoadedView
 from .parser import PEParser
 from .resource import (
-    PEResourceParser, ResourceEntry, RESOURCE_TYPES,
+    PEResourceParser, ResourceEntry, RESOURCE_TYPES, RT_VERSION,
+)
+from .version import (
+    FixedFileInfo, VersionInfo, read_version_info,
 )
 
 
@@ -106,6 +111,37 @@ class PE:
         return self._cache[key]
 
     @property
+    def delay_imports(self):
+        """Delay-load import descriptors (data directory 13)."""
+        return self._cached('delay_imports', lambda: self._parser.parse_delay_imports(
+            self.optional_header.data_directories, self.image_base))
+
+    @property
+    def bound_imports(self):
+        """Bound-import descriptors (data directory 11)."""
+        return self._cached('bound_imports', lambda: self._parser.parse_bound_imports(
+            self.optional_header.data_directories))
+
+    @property
+    def load_config(self):
+        """Load-config directory (data directory 10), or None."""
+        return self._cached('load_config', lambda: self._parser.parse_load_config(
+            self.optional_header.data_directories,
+            self.optional_header.magic))
+
+    @property
+    def clr_header(self):
+        """CLR header (data directory 14), or None for a native image."""
+        return self._cached('clr_header', lambda: self._parser.parse_clr_header(
+            self.optional_header.data_directories))
+
+    @property
+    def authenticode(self):
+        """Authenticode certificate location (data directory 4), or None."""
+        return self._cached('authenticode', lambda: self._parser.parse_security(
+            self.optional_header.data_directories))
+
+    @property
     def relocations(self):
         """Base relocation blocks (data directory 5)."""
         return self._cached('relocations', lambda: self._parser.parse_relocations(
@@ -137,6 +173,11 @@ class PE:
     def resources(self):
         """Every entry in the resource tree (data directory 2)."""
         return self.resource_parser().parse()
+
+    @property
+    def version_info(self):
+        """Decoded RT_VERSION resource: fixed info, strings, translations."""
+        return self._cached('version_info', lambda: read_version_info(self))
 
     @property
     def codeview_entries(self):
@@ -214,7 +255,9 @@ class PE:
 __all__ = [
     'PE',
     'DosHeader', 'FileHeader', 'OptionalHeader', 'DataDirectory',
-    'SectionHeader', 'ExportEntry', 'ImportEntry',
+    'SectionHeader', 'ExportEntry', 'ImportEntry', 'DelayImport',
+    'BoundImport', 'BoundImportForwarder', 'LoadConfig', 'CLRHeader',
+    'AuthenticodeLocation',
     'IMAGE_SCN_MEM_EXECUTE', 'IMAGE_SCN_MEM_WRITE',
     'RelocationEntry', 'RelocationBlock', 'TLSDirectory', 'DebugEntry',
     'CodeViewInfo', 'ExceptionEntry', 'RichHeader', 'RichHeaderEntry',
@@ -222,4 +265,5 @@ __all__ = [
     'View', 'FileView', 'LoadedView',
     'PEParser',
     'PEResourceParser', 'ResourceEntry', 'RESOURCE_TYPES',
+    'FixedFileInfo', 'VersionInfo', 'RT_VERSION', 'read_version_info',
 ]

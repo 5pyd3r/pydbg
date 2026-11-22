@@ -4,7 +4,9 @@ import struct
 
 from .types import (
     DosHeader, FileHeader, OptionalHeader, DataDirectory,
-    SectionHeader, ExportEntry, ImportEntry,
+    SectionHeader, ExportEntry, ImportEntry, DelayImport,
+    BoundImport, BoundImportForwarder, LoadConfig, CLRHeader,
+    AuthenticodeLocation,
     RelocationEntry, RelocationBlock, TLSDirectory, DebugEntry,
     CodeViewInfo, ExceptionEntry, RichHeader, RichHeaderEntry,
 )
@@ -20,6 +22,10 @@ DIR_SECURITY = 4
 DIR_BASERELOC = 5
 DIR_DEBUG = 6
 DIR_TLS = 9
+DIR_LOAD_CONFIG = 10
+DIR_BOUND_IMPORT = 11
+DIR_DELAY_IMPORT = 13
+DIR_CLR = 14
 
 # IMAGE_DEBUG_TYPE_CODEVIEW: the one debug entry type that carries the PDB.
 DEBUG_TYPE_CODEVIEW = 2
@@ -36,6 +42,114 @@ MAX_IMPORTS_PER_DLL = 65536
 # A CodeView payload is a 24-byte header plus a path. Both bounds are what stop
 # a debug entry whose SizeOfData lies from turning into a huge read.
 MAX_CODEVIEW_PAYLOAD = 0x1000
+
+# IMAGE_DELAYLOAD_DESCRIPTOR is 32 bytes and the table is NUL-terminated. The
+# cap is what keeps a lying SizeOfDirectory bounded.
+MAX_DELAY_IMPORTS = 4096
+
+# IMAGE_BOUND_IMPORT_DESCRIPTOR and IMAGE_BOUND_FORWARDER_REF are 8 bytes each;
+# the table is NUL-terminated. The forwarder count is a 16-bit field, so the
+# cap below is telemetry about a lie rather than the format's own limit.
+MAX_BOUND_IMPORTS = 4096
+MAX_BOUND_FORWARDERS = 4096
+
+# IMAGE_LOAD_CONFIG_DIRECTORY32/64 through GuardFlags. The offsets are
+# winnt.h's, and there is one table per magic because the layouts diverge from
+# ProcessAffinityMask onward: the 64-bit form widens every pointer and puts
+# ProcessAffinityMask ahead of ProcessHeapFlags. Reusing one table for both
+# would return plausible-looking wrong numbers rather than fail.
+_LOAD_CONFIG_64 = (
+    ('size', 0x00, '<I'),
+    ('timestamp', 0x04, '<I'),
+    ('major_version', 0x08, '<H'),
+    ('minor_version', 0x0A, '<H'),
+    ('global_flags_clear', 0x0C, '<I'),
+    ('global_flags_set', 0x10, '<I'),
+    ('security_cookie', 0x58, '<Q'),
+    ('se_handler_table', 0x60, '<Q'),
+    ('se_handler_count', 0x68, '<Q'),
+    ('guard_cf_check_function', 0x70, '<Q'),
+    ('guard_cf_dispatch_function', 0x78, '<Q'),
+    ('guard_cf_function_table', 0x80, '<Q'),
+    ('guard_cf_function_count', 0x88, '<Q'),
+    ('guard_flags', 0x90, '<I'),
+)
+
+_LOAD_CONFIG_32 = (
+    ('size', 0x00, '<I'),
+    ('timestamp', 0x04, '<I'),
+    ('major_version', 0x08, '<H'),
+    ('minor_version', 0x0A, '<H'),
+    ('global_flags_clear', 0x0C, '<I'),
+    ('global_flags_set', 0x10, '<I'),
+    ('security_cookie', 0x3C, '<I'),
+    ('se_handler_table', 0x40, '<I'),
+    ('se_handler_count', 0x44, '<I'),
+    ('guard_cf_check_function', 0x48, '<I'),
+    ('guard_cf_dispatch_function', 0x4C, '<I'),
+    ('guard_cf_function_table', 0x50, '<I'),
+    ('guard_cf_function_count', 0x54, '<I'),
+    ('guard_flags', 0x58, '<I'),
+)
+
+_LOAD_CONFIG_LAYOUT = {
+    0x20B: (_LOAD_CONFIG_64, 0x94),
+    0x10B: (_LOAD_CONFIG_32, 0x5C),
+}
+
+# A self-sized struct whose declared Size is below this holds only a fragment;
+# 8 is size + timestamp, the shortest prefix that versions anything.
+_MIN_DECLARED_STRUCT_SIZE = 8
+
+# IMAGE_COR20_HEADER. Only the header is read; the metadata directory it points
+# at is deliberately not followed — identifying a .NET image does not need it.
+CLR_HEADER_SIZE = 0x48
+
+_CLR_HEADER_FIELDS = (
+    ('size', 0x00, '<I'),
+    ('major_runtime_version', 0x04, '<H'),
+    ('minor_runtime_version', 0x06, '<H'),
+    ('metadata_rva', 0x08, '<I'),
+    ('metadata_size', 0x0C, '<I'),
+    ('flags', 0x10, '<I'),
+    ('entry_point_token', 0x14, '<I'),
+    ('resources_rva', 0x18, '<I'),
+    ('resources_size', 0x1C, '<I'),
+    ('strong_name_rva', 0x20, '<I'),
+    ('strong_name_size', 0x24, '<I'),
+)
+
+
+def _declared_struct_values(raw, layout):
+    """Field values of a self-sized struct that 'raw' actually covers.
+
+    IMAGE_LOAD_CONFIG_DIRECTORY and IMAGE_COR20_HEADER both begin with their
+    own size, and that dword is the version marker: a field the declared size
+    or the readable bytes do not reach is None, not zero, because "this build
+    predates the field" and "the field is zero" are different findings.
+
+    Returns None when the declaration is unusable (no readable byte, or a
+    declared Size below the shortest meaningful prefix). Sharing this walk is
+    what keeps the truncation semantics of the two directories from drifting.
+    """
+    if not raw:
+        return None
+    if len(raw) >= 4:
+        declared = struct.unpack_from('<I', raw, 0)[0]
+        if declared < _MIN_DECLARED_STRUCT_SIZE:
+            return None                     # zero Size is no struct at all
+        end = min(declared, len(raw))
+    else:
+        end = len(raw)                      # the declared size itself is cut
+
+    values = {}
+    for name, offset, fmt in layout:
+        field_size = struct.calcsize(fmt)
+        if offset + field_size <= end:
+            values[name] = struct.unpack_from(fmt, raw, offset)[0]
+        else:
+            values[name] = None
+    return values
 
 
 def _format_guid(raw: bytes) -> str:
@@ -108,6 +222,34 @@ class PEParser:
         if offset is None:
             return None
         return self._src.try_read(offset, size)
+
+    def _read_rva_prefix(self, rva, size):
+        """Up to 'size' bytes at 'rva', stopping at the end of the source.
+
+        try_read answers all-or-nothing, but a file cut inside a structure is
+        not an absent structure: the fields before the cut are still readable
+        facts. Binary-search the longest prefix the source will supply (a
+        longer range cannot succeed where a shorter one failed), which keeps
+        this source-agnostic — BytesSource and FileSource both raise instead
+        of returning a short slice.
+        """
+        offset = self._view.rva_to_source_offset(rva)
+        if offset is None:
+            return None
+        data = self._src.try_read(offset, size)
+        if data is not None:
+            return data
+        low, high, readable = 0, size, 0
+        while low <= high:
+            middle = (low + high) // 2
+            if self._src.try_read(offset, middle) is not None:
+                readable = middle
+                low = middle + 1
+            else:
+                high = middle - 1
+        if not readable:
+            return b""
+        return self._src.try_read(offset, readable)
 
     def parse_dos_header(self) -> DosHeader:
         data = self._src.read(0, 64)
@@ -330,6 +472,187 @@ class PEParser:
                     thunk_offset += thunk_size
             cursor += 20
         return imports
+
+    # ── data directories 4, 10, 11, 13 and 14 ──────────────────
+    #
+    # The other five of the sixteen. Lazy for the same reason as the group
+    # below: most consumers want none of them.
+
+    def parse_delay_imports(self, data_dirs: dict,
+                            image_base: int) -> list:
+        """Delay-load import descriptors (data directory 13).
+
+        'image_base' is the optional header's ImageBase, needed only for the
+        old VA-based form ('attributes & 1' clear) whose fields are VAs rather
+        than RVAs. Every address reported here is an RVA either way, and an
+        entry whose VAs fall below ImageBase is skipped: the subtraction is the
+        only definition of "out of bounds" this directory has.
+
+        The parameter has no default on purpose. A default of 0 subtracted
+        nothing and returned the stored VAs as RVAs — plausible-looking
+        addresses about 4GB off. A VA-based descriptor met without a base
+        raises ValueError instead of being reported wrongly.
+        """
+        imports = []
+        dd = data_dirs.get(DIR_DELAY_IMPORT)
+        if dd is None or dd.virtual_address == 0 or dd.size == 0:
+            return imports
+
+        offset = self._view.rva_to_source_offset(dd.virtual_address)
+        if offset is None:
+            return imports
+
+        count = min(dd.size // 32, MAX_DELAY_IMPORTS)
+        for index in range(count):
+            raw = self._src.try_read(offset + index * 32, 32)
+            if raw is None:
+                break
+            values = list(struct.unpack_from('<8I', raw, 0))
+            if not any(values):
+                break                       # all-zero descriptor terminates it
+
+            attributes = values[0]
+            if attributes & 1 == 0:
+                if not image_base:
+                    raise ValueError(
+                        "VA-based delay-import descriptor at RVA "
+                        f"{dd.virtual_address:#x} needs the image base")
+                values[1:7] = [value - image_base for value in values[1:7]]
+                if any(value < 0 for value in values[1:7]):
+                    continue                # VA below ImageBase: not addressable
+
+            name_rva = values[1]
+            if name_rva == 0:
+                continue
+            name_offset = self._view.rva_to_source_offset(name_rva)
+            dll_name = ''
+            if name_offset is not None:
+                dll_name = self._read_string_at_offset(name_offset)
+
+            imports.append(DelayImport(
+                dll_name=dll_name, attributes=attributes,
+                module_handle_rva=values[2], iat_rva=values[3],
+                int_rva=values[4], bound_iat_rva=values[5],
+                unload_iat_rva=values[6], timestamp=values[7]))
+        return imports
+
+    def parse_bound_imports(self, data_dirs: dict) -> list:
+        """Bound-import descriptors (data directory 11).
+
+        Unlike every other directory here, the module names are offsets from
+        the directory start rather than RVAs, so they are added to the already
+        translated base. Each descriptor is followed by its forwarder refs; a
+        truncated ref keeps the descriptor but ends the walk, because the next
+        descriptor cannot be located without knowing where those refs ended.
+        """
+        entries = []
+        dd = data_dirs.get(DIR_BOUND_IMPORT)
+        if dd is None or dd.virtual_address == 0 or dd.size == 0:
+            return entries
+
+        offset = self._view.rva_to_source_offset(dd.virtual_address)
+        if offset is None:
+            return entries
+        end = offset + dd.size
+
+        cursor = offset
+        while cursor + 8 <= end and len(entries) < MAX_BOUND_IMPORTS:
+            raw = self._src.try_read(cursor, 8)
+            if raw is None:
+                break
+            timestamp, name_offset, num_forwarders = struct.unpack_from(
+                '<IHH', raw, 0)
+            if timestamp == 0 and name_offset == 0 and num_forwarders == 0:
+                break                       # all-zero descriptor terminates it
+
+            module_name = self._read_string_at_offset(offset + name_offset)
+            cursor += 8
+
+            forwarders = []
+            refs_to_read = min(num_forwarders, MAX_BOUND_FORWARDERS)
+            truncated = num_forwarders > refs_to_read
+            for _ in range(refs_to_read):
+                if cursor + 8 > end:
+                    truncated = True
+                    break
+                ref = self._src.try_read(cursor, 8)
+                if ref is None:
+                    truncated = True
+                    break
+                ref_timestamp, ref_name_offset, _reserved = struct.unpack_from(
+                    '<IHH', ref, 0)
+                forwarders.append(BoundImportForwarder(
+                    module_name=self._read_string_at_offset(
+                        offset + ref_name_offset),
+                    timestamp=ref_timestamp))
+                cursor += 8
+
+            entries.append(BoundImport(
+                module_name=module_name, timestamp=timestamp,
+                forwarders=forwarders))
+            if truncated:
+                break
+        return entries
+
+    def parse_load_config(self, data_dirs: dict, magic: int):
+        """Load-config directory (data directory 10), or None when absent.
+
+        The structure's first field is its own size, and that size is the
+        version marker: a field whose offset the declared version — or the
+        readable bytes — does not cover comes back as None. Truncation is read
+        as a prefix rather than as absence: only zero readable bytes is None.
+        The 64-bit and 32-bit layouts differ, so 'magic' selects the table to
+        read by; a magic with no table has no layout and is None rather than a
+        guessed 64-bit parse.
+        """
+        dd = data_dirs.get(DIR_LOAD_CONFIG)
+        if dd is None or dd.virtual_address == 0 or dd.size == 0:
+            return None
+
+        layout_entry = _LOAD_CONFIG_LAYOUT.get(magic)
+        if layout_entry is None:
+            return None                     # unknown magic: do not guess
+        layout, full_size = layout_entry
+        raw = self._read_rva_prefix(dd.virtual_address,
+                                    min(dd.size, full_size))
+        values = _declared_struct_values(raw, layout)
+        if values is None:
+            return None
+        return LoadConfig(**values)
+
+    def parse_clr_header(self, data_dirs: dict):
+        """CLR header (data directory 14), or None when absent.
+
+        Header only: the metadata directory it points at is not followed, so
+        this answers "is this a .NET image and what does its header claim"
+        rather than duplicating a metadata reader. A file cut inside the
+        header still reports every field the cut did not reach; only zero
+        readable bytes is None.
+        """
+        dd = data_dirs.get(DIR_CLR)
+        if dd is None or dd.virtual_address == 0 or dd.size == 0:
+            return None
+
+        raw = self._read_rva_prefix(dd.virtual_address,
+                                    min(dd.size, CLR_HEADER_SIZE))
+        values = _declared_struct_values(raw, _CLR_HEADER_FIELDS)
+        if values is None:
+            return None
+        return CLRHeader(**values)
+
+    def parse_security(self, data_dirs: dict):
+        """Authenticode certificate location (data directory 4), or None.
+
+        This directory is the odd one out: its VirtualAddress is a *file
+        offset*, not an RVA, because the certificate is not part of the mapped
+        image. It is reported verbatim; the certificate is not validated or
+        decoded here, which is what keeps "there is a signature at N bytes"
+        separate from "that signature verifies".
+        """
+        dd = data_dirs.get(DIR_SECURITY)
+        if dd is None or dd.virtual_address == 0 or dd.size == 0:
+            return None
+        return AuthenticodeLocation(offset=dd.virtual_address, size=dd.size)
 
     # ── data directories 3, 5, 6, 9 and the Rich header ────────
     #
