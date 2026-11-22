@@ -60,6 +60,11 @@ class TestTraceSummary(unittest.TestCase):
         for reason in reasons:
             self.assertIsInstance(reason, str)
 
+    def test_a_clean_summary_has_nothing_to_report(self):
+        summary = self.summary(None)
+        self.assertEqual(summary.warnings, ())
+        self.assertFalse(summary.single_step_pending)
+
 
 class _LiveTestCase(unittest.TestCase):
     """A target paused on its initial breakpoint, torn down afterwards.
@@ -147,6 +152,7 @@ class TestBblTracerRun(_LiveTestCase):
 
         self.assertEqual(self.dbg.verify_breakpoints(), [],
                          "breakpoints were left armed in the target")
+        self.assertFalse(summary.single_step_pending)
         self.assertEqual(self.dbg.get_exit_code(), 0,
                          "the target did not terminate normally after tracing")
 
@@ -160,6 +166,9 @@ class TestBblTracerRun(_LiveTestCase):
         self.assertTrue(summary.truncated, "the event budget did not truncate the run")
         self.assertEqual(summary.reason, STOP_MAX_EVENTS)
         self.assertEqual(summary.events, 1)
+        self.assertTrue(summary.single_step_pending,
+                        "a stopped trace leaves its debug event uncontinued")
+        self.assertEqual(summary.warnings, ())
         self.assertEqual(self.dbg.verify_breakpoints(), [])
 
     def test_the_target_still_terminates_after_a_truncated_trace(self):

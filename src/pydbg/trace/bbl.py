@@ -61,12 +61,20 @@ class TraceSummary:
 
     'elapsed_ns' is wall time for the whole run, the target's own execution
     included — it is what a caller measures, not the tracer's overhead alone.
+
+    'warnings' names cleanup problems that did not raise, such as a breakpoint
+    that could not be taken out or a breakpoint the caller already owned.
+    'single_step_pending' is True when the debugger still holds a pending
+    single-step for a thread: the caller owns that uncontinued debug event and
+    must continue it before running the target again.
     """
 
     events: int
     blocks: int
     reason: str | None
     elapsed_ns: int
+    warnings: tuple[str, ...] = ()
+    single_step_pending: bool = False
 
     @property
     def truncated(self):
@@ -115,6 +123,7 @@ class BblTracer:
         self._events = 0
         self._seen = set()
         self._reason = None
+        self._warnings = []
 
     # ── planning ───────────────────────────────────────────────
 
@@ -241,6 +250,8 @@ class BblTracer:
             blocks=len(self._seen),
             reason=self._reason,
             elapsed_ns=time.perf_counter_ns() - started,
+            warnings=tuple(self._warnings),
+            single_step_pending=bool(self.dbg._session.pending_single_step),
         )
 
     @staticmethod
@@ -253,6 +264,7 @@ class BblTracer:
         self._events = 0
         self._seen = set()
         self._reason = None
+        self._warnings = []
 
     def _on_event(self, event):
         """Record a BLOCK per breakpoint hit; stop the loop at the budget.
