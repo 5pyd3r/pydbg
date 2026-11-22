@@ -31,6 +31,7 @@ class FunctionTable:
         self._sorted = None
         self._extents = None
         self._claimed = {}     # rva -> decoded instruction size
+        self._exact = {}       # rva -> authoritative size, from .pdata
 
     def add_start(self, rva, confident=False):
         """Register a function entry. True if it was not already known."""
@@ -57,8 +58,32 @@ class FunctionTable:
         return fresh
 
     def invalidate(self):
+        """Drop what was derived from the starts and their decoded bytes.
+
+        The exact extents survive on purpose. They are a fact about the image —
+        the loader's own function table — not something the analysis derived,
+        so re-running a sweep does not make them stale. That is what lets the
+        analyzer install them once, when the table is built, and invalidate
+        freely afterwards (it does, after pruning starts).
+        """
         self._sorted = None
         self._extents = None
+
+    def set_exact_extents(self, mapping):
+        """Adopt authoritative function sizes, keyed by function start.
+
+        'mapping' is begin RVA -> size, the `.pdata` RUNTIME_FUNCTION ranges.
+        Only non-negative sizes are kept; a nonsense entry falls back to the
+        extent rule rather than describing a function that runs backwards.
+
+        Installing this does not create starts: a begin that the analysis never
+        decoded stays absent, because a range table says where functions are,
+        not that every record is code the sweep reached. Call it when the table
+        is built, before the sweep — `extents()` consults it, and a table that
+        changes afterwards needs `invalidate()` (which this does itself).
+        """
+        self._exact = {rva: size for rva, size in mapping.items() if size >= 0}
+        self.invalidate()
 
     def prune_starts_inside_functions(self):
         """Demote tentative starts that fall inside a trusted function.
@@ -204,6 +229,13 @@ class FunctionTable:
         the next start. Computing it once and caching matters: this is queried
         per instruction when rendering, and the naive per-call form is the
         documented performance trap.
+
+        A start with an exact size (see `set_exact_extents`) uses it instead of
+        both bounds. The next start is a guess about where a function ends, and
+        the linker routinely leaves padding between two functions; the exact
+        range is the loader's own record, so it wins even where it contradicts
+        what the decode appears to reach. `0` means the loader said this
+        function is empty, which is still a fact and not a missing entry.
         """
         if self._extents is not None:
             return self._extents
@@ -218,6 +250,10 @@ class FunctionTable:
 
         extents = {}
         for index, start in enumerate(starts):
+            exact = self._exact.get(start)
+            if exact is not None:
+                extents[start] = exact
+                continue
             limit = starts[index + 1] if index + 1 < len(starts) else None
             end = ends.get(start, start)
             if limit is not None:
