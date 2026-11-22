@@ -12,7 +12,7 @@ import tempfile
 import unittest
 
 from pydbg.trace import (
-    API, BLOCK, MAGIC, MARK, MEM_READ, MEM_WRITE, VERSION,
+    API, BLOCK, INSTR, KIND_NAMES, MAGIC, MARK, MEM_READ, MEM_WRITE, VERSION,
     TraceEvent, TraceFormatError, TraceWriter, read_trace,
 )
 
@@ -53,6 +53,12 @@ class TestTraceEvent(TraceFileTest):
         self.assertEqual((BLOCK, API, MARK, MEM_READ, MEM_WRITE),
                          (1, 2, 3, 4, 5))
 
+    def test_instr_is_kind_six_and_named(self):
+        """INSTR extends the vocabulary without reusing a phase-3a number."""
+        self.assertEqual(INSTR, 6)
+        self.assertEqual(KIND_NAMES[INSTR], "INSTR")
+        self.assertNotIn(INSTR, (BLOCK, API, MARK, MEM_READ, MEM_WRITE))
+
 
 class TestTraceRoundTrip(TraceFileTest):
 
@@ -69,6 +75,26 @@ class TestTraceRoundTrip(TraceFileTest):
                 writer.write(event)
 
         self.assertEqual(list(read_trace(self.path())), events)
+
+    def test_an_instr_event_round_trips_and_writes_stable_bytes(self):
+        """INSTR carries an address and an instruction length, nothing else.
+
+        The same event must read back field for field and produce identical
+        bytes twice: a trace is compared by file, not by re-running the target.
+        """
+        event = TraceEvent(INSTR, tid=7, rva=0x401000, ts=123, a=3)
+        for name in ("first.bin", "second.bin"):
+            with TraceWriter(self.path(name)) as writer:
+                writer.write(event)
+
+        with open(self.path("first.bin"), "rb") as first, \
+                open(self.path("second.bin"), "rb") as second:
+            self.assertEqual(first.read(), second.read())
+
+        read_back = list(read_trace(self.path("first.bin")))
+        self.assertEqual(read_back, [event])
+        self.assertEqual((read_back[0].rva, read_back[0].a, read_back[0].b),
+                         (0x401000, 3, 0))
 
 
 class TestOnDiskLayout(TraceFileTest):

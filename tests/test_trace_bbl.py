@@ -66,6 +66,21 @@ class TestTraceSummary(unittest.TestCase):
         self.assertEqual(summary.warnings, ())
         self.assertFalse(summary.single_step_pending)
 
+    def test_instructions_default_to_zero(self):
+        """A block trace records no INSTR events, so the count starts at zero."""
+        self.assertEqual(self.summary(None).instructions, 0)
+
+    def test_instructions_can_be_recorded_explicitly(self):
+        summary = TraceSummary(events=4, blocks=0, reason=STOP_MAX_EVENTS,
+                               elapsed_ns=1, instructions=4)
+        self.assertEqual(summary.instructions, 4)
+        self.assertTrue(summary.truncated,
+                        "a new count must not disturb the derived truncated")
+
+        complete = TraceSummary(events=4, blocks=0, reason=None,
+                                elapsed_ns=1, instructions=4)
+        self.assertFalse(complete.truncated)
+
 
 class _LiveTestCase(unittest.TestCase):
     """A target paused on its initial breakpoint, torn down afterwards.
