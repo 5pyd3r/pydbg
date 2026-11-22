@@ -5,7 +5,7 @@ from .bbl import (
     STOP_TARGET_EXITED, TRUNCATED_REASONS, TraceSummary,
 )
 from .format import (
-    API, BLOCK, KIND_NAMES, MAGIC, MARK, MEM_READ, MEM_WRITE, VERSION,
+    API, BLOCK, INSTR, KIND_NAMES, MAGIC, MARK, MEM_READ, MEM_WRITE, VERSION,
     TraceEvent, TraceFormatError, TraceWriter, read_trace,
 )
 from .replay import block_coverage, filter_events, to_jsonl
@@ -18,5 +18,5 @@ __all__ = [
     'STOP_NO_BLOCKS', 'TRUNCATED_REASONS',
     'TraceEvent', 'TraceWriter', 'read_trace', 'TraceFormatError',
     'MAGIC', 'VERSION', 'BLOCK', 'API', 'MARK', 'MEM_READ', 'MEM_WRITE',
-    'KIND_NAMES', 'filter_events', 'block_coverage', 'to_jsonl',
+    'INSTR', 'KIND_NAMES', 'filter_events', 'block_coverage', 'to_jsonl',
 ]
