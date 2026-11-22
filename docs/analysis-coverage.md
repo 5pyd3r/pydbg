@@ -84,7 +84,8 @@
 
 - **Phase 1（本规格）**：S1 补全、S8 字符串/熵/壳启发。纯 Python，无新依赖。
 - **Phase 2**：S2 边界（`.pdata` 的 `end_rva` 精确定界；UNWIND_INFO 的帧信息留到 Phase 5 的变量恢复）+ S9 反编译器（按 `decompiler-options` 的 S0–S5）。
-- **Phase 3**：D5/D6 追踪与插桩（BBL 用断点 + stub 起步，格式自定）。
+- **Phase 3a**：D5 块级追踪——软件断点 + v1 记录格式 + 回放/过滤/覆盖率。
+- **Phase 3b**：D6 插桩与指令/内存级 trace（复用现有 LLVM 后端；未启用构建时跳过）。
 - **Phase 4**：D8 dump 与 PE 重建。
 - **Phase 5**：S6/S7 类型与符号（PDB）。
 - **Phase 6**：D2/D9/D10 补齐与 X3/X4 收口。
@@ -174,7 +175,100 @@ EFLAGS 作为伪寄存器：写指令声明写全 6 个标志，`jcc` 声明读�
 Phase 2 整体另需：新测试全绿、`flake8 --max-line-length=120` 干净、`pyproject.toml` 无改动、
 README 在集成阶段统一更新。
 
-## 8. 明确不做
+## 8. Phase 3a：块级追踪（D5）
+
+目标：把「目标跑过哪些基本块」变成可落盘、可回放、可过滤、可汇总的事实。断点路径起步，
+**不自建 DBI 引擎**；指令级/内存级预算留给 Phase 3b。
+
+### 8.1 约束
+
+- 纯 Python + 现有 Win32 调试原语；不新增依赖，`pyproject.toml` 不动。
+- 事件流是唯一真相：`TraceWriter` 写、`read_trace` 读，两者必须逐字节互逆。
+- 诚实：预算截断 → `TraceSummary.truncated` 为真（由 `reason` 推导，不单独存储）；
+  模块无可用 CFG → `plan() == 0`（明确「不可追踪」而不是产出空 trace）；模块字节解析/分析失败
+  （例如传入的区域根本不是 PE）同样返回 0，不抛出。
+- 性能：不承诺 DynamoRIO 吞吐；记录实测块/秒并写进测试输出，不设硬阈值（避免 CI 抖动）。
+
+### 8.2 记录格式 v1
+
+- 文件头 12 字节：`b"PDBGTRC\0"` + `u16 version=1` + `u16 flags=0`。
+- 每条记录 36 字节，结构 `<B3xIIQQQ`：`kind u8`、`tid u32`、`rva u32`、`ts u64`
+  （`time.perf_counter_ns()`）、`a u64`、`b u64`。
+- `kind`：`BLOCK=1`（rva=块起点，a=该块指令数）、`API=2`（a=hook id，rva=返回地址）、
+  `MARK=3`（a=用户标记）、`MEM_READ=4` / `MEM_WRITE=5`（a=地址，b=大小；Phase 3b 才产生）。
+- 坏 magic、未知 version、截断的尾部记录 → `TraceFormatError`。
+
+### 8.3 API
+
+```python
+pydbg.trace.TraceWriter(path)             # 上下文管理器；write(event)
+pydbg.trace.read_trace(path)              # 迭代 TraceEvent；格式错误抛 TraceFormatError
+pydbg.trace.TraceEvent(kind, tid, rva, ts, a=0, b=0)
+pydbg.trace.BblTracer(dbg, module=None, max_events=100_000, max_blocks=4096,
+                      sink=None)
+    .plan() -> int                        # 可下断点的块数；0 = 不可追踪
+    .arm() -> int                         # 给计划块下断点，返回自己拥有的断点数
+    .disarm() -> tuple[str, ...]          # 只撤销自己下的断点；返回清理警告
+    .run(max_idle_timeouts=3) -> TraceSummary   # 未 arm 时自动 arm，跑、记录、撤销
+pydbg.trace.filter_events(events, kinds=None, tid=None, rva_min=None, rva_max=None)
+pydbg.trace.block_coverage(events) -> dict[int, int]
+pydbg.trace.to_jsonl(events, path)
+```
+
+`module` 可以是 `enum_modules()` 的模块 dict，也可以是 `(base_address, size)` 元组（用于命名
+任意区域，包括不是 PE 的区域）。标准顺序：
+
+```python
+tracer.plan()             # 目标暂停时读镜像
+tracer.arm()              # 仍然暂停时下断点，避开「恢复后才下断点」的漏块竞态
+dbg.continue_event(...)   # 释放挂起的调试事件
+summary = tracer.run()
+```
+
+`run()` 在未调用 `arm()` 时会自行 arm，以便调用方已经恢复目标时仍可使用；该路径存在竞态，
+docstring 已说明。
+
+```python
+TraceSummary(events, blocks, reason, elapsed_ns,
+             warnings=(), single_step_pending=False)
+```
+
+- `blocks` 是**命中的不同块**，不是计划块数。
+- `truncated` 是只读属性：`reason in {STOP_MAX_EVENTS, STOP_IDLE_TIMEOUT}`，不单独存储。
+  停止原因常量由 `pydbg.trace` 导出：`STOP_MAX_EVENTS`、`STOP_IDLE_TIMEOUT`（截断）、
+  `STOP_TARGET_EXITED`、`STOP_NO_BLOCKS`。
+- `warnings` 报告不抛异常的清理问题：`"breakpoint left"`（目标仍活但字节没恢复）、
+  `"target exited during cleanup"`（目标已退出，字节无法恢复）、
+  `"reused caller breakpoints"`（计划地址上已有调用方的断点，未占有也未撤销）。
+- `single_step_pending` 为真表示调试器仍有挂起的单步：调用方拥有那个尚未 continue 的调试事件。
+
+### 8.4 块来源
+
+`analyze_process(session, module_base, module_size=...)` → 遍历 `result.functions` 的
+`cfg_of(rva)` 收集块起点，去重，只保留落在模块可执行范围内的起点，上限 `max_blocks`。
+
+### 8.5 验收
+
+1. 格式：五类事件 round-trip 后逐字段相等；同一事件序列写两次字节相同；坏 magic、坏 version、
+   截断尾记录各抛 `TraceFormatError`。
+2. 过滤：按 kind / tid / rva 区间过滤，事件顺序不变。
+3. 覆盖率：同一块出现三次 → `{rva: 3}`，`unique` 计数正确。
+4. 追踪：对 `tests/target/simple_target.exe` 的主模块，`plan() > 0`；`run()` 至少记录 1 个
+   `BLOCK`，所有 rva 落在 `[base, base+size)`；`max_events` 生效时 `summary.truncated is True`
+   且 `reason == STOP_MAX_EVENTS`；清理只撤销自己 arm 的断点（计划地址上调用方已有的断点被复用
+   且保留，不调用 session 级 `verify_breakpoints()`）；目标已退出时以
+   `warnings == ("target exited during cleanup",)` 记录，目标仍活却无法恢复的字节记
+   `"breakpoint left"`；目标能正常终止。
+5. 性能：记录实测块数与耗时、块/秒；若目标在达到 1,000 个事件前退出，以实际事件数为准。
+   断言「不丢事件」（writer 计数 == reader 计数）。
+6. 现有 `tests/test_trace.py tests/test_breakpoint.py` 全绿；`pyproject.toml` 不变。
+
+### 8.6 不做
+
+指令级/内存级记录（3b，需要 D6 插桩）、跨进程与内核 trace、时间戳精度承诺、把 trace 变成覆盖率
+（`block_coverage` 只是汇总，不替代静态 `CoverageReport`）。
+
+## 9. 明确不做
 
 GUI、正式 CLI、插件机制、AArch64、.NET/CLR 分析、内核/ETW、自建 DBI 引擎、BinDiff、
 一键自动脱壳、商业类型库与签名库本体。
