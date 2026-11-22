@@ -3,7 +3,9 @@
 from .types import (
     IMAGE_SCN_MEM_EXECUTE, IMAGE_SCN_MEM_WRITE,
     DosHeader, FileHeader, OptionalHeader, DataDirectory,
-    SectionHeader, ExportEntry, ImportEntry,
+    SectionHeader, ExportEntry, ImportEntry, DelayImport,
+    BoundImport, BoundImportForwarder, LoadConfig, CLRHeader,
+    AuthenticodeLocation,
     RelocationEntry, RelocationBlock, TLSDirectory, DebugEntry,
     CodeViewInfo, ExceptionEntry, RichHeader, RichHeaderEntry,
 )
@@ -104,6 +106,37 @@ class PE:
         if key not in self._cache:
             self._cache[key] = factory()
         return self._cache[key]
+
+    @property
+    def delay_imports(self):
+        """Delay-load import descriptors (data directory 13)."""
+        return self._cached('delay_imports', lambda: self._parser.parse_delay_imports(
+            self.optional_header.data_directories, self.image_base))
+
+    @property
+    def bound_imports(self):
+        """Bound-import descriptors (data directory 11)."""
+        return self._cached('bound_imports', lambda: self._parser.parse_bound_imports(
+            self.optional_header.data_directories))
+
+    @property
+    def load_config(self):
+        """Load-config directory (data directory 10), or None."""
+        return self._cached('load_config', lambda: self._parser.parse_load_config(
+            self.optional_header.data_directories,
+            self.optional_header.magic))
+
+    @property
+    def clr_header(self):
+        """CLR header (data directory 14), or None for a native image."""
+        return self._cached('clr_header', lambda: self._parser.parse_clr_header(
+            self.optional_header.data_directories))
+
+    @property
+    def authenticode(self):
+        """Authenticode certificate location (data directory 4), or None."""
+        return self._cached('authenticode', lambda: self._parser.parse_security(
+            self.optional_header.data_directories))
 
     @property
     def relocations(self):
@@ -214,7 +247,9 @@ class PE:
 __all__ = [
     'PE',
     'DosHeader', 'FileHeader', 'OptionalHeader', 'DataDirectory',
-    'SectionHeader', 'ExportEntry', 'ImportEntry',
+    'SectionHeader', 'ExportEntry', 'ImportEntry', 'DelayImport',
+    'BoundImport', 'BoundImportForwarder', 'LoadConfig', 'CLRHeader',
+    'AuthenticodeLocation',
     'IMAGE_SCN_MEM_EXECUTE', 'IMAGE_SCN_MEM_WRITE',
     'RelocationEntry', 'RelocationBlock', 'TLSDirectory', 'DebugEntry',
     'CodeViewInfo', 'ExceptionEntry', 'RichHeader', 'RichHeaderEntry',

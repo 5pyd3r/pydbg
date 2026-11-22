@@ -101,6 +101,112 @@ class ImportEntry:
 
 
 @dataclass
+class DelayImport:
+    """One IMAGE_DELAYLOAD_DESCRIPTOR (data directory 13).
+
+    The format stores the same addresses as either RVAs or old-style VAs,
+    selected by bit 0 of 'attributes' ('RvaBased'). This record always reports
+    RVAs: the VA form is converted with the image's ImageBase, so a consumer
+    never has to know which form the linker chose.
+    """
+
+    dll_name: str
+    attributes: int
+    module_handle_rva: int
+    iat_rva: int
+    int_rva: int
+    bound_iat_rva: int
+    unload_iat_rva: int
+    timestamp: int
+
+
+@dataclass
+class BoundImportForwarder:
+    """One IMAGE_BOUND_FORWARDER_REF: a forwarded-to module and its stamp."""
+
+    module_name: str
+    timestamp: int
+
+
+@dataclass
+class BoundImport:
+    """One IMAGE_BOUND_IMPORT_DESCRIPTOR (data directory 11).
+
+    'module_name' and every forwarder's name are offsets relative to the
+    directory start, not RVAs — the reason this is not the import directory
+    with a different struct. The timestamp is the bound module's
+    TimeDateStamp, which is the identity a binder matches on.
+    """
+
+    module_name: str
+    timestamp: int
+    forwarders: list      # list[BoundImportForwarder]
+
+
+@dataclass
+class LoadConfig:
+    """The common subset of IMAGE_LOAD_CONFIG_DIRECTORY32/64 (directory 10).
+
+    'size' is the structure's own declared Size, which is its version marker:
+    a field the declared version does not define — or a truncated directory
+    does not reach — is None rather than a fabricated zero. A zero
+    SecurityCookie and "this build predates SecurityCookie" are different
+    findings and must not be spelled the same way.
+    """
+
+    size: int
+    timestamp: int
+    major_version: int | None
+    minor_version: int | None
+    global_flags_clear: int | None
+    global_flags_set: int | None
+    security_cookie: int | None
+    se_handler_table: int | None
+    se_handler_count: int | None
+    guard_cf_check_function: int | None
+    guard_cf_dispatch_function: int | None
+    guard_cf_function_table: int | None
+    guard_cf_function_count: int | None
+    guard_flags: int | None
+
+
+@dataclass
+class CLRHeader:
+    """IMAGE_COR20_HEADER (data directory 14) — the header, not the metadata.
+
+    'size' is the header's own cb field. A field a truncated directory does not
+    reach is None; the managed tables this header points at are out of scope,
+    so nothing here is dereferenced.
+    """
+
+    size: int
+    major_runtime_version: int
+    minor_runtime_version: int
+    metadata_rva: int | None
+    metadata_size: int | None
+    flags: int | None
+    entry_point_token: int | None
+    resources_rva: int | None
+    resources_size: int | None
+    strong_name_rva: int | None
+    strong_name_size: int | None
+
+
+@dataclass
+class AuthenticodeLocation:
+    """Where the image's WIN_CERTIFICATE lives (data directory 4).
+
+    'offset' is a file offset, not an RVA: the certificate sits outside the
+    mapped image. It is reported exactly as the directory stores it, and the
+    bytes are not validated or decoded here — this locates a signature, it
+    does not verify one.
+    """
+
+    offset: int
+    size: int
+
+
+@dataclass
 class RelocationEntry:
     """One IMAGE_REL_BASED_* fixup within a relocation block."""
 

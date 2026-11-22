@@ -147,6 +147,165 @@ def build_pdata_image(terminate=False):
     return builder.build()
 
 
+RVA_DELAY_NAMES = 0x2140
+
+
+def _delay_descriptor(attributes, image_base, dll_name_rva, timestamp=0x5A000000):
+    """One IMAGE_DELAYLOAD_DESCRIPTOR; VAs when bit 0 of Attributes is clear."""
+    def addr(rva):
+        return rva if attributes & 1 else image_base + rva
+
+    return struct.pack("<8I", attributes, addr(dll_name_rva),
+                       addr(0x2200), addr(0x2300), addr(0x2400),
+                       addr(0x2500), addr(0x2600), timestamp)
+
+
+def build_delay_image(magic=0x20B, va_based=False, entries=1,
+                      declared_size=None):
+    """Image with a delay-import directory holding 'entries' descriptors.
+
+    The names sit past the descriptors and the table is closed with an all-zero
+    descriptor, which is how a real linker writes it. A VA-based descriptor
+    stores 32-bit VAs, so that form can only be PE32.
+    """
+    if va_based and magic != 0x10B:
+        raise ValueError("VA-based delay descriptors are a PE32-only form")
+    builder, image_base = _base_image(magic)
+    attributes = 0 if va_based else 1
+    rdata = bytearray(0x400)
+    for index in range(entries):
+        dll_rva = RVA_DELAY_NAMES + index * 0x20
+        _place(rdata, RVA_RDATA + index * 32,
+               _delay_descriptor(attributes, image_base, dll_rva))
+        name = f"module{index}.dll".encode("ascii") + b"\x00"
+        _place(rdata, dll_rva, name)
+    _place(rdata, RVA_RDATA + entries * 32, b"\x00" * 32)
+    builder.add_section(".rdata", bytes(rdata), RVA_RDATA, 0x40000040)
+    size = entries * 32 if declared_size is None else declared_size
+    builder.add_dir(13, RVA_RDATA, size)
+    return builder.build(), image_base
+
+
+def build_bound_image(declared_size=None):
+    """Bound-import directory: two modules, one of them with a forwarder.
+
+    Module names are offsets relative to the directory start, not RVAs, so the
+    strings live at 0x40/0x50/0x60 past the descriptor table and are reused by
+    no other fixture.
+    """
+    builder, _ = _base_image()
+    rdata = bytearray(0x400)
+    _place(rdata, RVA_RDATA, struct.pack("<IHH", 0x11111111, 0x40, 1))
+    _place(rdata, RVA_RDATA + 8, struct.pack("<IHH", 0x22222222, 0x50, 0))
+    _place(rdata, RVA_RDATA + 16, struct.pack("<IHH", 0x33333333, 0x60, 0))
+    _place(rdata, RVA_RDATA + 24, b"\x00" * 8)          # terminator
+    _place(rdata, RVA_RDATA + 0x40, b"user32.dll\x00")
+    _place(rdata, RVA_RDATA + 0x50, b"kernel32.dll\x00")
+    _place(rdata, RVA_RDATA + 0x60, b"advapi32.dll\x00")
+    builder.add_section(".rdata", bytes(rdata), RVA_RDATA, 0x40000040)
+    size = 32 if declared_size is None else declared_size
+    builder.add_dir(11, RVA_RDATA, size)
+    return builder.build()
+
+
+def build_load_config_image(magic=0x20B, declared_size=None, dir_size=None):
+    """Image with an IMAGE_LOAD_CONFIG_DIRECTORY32/64 at RVA_RDATA.
+
+    Every field is written at the offset winnt.h gives it, not at an offset the
+    parser also computes: the 64-bit form widens every pointer and moves
+    ProcessAffinityMask ahead of ProcessHeapFlags, so a parser that reused the
+    32-bit offsets would return plausible-looking wrong numbers here.
+    """
+    builder, _ = _base_image(magic)
+    is64 = magic == 0x20B
+    if declared_size is None:
+        declared_size = 0x94 if is64 else 0x5C
+    blob = bytearray(0x94 if is64 else 0x5C)
+
+    fields = [
+        (0x04, "<I", 0x5A000000),       # TimeDateStamp
+        (0x08, "<H", 2),                # MajorVersion
+        (0x0A, "<H", 5),                # MinorVersion
+        (0x0C, "<I", 0x11),             # GlobalFlagsClear
+        (0x10, "<I", 0x22),             # GlobalFlagsSet
+    ]
+    if is64:
+        fields += [
+            (0x58, "<Q", 0x140001000),  # SecurityCookie
+            (0x60, "<Q", 0x2000),       # SEHandlerTable
+            (0x68, "<Q", 3),            # SEHandlerCount
+            (0x70, "<Q", 0x1010),       # GuardCFCheckFunctionPointer
+            (0x78, "<Q", 0x1020),       # GuardCFDispatchFunctionPointer
+            (0x80, "<Q", 0x1030),       # GuardCFFunctionTable
+            (0x88, "<Q", 4),            # GuardCFFunctionCount
+            (0x90, "<I", 0x100),        # GuardFlags
+        ]
+    else:
+        fields += [
+            (0x3C, "<I", 0x40001000),   # SecurityCookie
+            (0x40, "<I", 0x2000),       # SEHandlerTable
+            (0x44, "<I", 3),            # SEHandlerCount
+            (0x48, "<I", 0x1010),       # GuardCFCheckFunctionPointer
+            (0x4C, "<I", 0x1020),       # GuardCFDispatchFunctionPointer
+            (0x50, "<I", 0x1030),       # GuardCFFunctionTable
+            (0x54, "<I", 4),            # GuardCFFunctionCount
+            (0x58, "<I", 0x100),        # GuardFlags
+        ]
+
+    struct.pack_into("<I", blob, 0, declared_size)
+    for offset, fmt, value in fields:
+        struct.pack_into(fmt, blob, offset, value)
+
+    rdata = bytearray(0x400)
+    _place(rdata, RVA_RDATA, bytes(blob))
+    builder.add_section(".rdata", bytes(rdata), RVA_RDATA, 0x40000040)
+    size = len(blob) if dir_size is None else dir_size
+    builder.add_dir(10, RVA_RDATA, size)
+    return builder.build()
+
+
+def build_clr_image(dir_size=None):
+    """Image with an IMAGE_COR20_HEADER (data directory 14).
+
+    Only the header is written: this fixture is about reading the CLR header,
+    not about the metadata it points at.
+    """
+    builder, _ = _base_image()
+    blob = bytearray(0x48)
+    struct.pack_into("<IHH", blob, 0x00, 0x48, 2, 5)
+    struct.pack_into("<II", blob, 0x08, 0x2200, 0x100)   # MetaData
+    struct.pack_into("<I", blob, 0x10, 0x3)              # Flags
+    struct.pack_into("<I", blob, 0x14, 0x06000001)       # EntryPointToken
+    struct.pack_into("<II", blob, 0x18, 0x2300, 0x80)    # Resources
+    struct.pack_into("<II", blob, 0x20, 0x2400, 0x20)    # StrongNameSignature
+    rdata = bytearray(0x400)
+    _place(rdata, RVA_RDATA, bytes(blob))
+    builder.add_section(".rdata", bytes(rdata), RVA_RDATA, 0x40000040)
+    size = len(blob) if dir_size is None else dir_size
+    builder.add_dir(14, RVA_RDATA, size)
+    return builder.build()
+
+
+def build_security_image(cert_size=0x10, declared_size=None):
+    """Image whose security directory points at an appended WIN_CERTIFICATE.
+
+    The blob is appended past the last section, so its file offset is not a
+    valid RVA. A parser that ran it through the RVA view would find nothing —
+    which is exactly the trap this directory sets.
+    """
+    builder, _ = _base_image()
+    base = builder.build()
+    offset = len(base)
+    certificate = (struct.pack("<IHH", cert_size, 0x0200, 0x0002)
+                   + b"\xAA" * max(0, cert_size - 8))
+    builder.add_dir(4, offset, cert_size if declared_size is None
+                    else declared_size)
+    data = builder.build()
+    if len(data) != offset:
+        raise AssertionError("adding a directory changed the image size")
+    return data + certificate, offset
+
+
 def build_rich_image(key=0x12345678, pairs=((0x0101, 5), (0x0202, 3))):
     builder, _ = _base_image()
     blob = struct.pack("<I", 0x536E6144 ^ key)          # "DanS", encoded
@@ -418,6 +577,324 @@ class TestExceptionDirectory(unittest.TestCase):
         self.assertEqual(PE(builder.build()).exception_entries, [])
 
 
+class TestDelayImports(unittest.TestCase):
+    """Data directory 13 — IMAGE_DELAYLOAD_DESCRIPTOR.
+
+    The descriptor stores its addresses either as RVAs (bit 0 of Attributes
+    set) or as old-style VAs, and the two forms are byte-identical otherwise:
+    a parser that ignores the bit reads a VA as an RVA and lands ~4GB off.
+    """
+
+    def test_rva_based_descriptor_is_read_field_by_field(self):
+        from pydbg.pe import PE
+
+        data, _ = build_delay_image()
+        imports = PE(data).delay_imports
+        self.assertEqual(len(imports), 1)
+        entry = imports[0]
+        self.assertEqual(entry.dll_name, "module0.dll")
+        self.assertEqual(entry.attributes, 1)
+        self.assertEqual(entry.module_handle_rva, 0x2200)
+        self.assertEqual(entry.iat_rva, 0x2300)
+        self.assertEqual(entry.int_rva, 0x2400)
+        self.assertEqual(entry.bound_iat_rva, 0x2500)
+        self.assertEqual(entry.unload_iat_rva, 0x2600)
+        self.assertEqual(entry.timestamp, 0x5A000000)
+
+    def test_va_based_descriptor_is_converted_to_rvas(self):
+        """Without bit 0 the fields are VAs; ImageBase is what removes."""
+        from pydbg.pe import PE
+
+        data, image_base = build_delay_image(va_based=True, magic=0x10B)
+        entry = PE(data).delay_imports[0]
+        self.assertEqual(entry.attributes, 0)
+        self.assertEqual(entry.dll_name, "module0.dll")
+        self.assertEqual(entry.module_handle_rva, 0x2200)
+        self.assertEqual(entry.iat_rva, 0x2300)
+        self.assertEqual(entry.int_rva, 0x2400)
+        self.assertEqual(entry.bound_iat_rva, 0x2500)
+        self.assertEqual(entry.unload_iat_rva, 0x2600)
+        self.assertEqual(image_base, 0x400000)
+
+    def test_walks_until_the_all_zero_descriptor(self):
+        from pydbg.pe import PE
+
+        data, _ = build_delay_image(entries=2)
+        imports = PE(data).delay_imports
+        self.assertEqual([entry.dll_name for entry in imports],
+                         ["module0.dll", "module1.dll"])
+
+    def test_truncated_descriptor_returns_the_parsed_entries(self):
+        """A size that stops mid-descriptor ends the walk at the last whole one."""
+        from pydbg.pe import PE
+
+        data, _ = build_delay_image(entries=2, declared_size=48)
+        imports = PE(data).delay_imports
+        self.assertEqual([entry.dll_name for entry in imports], ["module0.dll"])
+
+    def test_a_va_below_the_image_base_skips_only_that_entry(self):
+        """'Out of bounds' is a skip, not a reason to abandon the table."""
+        from pydbg.pe import PE
+
+        data, _ = build_delay_image(va_based=True, magic=0x10B, entries=2)
+        data = bytearray(data)
+        struct.pack_into("<7I", data, RVA_RDATA + 4, *([0x1000] * 7))
+        imports = PE(bytes(data)).delay_imports
+        self.assertEqual([entry.dll_name for entry in imports], ["module1.dll"])
+
+    def test_absent_directory_is_empty(self):
+        from pydbg.pe import PE
+
+        builder, _ = _base_image()
+        self.assertEqual(PE(builder.build()).delay_imports, [])
+
+    def test_all_zero_descriptor_is_empty(self):
+        from pydbg.pe import PE
+
+        data, _ = build_delay_image()
+        data = bytearray(data)
+        struct.pack_into("<8I", data, RVA_RDATA, *([0] * 8))
+        self.assertEqual(PE(bytes(data)).delay_imports, [])
+
+
+class TestBoundImports(unittest.TestCase):
+    """Data directory 11 — IMAGE_BOUND_IMPORT_DESCRIPTOR.
+
+    A descriptor is followed by its forwarder refs, and every module name is an
+    offset from the directory start rather than an RVA. Both rules are why this
+    is not the import directory with a different struct.
+    """
+
+    def test_descriptor_and_forwarder_fields(self):
+        from pydbg.pe import PE
+
+        entries = PE(build_bound_image()).bound_imports
+        self.assertEqual(len(entries), 2)
+        first = entries[0]
+        self.assertEqual(first.module_name, "user32.dll")
+        self.assertEqual(first.timestamp, 0x11111111)
+        self.assertEqual(len(first.forwarders), 1)
+        forwarder = first.forwarders[0]
+        self.assertEqual(forwarder.module_name, "kernel32.dll")
+        self.assertEqual(forwarder.timestamp, 0x22222222)
+
+    def test_second_descriptor_follows_the_forwarder_refs(self):
+        """The forwarder refs are part of the descriptor, not a side table."""
+        from pydbg.pe import PE
+
+        entries = PE(build_bound_image()).bound_imports
+        self.assertEqual(entries[1].module_name, "advapi32.dll")
+        self.assertEqual(entries[1].timestamp, 0x33333333)
+        self.assertEqual(entries[1].forwarders, [])
+
+    def test_truncated_descriptor_returns_the_parsed_entries(self):
+        """A size that stops part-way through the second descriptor."""
+        from pydbg.pe import PE
+
+        entries = PE(build_bound_image(declared_size=20)).bound_imports
+        self.assertEqual([entry.module_name for entry in entries],
+                         ["user32.dll"])
+        self.assertEqual(len(entries[0].forwarders), 1)
+
+    def test_truncated_forwarder_table_keeps_the_descriptor(self):
+        """The descriptor itself was whole, so it survives with no forwarders."""
+        from pydbg.pe import PE
+
+        entries = PE(build_bound_image(declared_size=12)).bound_imports
+        self.assertEqual([entry.module_name for entry in entries],
+                         ["user32.dll"])
+        self.assertEqual(entries[0].forwarders, [])
+
+    def test_absent_directory_is_empty(self):
+        from pydbg.pe import PE
+
+        builder, _ = _base_image()
+        self.assertEqual(PE(builder.build()).bound_imports, [])
+
+
+class TestLoadConfig(unittest.TestCase):
+    """Data directory 10 — IMAGE_LOAD_CONFIG_DIRECTORY32/64.
+
+    Its first field is its own size, so the structure is versioned: fields an
+    older version does not define must not be reported as zero. The 32-bit and
+    64-bit layouts also diverge, which is what the two layout tests pin down.
+    """
+
+    def test_pe32plus_fields_use_the_64_bit_layout(self):
+        from pydbg.pe import PE
+
+        config = PE(build_load_config_image(0x20B)).load_config
+        self.assertIsNotNone(config)
+        self.assertEqual(config.size, 0x94)
+        self.assertEqual(config.timestamp, 0x5A000000)
+        self.assertEqual((config.major_version, config.minor_version), (2, 5))
+        self.assertEqual(config.global_flags_clear, 0x11)
+        self.assertEqual(config.global_flags_set, 0x22)
+        self.assertEqual(config.security_cookie, 0x140001000)
+        self.assertEqual(config.se_handler_table, 0x2000)
+        self.assertEqual(config.se_handler_count, 3)
+        self.assertEqual(config.guard_cf_check_function, 0x1010)
+        self.assertEqual(config.guard_cf_dispatch_function, 0x1020)
+        self.assertEqual(config.guard_cf_function_table, 0x1030)
+        self.assertEqual(config.guard_cf_function_count, 4)
+        self.assertEqual(config.guard_flags, 0x100)
+
+    def test_pe32_fields_use_the_32_bit_layout(self):
+        from pydbg.pe import PE
+
+        config = PE(build_load_config_image(0x10B)).load_config
+        self.assertIsNotNone(config)
+        self.assertEqual(config.size, 0x5C)
+        self.assertEqual(config.timestamp, 0x5A000000)
+        self.assertEqual((config.major_version, config.minor_version), (2, 5))
+        self.assertEqual(config.global_flags_clear, 0x11)
+        self.assertEqual(config.global_flags_set, 0x22)
+        self.assertEqual(config.security_cookie, 0x40001000)
+        self.assertEqual(config.se_handler_table, 0x2000)
+        self.assertEqual(config.se_handler_count, 3)
+        self.assertEqual(config.guard_cf_check_function, 0x1010)
+        self.assertEqual(config.guard_cf_dispatch_function, 0x1020)
+        self.assertEqual(config.guard_cf_function_table, 0x1030)
+        self.assertEqual(config.guard_cf_function_count, 4)
+        self.assertEqual(config.guard_flags, 0x100)
+
+    def test_truncated_directory_keeps_the_readable_fields(self):
+        """Half a directory parses half a struct; the tail is None, not zero."""
+        from pydbg.pe import PE
+
+        config = PE(build_load_config_image(dir_size=0x50)).load_config
+        self.assertIsNotNone(config)
+        self.assertEqual(config.size, 0x94)
+        self.assertEqual(config.global_flags_set, 0x22)
+        self.assertIsNone(config.security_cookie)
+        self.assertIsNone(config.se_handler_table)
+        self.assertIsNone(config.guard_flags)
+
+    def test_declared_size_bounds_the_fields(self):
+        """An older version's Size excludes fields whose bytes may still exist."""
+        from pydbg.pe import PE
+
+        config = PE(build_load_config_image(declared_size=0x40)).load_config
+        self.assertIsNotNone(config)
+        self.assertEqual(config.size, 0x40)
+        self.assertEqual(config.global_flags_set, 0x22)
+        self.assertIsNone(config.security_cookie)
+        self.assertIsNone(config.guard_flags)
+
+    def test_absent_directory_is_none(self):
+        from pydbg.pe import PE
+
+        builder, _ = _base_image()
+        self.assertIsNone(PE(builder.build()).load_config)
+
+    def test_all_zero_directory_is_none(self):
+        """A zero Size field is not a struct of version zero — it is no struct."""
+        from pydbg.pe import PE
+
+        data = build_load_config_image()
+        data = bytearray(data)
+        data[RVA_RDATA:RVA_RDATA + 0x94] = b"\x00" * 0x94
+        self.assertIsNone(PE(bytes(data)).load_config)
+
+
+class TestCLRHeader(unittest.TestCase):
+    """Data directory 14 — IMAGE_COR20_HEADER.
+
+    Reading the header only: the managed metadata it points at is out of scope.
+    The point is that a .NET image is identifiable from the header alone, and
+    that a native image says so with None rather than an empty header.
+    """
+
+    def test_header_fields(self):
+        from pydbg.pe import PE
+
+        header = PE(build_clr_image()).clr_header
+        self.assertIsNotNone(header)
+        self.assertEqual(header.size, 0x48)
+        self.assertEqual(header.major_runtime_version, 2)
+        self.assertEqual(header.minor_runtime_version, 5)
+        self.assertEqual(header.metadata_rva, 0x2200)
+        self.assertEqual(header.metadata_size, 0x100)
+        self.assertEqual(header.flags, 0x3)
+        self.assertEqual(header.entry_point_token, 0x06000001)
+        self.assertEqual(header.resources_rva, 0x2300)
+        self.assertEqual(header.resources_size, 0x80)
+        self.assertEqual(header.strong_name_rva, 0x2400)
+        self.assertEqual(header.strong_name_size, 0x20)
+
+    def test_truncated_directory_keeps_the_readable_fields(self):
+        from pydbg.pe import PE
+
+        header = PE(build_clr_image(dir_size=0x20)).clr_header
+        self.assertIsNotNone(header)
+        self.assertEqual(header.size, 0x48)
+        self.assertEqual(header.metadata_rva, 0x2200)
+        self.assertEqual(header.resources_rva, 0x2300)
+        self.assertIsNone(header.strong_name_rva)
+        self.assertIsNone(header.strong_name_size)
+
+    def test_absent_directory_is_none(self):
+        """A native image has no CLR header, and that is not an error."""
+        from pydbg.pe import PE
+
+        builder, _ = _base_image()
+        self.assertIsNone(PE(builder.build()).clr_header)
+
+    def test_all_zero_header_is_none(self):
+        from pydbg.pe import PE
+
+        data = bytearray(build_clr_image())
+        data[RVA_RDATA:RVA_RDATA + 0x48] = b"\x00" * 0x48
+        self.assertIsNone(PE(bytes(data)).clr_header)
+
+
+class TestAuthenticodeLocation(unittest.TestCase):
+    """Data directory 4 — the Authenticode certificate location.
+
+    Its VirtualAddress is a file offset, not an RVA: the certificate sits
+    outside the mapped image. The parser reports that location verbatim and
+    does not validate the signature.
+    """
+
+    def test_offset_is_a_file_offset_and_size_is_the_certificate_length(self):
+        from pydbg.pe import PE
+
+        data, offset = build_security_image(cert_size=0x10)
+        pe = PE(data)
+        location = pe.authenticode
+        self.assertIsNotNone(location)
+        self.assertEqual(location.offset, offset)
+        self.assertEqual(location.size, 0x10)
+        # The first dword of WIN_CERTIFICATE is dwLength, the blob's own size.
+        raw = pe.source.try_read(location.offset, 4)
+        self.assertEqual(struct.unpack_from("<I", raw, 0)[0], 0x10)
+        # Control: treating the offset as an RVA finds nothing, because the
+        # blob is past the last section. This is why the directory exists.
+        self.assertIsNone(pe.read_rva(offset, 4))
+
+    def test_absent_directory_is_none(self):
+        from pydbg.pe import PE
+
+        builder, _ = _base_image()
+        self.assertIsNone(PE(builder.build()).authenticode)
+
+    def test_zero_size_directory_is_none(self):
+        from pydbg.pe import PE
+
+        data, _ = build_security_image(cert_size=0x10, declared_size=0)
+        self.assertIsNone(PE(data).authenticode)
+
+    def test_a_size_past_the_file_is_still_reported_verbatim(self):
+        """Locating is this directory's job; validating is not."""
+        from pydbg.pe import PE
+
+        data, offset = build_security_image(cert_size=0x10,
+                                            declared_size=0x100)
+        location = PE(data).authenticode
+        self.assertIsNotNone(location)
+        self.assertEqual((location.offset, location.size), (offset, 0x100))
+
+
 def build_broken_rich_image(blob):
     """Image with 'blob' dropped in the DOS stub and nothing else."""
     builder, _ = _base_image()
@@ -540,6 +1017,31 @@ class TestRealImageDirectories(unittest.TestCase):
     def test_debug_directory_has_a_codeview_entry(self):
         types = {entry.type for entry in self.pe.debug_entries}
         self.assertIn(2, types, "IMAGE_DEBUG_TYPE_CODEVIEW (the PDB) missing")
+
+    def test_delay_imports_is_a_list(self):
+        """Real system images may have none, so a list either way."""
+        imports = self.pe.delay_imports
+        self.assertIsInstance(imports, list)
+        for entry in imports:
+            self.assertGreater(entry.iat_rva, 0)
+
+    def test_bound_imports_is_a_list(self):
+        self.assertIsInstance(self.pe.bound_imports, list)
+
+    def test_load_config_is_a_struct_or_none(self):
+        config = self.pe.load_config
+        if config is not None:
+            self.assertGreaterEqual(config.size, 0x5C)
+            self.assertIsInstance(config.timestamp, int)
+
+    def test_clr_header_is_none_on_a_native_image(self):
+        self.assertIsNone(self.pe.clr_header)
+
+    def test_authenticode_is_a_location_or_none(self):
+        location = self.pe.authenticode
+        if location is not None:
+            self.assertGreater(location.offset, 0)
+            self.assertGreater(location.size, 0)
 
 
 class TestHeaderPlacementIsNotTheCount(unittest.TestCase):
