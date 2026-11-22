@@ -29,52 +29,27 @@ except ImportError:
     _has_cython = False
 
 
-def _paused_debugger(target=None):
-    """Start the target and stop it on the initial breakpoint.
-
-    Returns (dbg, event); event is the EXCEPTION the target is paused on. This
-    mirrors `tests.helpers.create_debugger`, but hands the event back because
-    the tracer's run() needs it continued first.
-    """
-    from tests import TEST_TARGET_PATH
-    from pydbg import Debugger
-
-    dbg = Debugger()
-    dbg.create_process(target or TEST_TARGET_PATH)
-    event = dbg.wait_event(5000)
-    if event is not None:
-        dbg.continue_event(event.pid, event.tid)
-    for _ in range(50):
-        event = dbg.wait_event(2000)
-        if event is None or event.type == 'EXIT_PROCESS':
-            break
-        if event.type == 'EXCEPTION':
-            break
-        dbg.continue_event(event.pid, event.tid)
-    return dbg, event
-
-
-def _teardown(dbg):
-    from tests.helpers import teardown
-
-    teardown(dbg)
-
-
 class _LiveTestCase(unittest.TestCase):
-    """A target paused on its initial breakpoint, torn down afterwards."""
+    """A target paused on its initial breakpoint, torn down afterwards.
+
+    `tests.helpers.create_debugger` is the one implementation of "start the
+    target and stop on the loader breakpoint"; a second copy here is how the
+    two drifted apart in the first place.
+    """
 
     def setUp(self):
-        self.dbg, self.pending = _paused_debugger()
-        self.assertIsNotNone(self.pending, "target never reached its first breakpoint")
-        self.assertEqual(self.pending.type, 'EXCEPTION',
-                         "the target is not paused on an exception")
+        from tests.helpers import create_debugger
+
+        self.dbg, self.pid, self.tid = create_debugger()
 
     def tearDown(self):
-        _teardown(self.dbg)
+        from tests.helpers import teardown
+
+        teardown(self.dbg)
 
     def resume_pending(self):
         """Continue the loader breakpoint so run() has an event to wait for."""
-        self.dbg.continue_event(self.pending.pid, self.pending.tid)
+        self.dbg.continue_event(self.pid, self.tid)
 
 
 @unittest.skipUnless(_has_cython, "optional dependency: Cython extension")
