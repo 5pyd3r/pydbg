@@ -161,10 +161,11 @@ def build_function_cfg(decoder, image, functions, entry, max_blocks=4096):
 def cfg_of(result, rva, max_blocks=4096):
     """The CFG of the function containing 'rva', or None if there is none.
 
-    `FunctionTable.containing` is the lookup, deliberately unbounded: an
-    address past the last function would otherwise answer None where the
-    caller asked "which function is this in" and meant the nearest preceding
-    one. A caller that needs a bounded answer uses owners.function_of.
+    "Containing" is `FunctionTable.containing`: the nearest start at or before
+    'rva', unbounded by that function's extent. That is what this query has
+    always meant — it is how a listing labels the function it is inside — and
+    `owners.function_of` is the bounded question for a caller that needs to
+    tell "inside a function" from "past everything the analysis claimed".
     """
     entry = result.functions.containing(rva)
     if entry is None:
