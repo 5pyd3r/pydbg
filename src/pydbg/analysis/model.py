@@ -1,7 +1,23 @@
-"""Value types for static analysis."""
+"""Value types for static analysis.
+
+This is the leaf of the package: it imports nothing from a sibling module, at
+module level or inside a function. A result record has no business asking the
+decoder, the function table or a renderer anything — those answers are free
+functions in the module that owns them, taking the result as an argument. The
+one exception is the four per-address lookups on `AnalysisResult`, which read
+its own reference index and nothing else.
+"""
+
+from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import IntEnum
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:               # annotations only; this must stay a leaf
+    from .decoder import InstructionDecoder
+    from .functions import FunctionTable
+    from .image import AnalyzedImage
 
 
 class RefKind(IntEnum):
@@ -234,40 +250,50 @@ class SeedConfig:
 
 @dataclass
 class AnalysisResult:
-    """Everything a run produced."""
+    """Everything a run produced.
 
-    image: object                # AnalyzedImage
-    functions: object            # FunctionTable
-    xrefs: dict = field(default_factory=dict)   # target_rva -> tuple[Xref, ...]
+    A record plus the four lookups over its own reference index. Every other
+    question — ownership, names, accesses, a CFG, a text report — is a free
+    function in the module that owns the answer, taking this result as an
+    argument: `owners.function_of(result, rva)`, `scan.linear_scan(
+    result.decoder, ...)`, `report.render_summary(result)`. Putting those on
+    the record is what made model.py import eight sibling modules through
+    method bodies while pretending to be the bottom layer.
+    """
+
+    image: AnalyzedImage
+    functions: FunctionTable
+    xrefs: dict[int, tuple[Xref, ...]] = field(default_factory=dict)
     stats: AnalysisStats = field(default_factory=AnalysisStats)
-    coverage: dict = field(default_factory=dict)  # section name -> CoverageReport
-    undecodable: tuple = ()      # RVAs a branch targeted that would not decode
+    coverage: dict[str, CoverageReport] = field(default_factory=dict)
+    # RVAs a branch targeted that would not decode.
+    undecodable: tuple[int, ...] = ()
     # Branches with no resolved target. Present so that "no callers" can be
     # told apart from "no callers we could see".
-    indirect_sites: tuple = ()
+    indirect_sites: tuple[IndirectSite, ...] = ()
     # Reasons this run's index may be missing *classes* of reference rather
     # than individual sites, as readable strings. Empty when nothing is known
     # to be missing. Present for the same reason indirect_sites is: an answer
     # of "nothing references this" is only worth as much as the list of
     # reference classes the run actually collected, and without this that list
     # lives in the source rather than in the result.
-    xref_gaps: tuple = ()
+    xref_gaps: tuple[str, ...] = ()
     # Import thunk rva -> the IAT slot it jumps through. Names come from here.
-    import_thunks: dict = field(default_factory=dict)
+    import_thunks: dict[int, int] = field(default_factory=dict)
     # Base-relative memory accesses recorded during the sweep, as
     # (rva, reg id, offset, size, access flags, is branch). None when the run
-    # was configured not to collect them. Named 'records' because
-    # `accesses()` below turns them into Access objects.
-    access_records: tuple = None
+    # was configured not to collect them. `access.collect_accesses` turns them
+    # into Access objects.
+    access_records: tuple[tuple, ...] | None = None
     # Runs of indexed slots the sweep read, as SlotTable objects ascending by
     # base. Present so that an address which is a *value in a table* can be
     # told from one which is a *position in code* — the two are otherwise
     # indistinguishable once the bytes have been decoded.
-    slot_tables: tuple = ()
+    slot_tables: tuple[SlotTable, ...] = ()
     # Kept so a CFG can be built after the fact without re-decoding. The
     # decoder's bookkeeping is small (bytearrays, not Instruction objects), so
     # holding it costs little and re-running the analysis would cost a lot.
-    decoder: object = None
+    decoder: InstructionDecoder | None = None
 
     def callers_of(self, rva):
         """RVAs of everything that references 'rva', ascending.
