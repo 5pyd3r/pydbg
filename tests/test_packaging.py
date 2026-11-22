@@ -58,5 +58,34 @@ class TestPackaging(unittest.TestCase):
         self.assertIn('requires-python = ">=3.10"', _read("pyproject.toml"))
 
 
+class TestInstrumentIsOptional(unittest.TestCase):
+    """Instrumentation is an optional build, not a core dependency.
+
+    The backend links LLVM 22 statically, which pip cannot install. What the
+    metadata can express is the Python-side dependency (capstone, needed to
+    size the trampoline); the native toolchain is selected with -Dllvm-config
+    and must not be spelled as a machine path in the build or the docs.
+    """
+
+    def test_the_instrument_extra_carries_its_python_dependency(self):
+        self.assertIn('instrument = ["capstone>=5.0"]', _read("pyproject.toml"))
+
+    def test_the_llvm_backend_has_no_hardcoded_toolchain_path(self):
+        meson = _read(os.path.join("src", "pydbg", "instrument",
+                                   "llvm_backend", "meson.build"))
+        self.assertNotIn("C:/Users", meson)
+        self.assertNotIn("C:\\Users", meson)
+        self.assertNotIn("fs.exists", meson,
+                         "the prebuilt search was removed; llvm-config comes "
+                         "from -Dllvm-config or PATH")
+        self.assertIn("-Dllvm-config", meson)
+
+    def test_active_docs_do_not_ship_a_developer_machine_path(self):
+        for name in ("README.md", "docs/architecture.md",
+                     "docs/KNOWN_ISSUES.md"):
+            self.assertNotIn("C:/Users/", _read(name), name)
+            self.assertNotIn("C:\\Users\\", _read(name), name)
+
+
 if __name__ == "__main__":
     unittest.main()

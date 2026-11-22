@@ -4,6 +4,11 @@ These were Debugger methods. Nothing about them needs the debugger, only a pid,
 so they answer through `dbg.windows` instead of adding three more names to the
 facade (ADR-0002: a capability that can be constructed and tested on its own
 does not get an entry on the facade).
+
+Deliberately still under core/: the idle-timeout path in core/debugger.py
+consumes this answer, and the query is a thin wrapper over the `_ui` Cython
+calls. Whether to split a separate UI package is a boundary decision for the
+facade work, not a side effect of making its GONE state reachable.
 """
 
 from .window_probe import WindowProbeQuery

@@ -1,9 +1,9 @@
 # build-llvm-22.ps1 — Obtain the prebuilt LLVM 22 used by pydbg's instrumentation backend.
 #
 # Default: download the prebuilt LLVM 22.1.8 from this repo's GitHub release
-# `llvm-prebuilt-22.1.8` (asset llvm-22.1.8-x86_64-windows.zip) and install it
-# at C:/Users/Spyder/AppData/Local/llvm-22. The release asset is built once from
-# source; nobody needs to compile LLVM locally.
+# `llvm-prebuilt-22.1.8` (asset llvm-22.1.8-x86_64-windows.7z) and install it
+# under %LOCALAPPDATA%\llvm-22. The release asset is built once from source;
+# nobody needs to compile LLVM locally.
 #
 #   -BuildFromSource   Instead of downloading, compile LLVM 22.1.8 from source
 #                      (the original recipe; slow, ~1-3h). Used to rebuild the
@@ -27,7 +27,7 @@ $Release  = "llvm-prebuilt-22.1.8"
 $Asset    = "llvm-22.1.8-x86_64-windows.7z"
 $SevenZip = "C:\Program Files\7-Zip\7z.exe"
 $Repo     = "5pyd3r/pydbg"
-$Local    = "C:\Users\Spyder\AppData\Local"
+$Local    = $env:LOCALAPPDATA
 $Install  = Join-Path $Local "llvm-22"
 
 if (-not $BuildFromSource) {

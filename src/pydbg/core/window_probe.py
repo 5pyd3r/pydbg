@@ -183,10 +183,16 @@ class WindowProbeQuery:
     `enumerate_windows` is injectable so the state table can be exercised
     without a process. The default is the Cython function, looked up lazily so
     that importing this module does not require the extension to be built.
+
+    `process_exists` is injectable for the same reason; it defaults to the
+    process snapshot, and is only consulted when the window list is empty —
+    that is the only case where GONE and NO_WINDOWS differ. A live window list
+    is proof enough that the process exists.
     """
 
-    def __init__(self, enumerate_windows=None):
+    def __init__(self, enumerate_windows=None, process_exists=None):
         self._enumerate = enumerate_windows
+        self._process_exists = process_exists
 
     def _windows(self, pid):
         if self._enumerate is None:
@@ -194,13 +200,23 @@ class WindowProbeQuery:
             self._enumerate = native
         return self._enumerate(pid)
 
-    def probe(self, pid, process_exists=True):
+    def _pid_exists(self, pid):
+        if self._process_exists is not None:
+            return bool(self._process_exists(pid))
+        from .._pydbg import enumerate_processes
+        return any(entry.get("pid") == pid for entry in enumerate_processes())
+
+    def probe(self, pid):
         """The `WindowProbe` for 'pid'.
 
         Failure of the probe itself is reported as `UNKNOWN` with the reason
         attached, never as a benign state and never by raising: a caller that
         asked "is this target running" is better served by "I could not tell,
         and here is why" than by an exception it will catch and treat as "no".
+
+        An empty window list is not enough to say NO_WINDOWS: an exited pid
+        also owns no windows. The process snapshot decides between the two,
+        and its failure is UNKNOWN rather than either answer.
         """
         sampled_at = monotonic()
         try:
@@ -212,20 +228,27 @@ class WindowProbeQuery:
                 caveat="cannot rule out that the target is blocked",
                 sampled_at=sampled_at)
 
-        if not process_exists:
-            return classify((), pid, process_exists=False,
-                            sampled_at=sampled_at)
-
         windows = tuple(_to_window_info(item) for item in raw)
-        # `hung_signal_available` is left at its default. What `classify`
-        # models is the case where the signal is known to be missing; nothing
-        # here can detect that from one reading, because `IsHungAppWindow`
-        # returns FALSE both for "nothing is hung" and for "I cannot tell".
-        # Claiming otherwise would be the same species of guess this module
-        # exists to remove, so the limitation is recorded rather than
-        # papered over — see `classify`'s UNKNOWN branch, which a caller that
-        # knows better can reach directly.
-        return classify(windows, pid, sampled_at=sampled_at)
+        if windows:
+            # `hung_signal_available` is left at its default. What `classify`
+            # models is the case where the signal is known to be missing;
+            # nothing here can detect that from one reading, because
+            # `IsHungAppWindow` returns FALSE both for "nothing is hung" and
+            # for "I cannot tell". Claiming otherwise would be the same species
+            # of guess this module exists to remove, so the limitation is
+            # recorded rather than papered over.
+            return classify(windows, pid, sampled_at=sampled_at)
+
+        try:
+            exists = self._pid_exists(pid)
+        except Exception as exc:                       # noqa: BLE001
+            return WindowProbe(
+                pid=pid, state=MessageLoopState.UNKNOWN,
+                evidence=f"the process snapshot failed: {exc!r}",
+                caveat="cannot rule out that the target is blocked",
+                sampled_at=sampled_at)
+        return classify(windows, pid, process_exists=exists,
+                        sampled_at=sampled_at)
 
 
 def _to_window_info(item):
@@ -254,8 +277,8 @@ class MessageLoopWatch:
     query: WindowProbeQuery = field(default_factory=WindowProbeQuery)
     history: list = field(default_factory=list)
 
-    def sample(self, pid, process_exists=True):
-        result = self.query.probe(pid, process_exists=process_exists)
+    def sample(self, pid):
+        result = self.query.probe(pid)
         self.history.append(result)
         return result
 

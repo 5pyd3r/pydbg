@@ -234,6 +234,44 @@ class TestAgainstRealWindows(unittest.TestCase):
         return WindowProbeQuery().probe(pid)
 
 
+class TestGoneIsReachable(unittest.TestCase):
+    """GONE has to be producible by the real query, not only by classify().
+
+    The state existed and the facade had a message for it, but nothing ever
+    passed process_exists=False, so a dead target could only ever be reported
+    as NO_WINDOWS — a different claim, and one the caller has no reason to
+    read as "it exited".
+    """
+
+    def test_a_pid_outside_the_snapshot_is_gone(self):
+        from pydbg.core.window_probe import MessageLoopState, WindowProbeQuery
+
+        probe = WindowProbeQuery().probe(0x7FFFFFF0)
+        self.assertIs(probe.state, MessageLoopState.GONE)
+        self.assertIn("snapshot", probe.evidence)
+
+    def test_the_facade_reports_gone_for_an_unknown_pid(self):
+        from pydbg import Debugger
+        from pydbg.core.window_probe import MessageLoopState
+
+        probe = Debugger().windows.probe(0x7FFFFFF0)
+        self.assertIsNotNone(probe)
+        self.assertIs(probe.state, MessageLoopState.GONE)
+
+    def test_a_snapshot_failure_is_unknown_rather_than_gone(self):
+        """Cannot look is not the same answer as looked and it is not there."""
+        from pydbg.core.window_probe import MessageLoopState, WindowProbeQuery
+
+        def explode(pid):
+            raise OSError(5, "snapshot denied")
+
+        query = WindowProbeQuery(enumerate_windows=lambda pid: [],
+                                 process_exists=explode)
+        probe = query.probe(7)
+        self.assertIs(probe.state, MessageLoopState.UNKNOWN)
+        self.assertIn("snapshot", probe.evidence)
+
+
 class TestTheModalCase(unittest.TestCase):
     """The cause that cost the round, against a real message box."""
 
