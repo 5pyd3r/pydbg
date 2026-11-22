@@ -182,7 +182,7 @@ def attribute_coverage(result, min_run=4):
     data_targets = _data_referenced(result)
     attribution = CoverageAttribution()
     for section in result.image.sections:
-        if not section.is_exec:
+        if not section.is_executable:
             continue
         breakdown = UncoveredBreakdown()
         runs = _uncovered_runs(decoder, section.virtual_address,
@@ -211,7 +211,7 @@ def deltas(first, second):
     only_second = []
     only_first = []
     for section in first.image.sections:
-        if not section.is_exec:
+        if not section.is_executable:
             continue
         start = section.virtual_address
         end = start + section.virtual_size

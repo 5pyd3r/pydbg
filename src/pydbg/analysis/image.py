@@ -3,30 +3,17 @@
 Bridges pe/ (format) and disasm/ (bytes to instructions) without either
 depending on the other, and works the same whether the bytes came from a file
 or from a live module.
-"""
 
-from dataclasses import dataclass
+Its sections are the PE parser's own `SectionHeader` objects. Analysis used to
+re-declare them as a six-field `SectionInfo`, four fields of which were copies;
+that is two answers to "where does this section end", and the analysis copy is
+the one that had no producer for its own flags.
+"""
 
 from ..pe import PE
 from ..pe.view import LoadedView
 
 _MACHINE_TO_MODE = {0x14C: "x86", 0x8664: "x64"}
-
-# IMAGE_SCN_MEM_EXECUTE
-_SCN_MEM_EXECUTE = 0x20000000
-_SCN_MEM_WRITE = 0x80000000
-
-
-@dataclass(frozen=True)
-class SectionInfo:
-    """One section, in the terms the analyzer thinks in."""
-
-    name: str
-    virtual_address: int
-    virtual_size: int
-    size_of_raw_data: int
-    is_exec: bool
-    is_write: bool
 
 
 class AnalyzedImage:
@@ -45,26 +32,15 @@ class AnalyzedImage:
         self.source = pe.source
         self.mode = mode or _MACHINE_TO_MODE.get(pe.file_header.machine, "x86")
         self.image_base = pe.image_base if image_base is None else image_base
-        self.sections = tuple(
-            SectionInfo(
-                name=s.name,
-                virtual_address=s.virtual_address,
-                virtual_size=s.virtual_size,
-                size_of_raw_data=s.size_of_raw_data,
-                is_exec=bool(s.characteristics & _SCN_MEM_EXECUTE),
-                is_write=bool(s.characteristics & _SCN_MEM_WRITE),
-            )
-            for s in pe.sections
-        )
+        self.sections = tuple(pe.sections)
         self.exec_ranges = tuple(
-            (s.virtual_address,
-             s.virtual_address + max(s.virtual_size, s.size_of_raw_data))
-            for s in self.sections if s.is_exec)
+            (s.virtual_address, s.virtual_address + s.span)
+            for s in self.sections if s.is_executable)
 
     def _section_span(self, section):
         """[start, end) an RVA must fall in to belong to 'section'."""
         start = section.virtual_address
-        return start, start + max(section.virtual_size, section.size_of_raw_data)
+        return start, start + section.span
 
     # ── constructors ───────────────────────────────────────────
 

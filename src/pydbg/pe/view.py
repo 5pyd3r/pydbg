@@ -32,13 +32,13 @@ class FileView(View):
         routine: a UPX0-style section declares virtual_size with
         size_of_raw_data == 0, so every RVA in it used to read whatever follows.
 
-        The span is max(virtual_size, size_of_raw_data) because a section may
-        store more on disk than it maps; the guard below then decides whether
-        the particular RVA is actually stored.
+        The span is `SectionHeader.span` (the larger of the two sizes) because
+        a section may store more on disk than it maps; the guard below then
+        decides whether the particular RVA is actually stored.
         """
         for section in self._sections:
             start = section.virtual_address
-            end = start + max(section.virtual_size, section.size_of_raw_data)
+            end = start + section.span
             if not start <= rva < end:
                 continue
             delta = rva - start

@@ -229,7 +229,7 @@ def scan_section(image, decoder, name, **kwargs):
     for section in image.sections:
         if section.name == name:
             start = section.virtual_address
-            end = start + max(section.virtual_size, section.size_of_raw_data)
+            end = start + section.span
             return linear_scan(decoder, start, end, **kwargs)
     raise PydbgError(f"no section named {name!r} in this image")
 
@@ -238,4 +238,4 @@ def scan_executable(image, decoder, **kwargs):
     """Scan every executable section, as (section name, LinearScan) pairs."""
     return tuple((section.name, scan_section(image, decoder, section.name,
                                              **kwargs))
-                 for section in image.sections if section.is_exec)
+                 for section in image.sections if section.is_executable)

@@ -287,8 +287,20 @@ class TestImageGeometry(unittest.TestCase):
         image = AnalyzedImage.from_bytes(build_text(RET))
         text = image.section_of(TEXT_RVA)
         self.assertIsNotNone(text)
-        self.assertTrue(text.is_exec)
+        self.assertTrue(text.is_executable)
         self.assertTrue(image.is_exec(TEXT_RVA))
+
+    def test_sections_are_the_parser_s_own_objects(self):
+        """Analysis consumes SectionHeader instead of re-declaring it.
+
+        SectionInfo copied four of its six fields and derived its own flags;
+        two section models means two answers to "where does this end".
+        """
+        from pydbg.analysis import AnalyzedImage
+        from pydbg.pe import SectionHeader
+
+        image = AnalyzedImage.from_bytes(build_text(RET))
+        self.assertIsInstance(image.section_of(TEXT_RVA), SectionHeader)
 
     def test_va_translation_rejects_what_is_outside_the_image(self):
         from pydbg.analysis import AnalyzedImage

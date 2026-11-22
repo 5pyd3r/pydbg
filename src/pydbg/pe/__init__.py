@@ -1,6 +1,7 @@
 """PE format parser package - three-layer architecture (Source/View/Parse)."""
 
 from .types import (
+    IMAGE_SCN_MEM_EXECUTE, IMAGE_SCN_MEM_WRITE,
     DosHeader, FileHeader, OptionalHeader, DataDirectory,
     SectionHeader, ExportEntry, ImportEntry,
     RelocationEntry, RelocationBlock, TLSDirectory, DebugEntry,
@@ -214,6 +215,7 @@ __all__ = [
     'PE',
     'DosHeader', 'FileHeader', 'OptionalHeader', 'DataDirectory',
     'SectionHeader', 'ExportEntry', 'ImportEntry',
+    'IMAGE_SCN_MEM_EXECUTE', 'IMAGE_SCN_MEM_WRITE',
     'RelocationEntry', 'RelocationBlock', 'TLSDirectory', 'DebugEntry',
     'CodeViewInfo', 'ExceptionEntry', 'RichHeader', 'RichHeaderEntry',
     'Source', 'FileSource', 'BytesSource',
