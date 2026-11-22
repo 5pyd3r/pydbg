@@ -616,6 +616,37 @@ class TestDelayImports(unittest.TestCase):
         self.assertEqual(entry.unload_iat_rva, 0x2600)
         self.assertEqual(image_base, 0x400000)
 
+    def test_a_va_based_descriptor_without_an_image_base_raises(self):
+        """There is no safe default: a VA read as an RVA is a plausible lie.
+
+        The old default of 0 subtracted nothing from the stored VAs and
+        returned them as RVAs, which parse cleanly and point ~4GB off.
+        """
+        from pydbg.pe import PE
+        from pydbg.pe.parser import PEParser
+
+        data, _ = build_delay_image(va_based=True, magic=0x10B)
+        pe = PE(data)
+        parser = PEParser(pe.source, pe.view)
+        with self.assertRaises(ValueError):
+            parser.parse_delay_imports(pe.optional_header.data_directories,
+                                       image_base=0)
+        # The default itself is gone, not just the zero case.
+        with self.assertRaises(TypeError):
+            parser.parse_delay_imports(pe.optional_header.data_directories)
+
+    def test_the_public_path_passes_the_image_base_to_the_parser(self):
+        """PE.delay_imports is the path that must always carry the base."""
+        from pydbg.pe import PE
+        from pydbg.pe.parser import PEParser
+
+        data, _ = build_delay_image(va_based=True, magic=0x10B)
+        pe = PE(data)
+        direct = PEParser(pe.source, pe.view).parse_delay_imports(
+            pe.optional_header.data_directories, pe.image_base)
+        self.assertEqual(pe.delay_imports, direct)
+        self.assertEqual(pe.delay_imports[0].dll_name, "module0.dll")
+
     def test_walks_until_the_all_zero_descriptor(self):
         from pydbg.pe import PE
 

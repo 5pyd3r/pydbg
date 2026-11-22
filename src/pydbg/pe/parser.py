@@ -443,7 +443,7 @@ class PEParser:
     # below: most consumers want none of them.
 
     def parse_delay_imports(self, data_dirs: dict,
-                            image_base: int = 0) -> list:
+                            image_base: int) -> list:
         """Delay-load import descriptors (data directory 13).
 
         'image_base' is the optional header's ImageBase, needed only for the
@@ -451,6 +451,11 @@ class PEParser:
         than RVAs. Every address reported here is an RVA either way, and an
         entry whose VAs fall below ImageBase is skipped: the subtraction is the
         only definition of "out of bounds" this directory has.
+
+        The parameter has no default on purpose. A default of 0 subtracted
+        nothing and returned the stored VAs as RVAs — plausible-looking
+        addresses about 4GB off. A VA-based descriptor met without a base
+        raises ValueError instead of being reported wrongly.
         """
         imports = []
         dd = data_dirs.get(DIR_DELAY_IMPORT)
@@ -472,6 +477,10 @@ class PEParser:
 
             attributes = values[0]
             if attributes & 1 == 0:
+                if not image_base:
+                    raise ValueError(
+                        "VA-based delay-import descriptor at RVA "
+                        f"{dd.virtual_address:#x} needs the image base")
                 values[1:7] = [value - image_base for value in values[1:7]]
                 if any(value < 0 for value in values[1:7]):
                     continue                # VA below ImageBase: not addressable
