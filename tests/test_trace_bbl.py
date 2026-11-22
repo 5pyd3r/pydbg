@@ -183,6 +183,16 @@ class TestBblTracerPlanning(_LiveTestCase):
 
         self.assertGreater(tracer.plan(), 0)
 
+    def test_a_zero_block_budget_plans_nothing(self):
+        """The cap is checked before adding, so zero means exactly zero."""
+        tracer = BblTracer(self.dbg, max_blocks=0)
+
+        self.assertEqual(tracer.plan(), 0)
+        summary = tracer.run()
+        self.assertEqual(summary.events, 0)
+        self.assertEqual(summary.reason, STOP_NO_BLOCKS)
+        self.assertEqual(self.dbg.verify_breakpoints(), [])
+
 
 @unittest.skipUnless(_has_cython, "optional dependency: Cython extension")
 class TestBblTracerRun(_LiveTestCase):

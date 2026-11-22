@@ -175,6 +175,8 @@ class BblTracer:
 
         Calling it twice answers with the same plan; an empty plan is recomputed
         because a module that was not loaded yet is the normal reason for one.
+        `max_blocks` is checked before a block is added, so a budget of 0 plans
+        exactly nothing rather than one block.
         """
         if self._blocks:
             return len(self._blocks)
@@ -204,9 +206,9 @@ class BblTracer:
                     continue        # undecodable: nothing to count or arm
                 if not result.image.is_exec(block.rva):
                     continue        # data, not code
-                blocks.setdefault(block.rva, len(block.instructions))
                 if len(blocks) >= self.max_blocks:
-                    break
+                    break           # the budget is spent: add nothing more
+                blocks.setdefault(block.rva, len(block.instructions))
             if len(blocks) >= self.max_blocks:
                 break
 
