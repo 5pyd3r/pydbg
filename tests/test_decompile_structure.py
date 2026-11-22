@@ -470,6 +470,32 @@ class TestJumpTableBound(unittest.TestCase):
                          decompiled.text)
 
 
+class TestUnmodeledCondition(unittest.TestCase):
+    """A terminator with no modelled condition is not invented into an `if`."""
+
+    # test eax,eax / loop 0x100a / nop / jmp 0x100b / nops / ret.
+    # `loop` is a conditional jump to capstone, but it is outside the condition
+    # table, so the lift keeps it as an Opaque statement.
+    LOOP_TERMINATED = bytes.fromhex("85c0e20690eb04" "90909090" "c3")
+
+    def test_a_loop_terminator_stays_flat_and_says_why(self):
+        """`complete=True` with `if (!?)` was a claim the analysis could not back.
+
+        The block's condition was never lowered, so there is no truth value to
+        test. The flat form states the edge and its reason; the warning says
+        the same thing to a caller that reads the result instead of the text.
+        """
+        result = decompile(self.LOOP_TERMINATED)
+
+        self.assertIsNotNone(result)
+        self.assertNotIn("if (", result.text)
+        self.assertNotIn("!?", result.text)
+        self.assertIn("condition not modeled", result.text)
+        self.assertIn("condition not modeled", result.warnings)
+        self.assertEqual(result.text.count("// unhandled:"),
+                         len(result.unhandled))
+
+
 class TestIrreducible(unittest.TestCase):
     """A cycle with two entries cannot be a loop; labels and gotos are honest."""
 

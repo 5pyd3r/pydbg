@@ -839,6 +839,17 @@ class _Builder:
             jump = self._jump_target(cur)
             if conditional is not None:
                 target, fall = conditional
+                if self._condition(block)[1] is None:
+                    # The terminator branches conditionally, but the lift did
+                    # not model its condition (`loop`, say). There is no truth
+                    # value to put in an `if`, and inventing one would print
+                    # `if (!?)` while the result still claimed completeness.
+                    self.warnings.add("condition not modeled")
+                    items.append(Flat(block,
+                                      fall if fall in self.blocks else None))
+                    self.done.add(cur)
+                    cur = fall
+                    continue
                 rva = self._branch_rva(block)
                 if (ctx is not None and target == ctx.break_target
                         and fall != ctx.break_target):
@@ -959,6 +970,13 @@ class _Builder:
         if target in stop and fall in stop:
             return None
         header, expression, rvas = self._condition(block)
+        if expression is None:
+            # A conditional with no modelled condition has no `if` to build.
+            # Returning None leaves the flat form, which names the edge and
+            # says the condition is not modeled; the warning carries the same
+            # statement out of the text.
+            self.warnings.add("condition not modeled")
+            return None
 
         if target in stop:
             body, after, elided = self._region(fall, stop, ctx)
