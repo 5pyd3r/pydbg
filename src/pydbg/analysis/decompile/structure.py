@@ -178,34 +178,6 @@ class Structured:
 
 # ── condition knowledge ────────────────────────────────────────
 
-_ZF = Reg("eflags.zf", 1)
-_SF = Reg("eflags.sf", 1)
-_OF = Reg("eflags.of", 1)
-
-
-def _comparison_op(condition):
-    """The C operator a `jcc` condition means, or None when it is not folded.
-
-    Only the sign/zero relations with an exact C spelling are listed. Unsigned
-    relations (`jb`/`ja`/...) are deliberately absent: `eax < 5` would silently
-    claim a signedness the instruction did not state, and the `eflags.*` form
-    P5 prints does not have that problem.
-    """
-    if condition == _ZF:
-        return "=="
-    if condition == UnExpr("!", _ZF):
-        return "!="
-    if condition == BinExpr("!=", _SF, _OF):
-        return "<"
-    if condition == BinExpr("==", _SF, _OF):
-        return ">="
-    if condition == BinExpr("||", _ZF, BinExpr("!=", _SF, _OF)):
-        return "<="
-    if condition == BinExpr("&&", UnExpr("!", _ZF), BinExpr("==", _SF, _OF)):
-        return ">"
-    return None
-
-
 _INVERT = {"==": "!=", "!=": "==", "<": ">=", ">=": "<", ">": "<=", "<=": ">"}
 
 
@@ -218,18 +190,19 @@ def negate(condition):
     return UnExpr("!", condition)
 
 
-def fold_compare(cmp_stmt, condition):
+def fold_compare(cmp_stmt, comparison):
     """Fold a `cmp`/`test` statement into an `if`-style condition, or None.
 
-    'condition' is the branch's flag expression. The fold is only attempted
-    when the branch means an operator with an exact C spelling, so a folded
-    condition never says more than the flags said.
+    'comparison' is the branch's C operator as the lift recorded it from the
+    condition table (`None` when the condition has no exact C spelling). Using
+    that field instead of comparing flag expressions keeps this pass from
+    re-deriving a second copy of the table, which would silently stop folding
+    whenever the first copy changed. A folded condition never says more than
+    the flags did: unsigned relations are not in the table at all.
     """
-    if not isinstance(cmp_stmt, Cmp) or condition is None:
+    if not isinstance(cmp_stmt, Cmp) or comparison is None:
         return None
-    op = _comparison_op(condition)
-    if op is None:
-        return None
+    op = comparison
     if cmp_stmt.op == "cmp":
         return BinExpr(op, cmp_stmt.left, cmp_stmt.right)
     if cmp_stmt.op == "test":
@@ -780,7 +753,8 @@ class _Builder:
         if (branch is not None and len(stmts) >= 2
                 and isinstance(stmts[-2], Cmp)):
             cmp_stmt = stmts[-2]
-        folded = fold_compare(cmp_stmt, condition)
+        comparison = branch.comparison if branch is not None else None
+        folded = fold_compare(cmp_stmt, comparison)
         if folded is not None:
             return (Statements(block, folded=(cmp_stmt.rva,)), folded,
                     (cmp_stmt.rva, branch.rva))

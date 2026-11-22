@@ -200,6 +200,11 @@ class Branch(Stmt):
     'flags_read' is the subset of EFLAGS pseudo-registers the condition table
     says this branch's condition actually reads (`je` -> zf, `ja` -> cf+zf).
     An unconditional or indirect branch reads none.
+
+    'comparison' is the same table's C operator for the condition (`==`, `<`,
+    ...), or None when the condition has no exact C spelling. The structure
+    pass folds `cmp` + branch through this field instead of re-deriving the
+    operator from `cond`, so the two cannot disagree.
     """
 
     rva: int
@@ -208,6 +213,7 @@ class Branch(Stmt):
     kind: str
     text: str = ""
     flags_read: tuple = ()
+    comparison: str | None = None
 
 
 @dataclass(frozen=True)
@@ -300,43 +306,50 @@ _SF = _flag("sf")
 _OF = _flag("of")
 _PF = _flag("pf")
 
-# mnemonic -> (condition expression, flags the condition reads)
+# mnemonic -> (condition expression, flags the condition reads, C operator).
 #
 # The spellings that share a condition are listed separately rather than
 # aliased through a canonical mnemonic: capstone emits whichever spelling the
 # assembler used, and a table that only knew `je` would turn `jz` into an
 # unhandled instruction.
+#
+# The third field is the operator `structure.fold_compare` uses, and it lives
+# here rather than being re-derived from the flag expression: two tables would
+# drift, and the drift would silently stop folding instead of failing. Only
+# relations with an exact C spelling are listed -- unsigned ones (`jb`/`ja`)
+# stay None because `eax < 5` would claim a signedness the instruction did not
+# state.
 _CONDITIONS = {
-    "je": (_ZF, ("zf",)),
-    "jz": (_ZF, ("zf",)),
-    "jne": (_not(_ZF), ("zf",)),
-    "jnz": (_not(_ZF), ("zf",)),
-    "js": (_SF, ("sf",)),
-    "jns": (_not(_SF), ("sf",)),
-    "jo": (_OF, ("of",)),
-    "jno": (_not(_OF), ("of",)),
-    "jp": (_PF, ("pf",)),
-    "jpe": (_PF, ("pf",)),
-    "jnp": (_not(_PF), ("pf",)),
-    "jpo": (_not(_PF), ("pf",)),
-    "jb": (_CF, ("cf",)),
-    "jnae": (_CF, ("cf",)),
-    "jc": (_CF, ("cf",)),
-    "jae": (_not(_CF), ("cf",)),
-    "jnb": (_not(_CF), ("cf",)),
-    "jnc": (_not(_CF), ("cf",)),
-    "jbe": (_or(_CF, _ZF), ("cf", "zf")),
-    "jna": (_or(_CF, _ZF), ("cf", "zf")),
-    "ja": (_and(_not(_CF), _not(_ZF)), ("cf", "zf")),
-    "jnbe": (_and(_not(_CF), _not(_ZF)), ("cf", "zf")),
-    "jl": (BinExpr("!=", _SF, _OF), ("sf", "of")),
-    "jnge": (BinExpr("!=", _SF, _OF), ("sf", "of")),
-    "jge": (BinExpr("==", _SF, _OF), ("sf", "of")),
-    "jnl": (BinExpr("==", _SF, _OF), ("sf", "of")),
-    "jle": (_or(_ZF, BinExpr("!=", _SF, _OF)), ("zf", "sf", "of")),
-    "jng": (_or(_ZF, BinExpr("!=", _SF, _OF)), ("zf", "sf", "of")),
-    "jg": (_and(_not(_ZF), BinExpr("==", _SF, _OF)), ("zf", "sf", "of")),
-    "jnle": (_and(_not(_ZF), BinExpr("==", _SF, _OF)), ("zf", "sf", "of")),
+    "je": (_ZF, ("zf",), "=="),
+    "jz": (_ZF, ("zf",), "=="),
+    "jne": (_not(_ZF), ("zf",), "!="),
+    "jnz": (_not(_ZF), ("zf",), "!="),
+    "js": (_SF, ("sf",), None),
+    "jns": (_not(_SF), ("sf",), None),
+    "jo": (_OF, ("of",), None),
+    "jno": (_not(_OF), ("of",), None),
+    "jp": (_PF, ("pf",), None),
+    "jpe": (_PF, ("pf",), None),
+    "jnp": (_not(_PF), ("pf",), None),
+    "jpo": (_not(_PF), ("pf",), None),
+    "jb": (_CF, ("cf",), None),
+    "jnae": (_CF, ("cf",), None),
+    "jc": (_CF, ("cf",), None),
+    "jae": (_not(_CF), ("cf",), None),
+    "jnb": (_not(_CF), ("cf",), None),
+    "jnc": (_not(_CF), ("cf",), None),
+    "jbe": (_or(_CF, _ZF), ("cf", "zf"), None),
+    "jna": (_or(_CF, _ZF), ("cf", "zf"), None),
+    "ja": (_and(_not(_CF), _not(_ZF)), ("cf", "zf"), None),
+    "jnbe": (_and(_not(_CF), _not(_ZF)), ("cf", "zf"), None),
+    "jl": (BinExpr("!=", _SF, _OF), ("sf", "of"), "<"),
+    "jnge": (BinExpr("!=", _SF, _OF), ("sf", "of"), "<"),
+    "jge": (BinExpr("==", _SF, _OF), ("sf", "of"), ">="),
+    "jnl": (BinExpr("==", _SF, _OF), ("sf", "of"), ">="),
+    "jle": (_or(_ZF, BinExpr("!=", _SF, _OF)), ("zf", "sf", "of"), "<="),
+    "jng": (_or(_ZF, BinExpr("!=", _SF, _OF)), ("zf", "sf", "of"), "<="),
+    "jg": (_and(_not(_ZF), BinExpr("==", _SF, _OF)), ("zf", "sf", "of"), ">"),
+    "jnle": (_and(_not(_ZF), BinExpr("==", _SF, _OF)), ("zf", "sf", "of"), ">"),
 }
 
 # The count-is-zero family is not a flag condition: it compares a register with
@@ -363,6 +376,20 @@ def flags_read(mnemonic):
         return ()
     entry = _CONDITIONS.get(mnemonic)
     return entry[1] if entry is not None else ()
+
+
+def comparison_for(mnemonic):
+    """The C operator `mnemonic`'s condition means, or None when it has none.
+
+    The third column of the same table `condition_for` and `flags_read` read:
+    the structure pass folds `cmp` + branch using this answer, so the operator
+    cannot drift away from the expression it came from. The count-is-zero
+    family has no flag condition at all and therefore no operator either.
+    """
+    if mnemonic in _COUNT_ZERO:
+        return None
+    entry = _CONDITIONS.get(mnemonic)
+    return entry[2] if entry is not None else None
 
 
 def flags_written(mnemonic):
@@ -599,7 +626,8 @@ def _lower_jcc(decoder, image, insn, rva):
         return None
     return (Branch(rva=rva, cond=cond,
                    target=branch_target(insn, image), kind="jcc",
-                   text=insn.op_str, flags_read=flags_read(insn.mnemonic)),)
+                   text=insn.op_str, flags_read=flags_read(insn.mnemonic),
+                   comparison=comparison_for(insn.mnemonic)),)
 
 
 def _lower_jmp(decoder, image, insn, rva):

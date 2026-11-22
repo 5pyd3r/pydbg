@@ -403,6 +403,14 @@ class TestFlagDeclarations(unittest.TestCase):
                 stmt = self.lower_first(bytes.fromhex(code))[0]
                 self.assertEqual(stmt.flags_read, expected)
 
+    def test_a_branch_carries_the_operator_from_the_condition_table(self):
+        """The structure pass folds with this field, not a second copy of the table."""
+        self.assertEqual(self.lower_first(bytes.fromhex("7400"))[0].comparison,
+                         "==")                                  # je
+        self.assertIsNone(self.lower_first(bytes.fromhex("7700"))[0].comparison)
+        self.assertEqual(self.lower_first(bytes.fromhex("7c00"))[0].comparison,
+                         "<")                                   # jl
+
     def test_not_carries_no_flags_through_recovery(self):
         """`not` has no flag effect, and expression recovery keeps that fact."""
         from pydbg.analysis.decompile import expr, ir
