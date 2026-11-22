@@ -24,6 +24,21 @@ def create_debugger(target=TEST_TARGET_PATH):
     return dbg, pid, tid
 
 
+def stop_at(dbg, addr, timeout_ms=5000):
+    """Run to addr with a temporary breakpoint, then finish its single-step.
+
+    Leaves the target paused on the single-step debug event, with no pending
+    breakpoint single-step. The caller resumes it with continue_event().
+    """
+    dbg.run_until(addr, max_wait_ms=timeout_ms, max_idle_timeouts=3)
+    pid, tid = dbg._session.pid, dbg._session.tid
+    dbg.continue_event(pid, tid)
+    event = dbg.wait_event(timeout_ms)
+    if event is None or not dbg.handle_ss_manual(tid):
+        raise AssertionError("expected the temporary breakpoint's single-step")
+    return event
+
+
 def teardown(dbg):
     """Robust teardown: terminate, drain events, close handles. Never raises."""
     try:
@@ -42,6 +57,23 @@ def teardown(dbg):
 def module_base(dbg):
     """Base address of the target's first loaded module (the exe itself)."""
     return dbg.enum_modules()[0]["base_address"]
+
+
+def export_address(dbg, path, name):
+    """Absolute address of an export of the target's main module.
+
+    The base is the first module `dbg` reports, which is the image both the
+    instrument and the probe targets start from; `path` is the PE on disk whose
+    export table names the RVA. One implementation, because three tests had
+    drifted copies of it.
+    """
+    from pydbg.pe import PE
+
+    base = module_base(dbg)
+    for export in PE.from_file(path).exports:
+        if export.name == name:
+            return base + export.rva
+    raise AssertionError(f"export {name} not found in {path}")
 
 
 def entry_point(dbg):

@@ -13,7 +13,7 @@ import tempfile
 import unittest
 
 from pydbg.trace import (
-    API, BLOCK, MARK, MEM_READ, MEM_WRITE, TraceEvent, TraceWriter,
+    API, BLOCK, INSTR, MARK, MEM_READ, MEM_WRITE, TraceEvent, TraceWriter,
     block_coverage, filter_events, read_trace, to_jsonl,
 )
 
@@ -48,6 +48,7 @@ class TestKindVocabulary(unittest.TestCase):
             MARK: "MARK",
             MEM_READ: "MEM_READ",
             MEM_WRITE: "MEM_WRITE",
+            INSTR: "INSTR",
         })
 
     def test_replay_uses_the_one_mapping_instead_of_a_second_copy(self):
@@ -196,13 +197,14 @@ class TestToJsonl(JsonlFileTest):
         ])
 
     def test_every_v1_kind_gets_its_documented_name(self):
-        kinds = (BLOCK, API, MARK, MEM_READ, MEM_WRITE)
+        kinds = (BLOCK, API, MARK, MEM_READ, MEM_WRITE, INSTR)
         to_jsonl([TraceEvent(kind, 1, 0, 0) for kind in kinds], self.path())
 
         with open(self.path(), encoding="utf-8") as stream:
             rows = [json.loads(line) for line in stream]
         self.assertEqual([row["kind_name"] for row in rows],
-                         ["BLOCK", "API", "MARK", "MEM_READ", "MEM_WRITE"])
+                         ["BLOCK", "API", "MARK", "MEM_READ", "MEM_WRITE",
+                          "INSTR"])
         self.assertEqual([row["kind"] for row in rows], list(kinds))
 
     def test_a_line_is_compact_with_sorted_keys_and_a_final_newline(self):

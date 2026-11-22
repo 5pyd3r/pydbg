@@ -47,10 +47,8 @@ from ..core.status import ExitReason
 from ..exceptions import (
     BreakpointError, ProcessError, PydbgError, TimeoutError as PydbgTimeoutError,
 )
+from . import _shared
 from .format import BLOCK, TraceEvent
-
-# GetExitCodeProcess answers this while the process is still running.
-_STILL_ACTIVE = 259
 
 # A breakpoint stop, including the WOW64 status code a 32-bit target under a
 # 64-bit debugger reports (same pair the debugger's own dispatch checks).
@@ -58,10 +56,15 @@ _BREAKPOINT_CODES = frozenset((EXCEPTION_BREAKPOINT, STATUS_WX86_BREAKPOINT))
 
 # Why a run stopped. These are exported so callers compare against a name and
 # not a string literal that can drift. Two of them mean the trace is partial.
+# STOP_NO_MODULE / STOP_NO_TARGET live here too because they are reasons a
+# trace can end, not facts about one tracer: every Phase 3b entry point can
+# answer with them, and the copies in instr/probe had already drifted apart.
 STOP_MAX_EVENTS = "max_events"
 STOP_TARGET_EXITED = "target_exited"
 STOP_IDLE_TIMEOUT = "idle_timeout"
 STOP_NO_BLOCKS = "no traceable blocks"
+STOP_NO_MODULE = "no module"
+STOP_NO_TARGET = "no target"
 
 # The reasons that mean "a budget cut this run short". `TraceSummary.truncated`
 # is derived from this set, so it cannot disagree with `reason`.
@@ -74,6 +77,9 @@ class TraceSummary:
 
     'events' counts BLOCK events recorded; 'blocks' counts the *distinct* block
     starts among them, because a loop can execute one block a thousand times.
+
+    'instructions' counts INSTR events. It is 0 for a block, memory or probe
+    trace, which records no instructions.
 
     'reason' is the stop reason, one of the STOP_* constants or None when the
     loop ended without setting one. 'truncated' is not stored: it is derived
@@ -94,6 +100,7 @@ class TraceSummary:
     blocks: int
     reason: str | None
     elapsed_ns: int
+    instructions: int = 0
     warnings: tuple[str, ...] = ()
     single_step_pending: bool = False
 
@@ -181,15 +188,15 @@ class BblTracer:
         if self._blocks:
             return len(self._blocks)
 
-        module = self._find_module()
+        module = _shared.find_module(self.dbg, self.module)
         if module is None:
             return 0
-        base, _ = self._module_region(module)
+        base, _ = _shared.module_region(module)
         if not base:
             return 0
 
         self._base = base
-        module_size = self._module_size(module)
+        module_size = _shared.module_size(self.dbg, module)
         try:
             result = analyze_process(self.dbg._session, base,
                                      module_size=module_size)
@@ -214,42 +221,6 @@ class BblTracer:
 
         self._blocks = dict(sorted(blocks.items()))
         return len(self._blocks)
-
-    def _find_module(self):
-        """The module to analyze, or None when there is nothing to trace.
-
-        An unattached debugger has no module table: enum_modules() fails with
-        TypeError when there is no process handle, and that is the answer
-        rather than a reason to peek at session state first.
-        """
-        if self.module is not None:
-            return self.module
-        try:
-            modules = self.dbg.enum_modules()
-        except (PydbgError, OSError, TypeError):
-            return None
-        return modules[0] if modules else None
-
-    @staticmethod
-    def _module_region(module):
-        """(base_address, size) for a module dict or a (base, size) tuple."""
-        if isinstance(module, dict):
-            return module.get('base_address') or 0, module.get('size')
-        base, size = module
-        return base or 0, size
-
-    def _module_size(self, module):
-        """Byte span of the module: its PE image size, or its mapped region."""
-        base, size = self._module_region(module)
-        if size:
-            return size
-        try:
-            for region in self.dbg.enum_regions():
-                if region.get('base_address') == base:
-                    return region.get('region_size')
-        except (PydbgError, OSError, TypeError):
-            return None
-        return None
 
     # ── arming ─────────────────────────────────────────────────
 
@@ -326,7 +297,7 @@ class BblTracer:
             try:
                 self.dbg.remove_breakpoint(bp_id)
             except (BreakpointError, ProcessError):
-                if self._target_exited():
+                if _shared.target_exited(self.dbg):
                     warnings.append("target exited during cleanup")
                     target_exited = True
                     break
@@ -341,19 +312,6 @@ class BblTracer:
                     warnings.append("breakpoint left")
                     break
         return tuple(dict.fromkeys(warnings))
-
-    def _target_exited(self):
-        """Whether the target is gone, so its bytes can no longer be restored.
-
-        The process handle outlives EXIT_PROCESS so the exit code stays
-        readable, which makes GetExitCodeProcess the honest answer: the
-        STILL_ACTIVE pseudo-code means it is still there. A failed query means
-        the handle is gone too — equally unable to restore a byte.
-        """
-        try:
-            return self.dbg.get_exit_code() != _STILL_ACTIVE
-        except (PydbgError, OSError):
-            return True
 
     # ── running ────────────────────────────────────────────────
 
@@ -423,7 +381,7 @@ class BblTracer:
             reason=self._reason,
             elapsed_ns=time.perf_counter_ns() - started,
             warnings=tuple(self._warnings),
-            single_step_pending=bool(self.dbg._session.pending_single_step),
+            single_step_pending=_shared.single_step_pending(self.dbg),
         )
 
     def _reset(self):

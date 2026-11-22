@@ -64,6 +64,34 @@ class TestHardwareBreakpoint(unittest.TestCase):
             _pydbg.set_hw_breakpoint(self.h_thr, 5, 0x1000, 0, 0)
 
 
+@unittest.skipUnless(_has_cython, "optional dependency: Cython extension")
+class TestHardwareSlotBusy(unittest.TestCase):
+    """A reused debug-register slot has its own error type, not a string."""
+
+    def test_a_slot_already_in_use_raises_breakpoint_slot_busy(self):
+        from pydbg.breakpoint.hardware import (
+            BreakpointSlotBusy, HardwareBreakpointManager,
+        )
+        from pydbg.breakpoint.model import Breakpoint
+        from pydbg.core.session import DebugSession
+        from pydbg.exceptions import BreakpointError
+
+        session = DebugSession()
+        session.breakpoints[7] = Breakpoint(
+            kind="hw", addr=0x401000, slot=0, condition="x", length=1)
+        manager = HardwareBreakpointManager(session)
+
+        with self.assertRaises(BreakpointSlotBusy) as caught:
+            manager.set(0x401100, "x", 1, 0)
+
+        self.assertIsInstance(caught.exception, BreakpointError,
+                              "callers catching BreakpointError must still "
+                              "catch a busy slot")
+        self.assertIn("hardware breakpoint slot 0 already in use",
+                      str(caught.exception),
+                      "the message must keep naming the slot")
+
+
 class TestDebuggerBreakpointAPI(unittest.TestCase):
     """Tests for high-level breakpoint API."""
 

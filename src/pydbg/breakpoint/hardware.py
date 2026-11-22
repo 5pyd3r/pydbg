@@ -11,6 +11,16 @@ from ..exceptions import BreakpointError
 from .model import Breakpoint
 
 
+class BreakpointSlotBusy(BreakpointError):
+    """A debug-register slot (Dr0-3) already belongs to another breakpoint.
+
+    A distinct type, not just a message: the slot-allocating tracers have to
+    try the next slot, and matching "already in use" in the exception text
+    would misread any other error that happened to contain those words. It is
+    still a `BreakpointError`, so existing callers keep catching it.
+    """
+
+
 class HardwareBreakpointManager:
     """Manages hardware (debug register) breakpoints."""
 
@@ -157,7 +167,7 @@ class HardwareBreakpointManager:
         # Slot is globally unique across hardware breakpoints.
         for bp_id, bp in self._s.breakpoints.items():
             if bp.kind == "hw" and bp.slot == slot:
-                raise BreakpointError(
+                raise BreakpointSlotBusy(
                     f"hardware breakpoint slot {slot} already in use (bp {bp_id})"
                 )
 
