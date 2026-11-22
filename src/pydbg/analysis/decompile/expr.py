@@ -259,11 +259,13 @@ class _Recovery:
         elif isinstance(stmt, Store):
             self.stmts.append(Store(rva=stmt.rva,
                                     addr=self.substitute(stmt.addr),
-                                    value=self.substitute(stmt.value)))
+                                    value=self.substitute(stmt.value),
+                                    flags_written=stmt.flags_written))
         elif isinstance(stmt, Cmp):
             self.stmts.append(Cmp(rva=stmt.rva, op=stmt.op,
                                   left=self.substitute(stmt.left),
-                                  right=self.substitute(stmt.right)))
+                                  right=self.substitute(stmt.right),
+                                  flags_written=stmt.flags_written))
         elif isinstance(stmt, (Call, Opaque)):
             # A call returns a value in a register and may read any argument;
             # an Opaque instruction may do anything at all. Both make every
@@ -299,7 +301,8 @@ class _Recovery:
         right = self.substitute(stmt.right, skip)
         self._kill(stmt.dst)
         expr = fold(BinExpr(stmt.op, left, right))
-        self.stmts.append(_update(stmt.rva, stmt.dst, expr))
+        self.stmts.append(_update(stmt.rva, stmt.dst, expr,
+                                  flags_written=stmt.flags_written))
         self._note_return(stmt.dst)
         if isinstance(expr, Const) and is_full_width(stmt.dst):
             self.consts[family(stmt.dst)] = expr.value
@@ -309,7 +312,8 @@ class _Recovery:
         operand = self.substitute(stmt.operand, skip)
         self._kill(stmt.dst)
         expr = fold(UnExpr(stmt.op, operand))
-        self.stmts.append(_update(stmt.rva, stmt.dst, expr))
+        self.stmts.append(_update(stmt.rva, stmt.dst, expr,
+                                  flags_written=stmt.flags_written))
         self._note_return(stmt.dst)
         if isinstance(expr, Const) and is_full_width(stmt.dst):
             self.consts[family(stmt.dst)] = expr.value
@@ -335,13 +339,18 @@ class _Recovery:
         return tuple(kept), tuple(dead)
 
 
-def _update(rva, dst, expr):
-    """The statement form that assigns 'expr' to register 'dst'."""
+def _update(rva, dst, expr, flags_written=()):
+    """The statement form that assigns 'expr' to register 'dst'.
+
+    Any side effect the instruction had travels with it: 'flags_written' is
+    empty for `not` and for a plain copy, and all six flags for arithmetic.
+    """
     if isinstance(expr, BinExpr):
         return BinOp(rva=rva, dst=dst, op=expr.op, left=expr.left,
-                     right=expr.right)
+                     right=expr.right, flags_written=flags_written)
     if isinstance(expr, UnExpr):
-        return UnOp(rva=rva, dst=dst, op=expr.op, operand=expr.operand)
+        return UnOp(rva=rva, dst=dst, op=expr.op, operand=expr.operand,
+                    flags_written=flags_written)
     return Assign(rva=rva, dst=dst, src=expr)
 
 

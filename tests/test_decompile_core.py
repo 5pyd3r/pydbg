@@ -356,6 +356,14 @@ class TestFailureAndHonesty(unittest.TestCase):
 class TestFlagDeclarations(unittest.TestCase):
     """The EFLAGS pseudo-register contract the spec states in ir.py."""
 
+    def lower_first(self, code):
+        """The statements one instruction lowers to, inside a decodable image."""
+        from pydbg.analysis.decompile import ir
+
+        result = analyze(code + RET)
+        insn = result.decoder.decode_one(TEXT_RVA)
+        return ir.lower_instruction(result.decoder, result.image, insn)
+
     def test_arithmetic_declares_all_six_flags(self):
         from pydbg.analysis.decompile import ir
 
@@ -373,6 +381,47 @@ class TestFlagDeclarations(unittest.TestCase):
         from pydbg.analysis.decompile import ir
 
         self.assertEqual(ir.flags_written("not"), ())
+
+    def test_flag_writing_statements_carry_the_flags(self):
+        """The declaration has to reach the statements, or it is decorative.
+
+        `add`, `cmp` and `test` all write all six flags in the conservative
+        model; the statement they lower to says so.
+        """
+        from pydbg.analysis.decompile import ir
+
+        for name, code in (("add", "83c003"), ("cmp", "83f805"),
+                           ("test", "85c0")):
+            with self.subTest(instruction=name):
+                stmt = self.lower_first(bytes.fromhex(code))[0]
+                self.assertEqual(stmt.flags_written, ir.ALL_FLAGS)
+
+    def test_a_branch_statement_carries_the_flags_it_reads(self):
+        """A branch reads the condition table's subset, not all six."""
+        for code, expected in (("7400", ("zf",)), ("7700", ("cf", "zf"))):
+            with self.subTest(condition=expected):
+                stmt = self.lower_first(bytes.fromhex(code))[0]
+                self.assertEqual(stmt.flags_read, expected)
+
+    def test_not_carries_no_flags_through_recovery(self):
+        """`not` has no flag effect, and expression recovery keeps that fact."""
+        from pydbg.analysis.decompile import expr, ir
+
+        stmt = self.lower_first(bytes.fromhex("f7d0"))[0]
+        self.assertEqual(stmt.flags_written, ())
+        block = ir.IRBlock(rva=TEXT_RVA, stmts=(stmt,))
+        recovered = expr.recover({TEXT_RVA: block}, "x64")
+        self.assertEqual(recovered[TEXT_RVA].stmts[0].flags_written, ())
+
+    def test_arithmetic_flags_survive_expression_recovery(self):
+        """Recovery rebuilds the statement; it must carry the declaration over."""
+        from pydbg.analysis.decompile import expr, ir
+
+        stmt = self.lower_first(bytes.fromhex("83c003"))[0]
+        block = ir.IRBlock(rva=TEXT_RVA, stmts=(stmt,))
+        recovered = expr.recover({TEXT_RVA: block}, "x64")
+        self.assertEqual(recovered[TEXT_RVA].stmts[0].flags_written,
+                         ir.ALL_FLAGS)
 
 
 class TestArchitecture(unittest.TestCase):

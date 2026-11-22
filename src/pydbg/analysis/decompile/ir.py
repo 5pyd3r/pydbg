@@ -122,23 +122,34 @@ class Assign(Stmt):
 
 @dataclass(frozen=True)
 class BinOp(Stmt):
-    """`dst = left <op> right`, for an arithmetic or logical instruction."""
+    """`dst = left <op> right`, for an arithmetic or logical instruction.
+
+    'flags_written' is the EFLAGS pseudo-register tuple the instruction
+    defines. Arithmetic has side effects beyond its destination, so this is
+    also why such a statement is never a candidate for the dead-write pass.
+    """
 
     rva: int
     dst: str
     op: str
     left: Expr
     right: Expr
+    flags_written: tuple = ()
 
 
 @dataclass(frozen=True)
 class UnOp(Stmt):
-    """`dst = <op> operand`, for `neg` and `not`."""
+    """`dst = <op> operand`, for `neg` and `not`.
+
+    `neg` writes all six flags; `not` touches none, so 'flags_written' is
+    empty for it.
+    """
 
     rva: int
     dst: str
     op: str
     operand: Expr
+    flags_written: tuple = ()
 
 
 @dataclass(frozen=True)
@@ -157,6 +168,7 @@ class Store(Stmt):
     rva: int
     addr: Expr
     value: Expr
+    flags_written: tuple = ()
 
 
 @dataclass(frozen=True)
@@ -172,6 +184,7 @@ class Cmp(Stmt):
     op: str
     left: Expr
     right: Expr
+    flags_written: tuple = ()
 
 
 @dataclass(frozen=True)
@@ -183,6 +196,10 @@ class Branch(Stmt):
     job, not this one's. `target` is None for a branch whose destination the
     analysis could not resolve, which is a statement about the analysis and not
     about the instruction.
+
+    'flags_read' is the subset of EFLAGS pseudo-registers the condition table
+    says this branch's condition actually reads (`je` -> zf, `ja` -> cf+zf).
+    An unconditional or indirect branch reads none.
     """
 
     rva: int
@@ -190,6 +207,7 @@ class Branch(Stmt):
     target: int | None
     kind: str
     text: str = ""
+    flags_read: tuple = ()
 
 
 @dataclass(frozen=True)
@@ -245,6 +263,10 @@ class IRBlock:
 
 EFLAGS = ("cf", "pf", "af", "zf", "sf", "of")
 EFLAGS_REGISTERS = tuple("eflags." + flag for flag in EFLAGS)
+
+# Every statement that writes flags writes all six: the per-flag effects are
+# not modelled, so claiming a subset would be a false precision.
+ALL_FLAGS = EFLAGS_REGISTERS
 
 # Instructions that write flags. `not` is absent on purpose: it touches no
 # flags, and claiming otherwise would make a later condition look newer than it
@@ -350,7 +372,7 @@ def flags_written(mnemonic):
     per-flag effects are not modelled, so claiming a subset would be a false
     precision.
     """
-    return EFLAGS_REGISTERS if mnemonic in FLAG_WRITERS else ()
+    return ALL_FLAGS if mnemonic in FLAG_WRITERS else ()
 
 
 # ── lowering ───────────────────────────────────────────────────
@@ -485,11 +507,14 @@ def _lower_binary(decoder, image, insn, rva):
         name = decoder.reg_name(dst.reg)
         return (BinOp(rva=rva, dst=name, op=symbol,
                       left=_reg(decoder, dst.reg, dst.size),
-                      right=_operand(decoder, image, insn, src)),)
+                      right=_operand(decoder, image, insn, src),
+                      flags_written=flags_written(insn.mnemonic)),)
     if dst.kind == OP_MEM:
         addr = _mem(decoder, image, insn, dst)
         return (Store(rva=rva, addr=addr,
-                      value=BinExpr(symbol, addr, _operand(decoder, image, insn, src))),)
+                      value=BinExpr(symbol, addr,
+                                    _operand(decoder, image, insn, src)),
+                      flags_written=flags_written(insn.mnemonic)),)
     return None
 
 
@@ -503,7 +528,8 @@ def _lower_imul(decoder, image, insn, rva):
             return None
         return (BinOp(rva=rva, dst=decoder.reg_name(dst.reg), op="*",
                       left=_operand(decoder, image, insn, src),
-                      right=_operand(decoder, image, insn, multiplier)),)
+                      right=_operand(decoder, image, insn, multiplier),
+                      flags_written=flags_written(insn.mnemonic)),)
     if len(ops) != 2:
         return None
     dst, src = ops
@@ -511,11 +537,14 @@ def _lower_imul(decoder, image, insn, rva):
         name = decoder.reg_name(dst.reg)
         return (BinOp(rva=rva, dst=name, op="*",
                       left=_reg(decoder, dst.reg, dst.size),
-                      right=_operand(decoder, image, insn, src)),)
+                      right=_operand(decoder, image, insn, src),
+                      flags_written=flags_written(insn.mnemonic)),)
     if dst.kind == OP_MEM:
         addr = _mem(decoder, image, insn, dst)
         return (Store(rva=rva, addr=addr,
-                      value=BinExpr("*", addr, _operand(decoder, image, insn, src))),)
+                      value=BinExpr("*", addr,
+                                    _operand(decoder, image, insn, src)),
+                      flags_written=flags_written(insn.mnemonic)),)
     return None
 
 
@@ -532,21 +561,25 @@ def _lower_unary(decoder, image, insn, rva):
             reg_name = decoder.reg_name(dst.reg)
             return (BinOp(rva=rva, dst=reg_name, op=symbol,
                           left=_reg(decoder, dst.reg, dst.size),
-                          right=Const(1)),)
+                          right=Const(1),
+                          flags_written=flags_written(name)),)
         if dst.kind == OP_MEM:
             addr = _mem(decoder, image, insn, dst)
             return (Store(rva=rva, addr=addr,
-                          value=BinExpr(symbol, addr, Const(1))),)
+                          value=BinExpr(symbol, addr, Const(1)),
+                          flags_written=flags_written(name)),)
         return None
     symbol = "-" if name == "neg" else "~"
     if dst.kind == OP_REG:
         reg_name = decoder.reg_name(dst.reg)
         return (UnOp(rva=rva, dst=reg_name, op=symbol,
-                     operand=_reg(decoder, dst.reg, dst.size)),)
+                     operand=_reg(decoder, dst.reg, dst.size),
+                     flags_written=flags_written(name)),)
     if dst.kind == OP_MEM:
         addr = _mem(decoder, image, insn, dst)
         return (Store(rva=rva, addr=addr,
-                      value=UnExpr(symbol, addr)),)
+                      value=UnExpr(symbol, addr),
+                      flags_written=flags_written(name)),)
     return None
 
 
@@ -556,7 +589,8 @@ def _lower_cmp(decoder, image, insn, rva):
         return None
     return (Cmp(rva=rva, op=insn.mnemonic,
                 left=_operand(decoder, image, insn, ops[0]),
-                right=_operand(decoder, image, insn, ops[1])),)
+                right=_operand(decoder, image, insn, ops[1]),
+                flags_written=flags_written(insn.mnemonic)),)
 
 
 def _lower_jcc(decoder, image, insn, rva):
@@ -565,7 +599,7 @@ def _lower_jcc(decoder, image, insn, rva):
         return None
     return (Branch(rva=rva, cond=cond,
                    target=branch_target(insn, image), kind="jcc",
-                   text=insn.op_str),)
+                   text=insn.op_str, flags_read=flags_read(insn.mnemonic)),)
 
 
 def _lower_jmp(decoder, image, insn, rva):
