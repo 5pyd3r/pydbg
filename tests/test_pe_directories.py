@@ -886,6 +886,20 @@ class TestLoadConfig(unittest.TestCase):
         self.assertIsNone(config.size)
         self.assertIsNone(config.timestamp)
 
+    def test_an_unknown_magic_does_not_guess_a_layout(self):
+        """The 64-bit table was the fallback; that is a plausible wrong answer.
+
+        Both real magics are in the table, so the guess only ever fired on
+        input no header parse had validated. None says the layout is unknown.
+        """
+        from pydbg.pe import PE
+        from pydbg.pe.parser import PEParser
+
+        pe = PE(build_load_config_image(0x20B))
+        parser = PEParser(pe.source, pe.view)
+        self.assertIsNone(parser.parse_load_config(
+            pe.optional_header.data_directories, 0x999))
+
 
 class TestCLRHeader(unittest.TestCase):
     """Data directory 14 — IMAGE_COR20_HEADER.

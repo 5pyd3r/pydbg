@@ -566,14 +566,17 @@ class PEParser:
         readable bytes — does not cover comes back as None. Truncation is read
         as a prefix rather than as absence: only zero readable bytes is None.
         The 64-bit and 32-bit layouts differ, so 'magic' selects the table to
-        read by.
+        read by; a magic with no table has no layout and is None rather than a
+        guessed 64-bit parse.
         """
         dd = data_dirs.get(DIR_LOAD_CONFIG)
         if dd is None or dd.virtual_address == 0 or dd.size == 0:
             return None
 
-        layout, full_size = _LOAD_CONFIG_LAYOUT.get(
-            magic, (_LOAD_CONFIG_64, 0x94))
+        layout_entry = _LOAD_CONFIG_LAYOUT.get(magic)
+        if layout_entry is None:
+            return None                     # unknown magic: do not guess
+        layout, full_size = layout_entry
         raw = self._read_rva_prefix(dd.virtual_address,
                                     min(dd.size, full_size))
         if not raw:
