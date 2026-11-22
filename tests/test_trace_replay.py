@@ -9,7 +9,8 @@ tool that speaks JSONL) without a live process.
 import unittest
 
 from pydbg.trace import (
-    API, BLOCK, MARK, MEM_READ, TraceEvent, filter_events,
+    API, BLOCK, MARK, MEM_READ, MEM_WRITE, TraceEvent,
+    block_coverage, filter_events,
 )
 
 
@@ -97,6 +98,38 @@ class TestFilterEvents(unittest.TestCase):
         self.assertEqual(pulled, [])
         self.assertEqual(next(filtered), events[3])
         self.assertEqual(pulled, events[:4])
+
+
+class TestBlockCoverage(unittest.TestCase):
+
+    def test_a_block_that_ran_three_times_is_counted_three_times(self):
+        events = [
+            TraceEvent(BLOCK, 1, 0x401000, 10),
+            TraceEvent(BLOCK, 2, 0x401000, 11),
+            TraceEvent(BLOCK, 1, 0x401010, 12),
+            TraceEvent(BLOCK, 1, 0x401000, 13),
+        ]
+        self.assertEqual(block_coverage(events),
+                         {0x401000: 3, 0x401010: 1})
+
+    def test_only_block_events_count_toward_coverage(self):
+        """API/MARK/MEM events share an rva field but are not blocks."""
+        events = [
+            TraceEvent(API, 1, 0x401000, 10),
+            TraceEvent(MARK, 1, 0x401000, 11),
+            TraceEvent(MEM_READ, 1, 0x401000, 12, a=0x401000, b=4),
+            TraceEvent(MEM_WRITE, 1, 0x401000, 13, a=0x401000, b=4),
+            TraceEvent(BLOCK, 1, 0x401000, 14),
+        ]
+        self.assertEqual(block_coverage(events), {0x401000: 1})
+
+    def test_an_empty_trace_has_no_coverage(self):
+        self.assertEqual(block_coverage([]), {})
+
+    def test_coverage_can_be_taken_of_a_filtered_stream(self):
+        events = mixed_events()
+        self.assertEqual(block_coverage(filter_events(events, tid=1)),
+                         {0x401000: 1, 0x401020: 1})
 
 
 if __name__ == "__main__":

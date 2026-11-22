@@ -6,6 +6,8 @@ filtered stream is still in recording order, coverage counts only what actually
 ran, and the JSONL export is stable enough to diff two runs byte for byte.
 """
 
+from .format import BLOCK
+
 
 def filter_events(events, kinds=None, tid=None, rva_min=None, rva_max=None):
     """Yield the events matching every given criterion, in recording order.
@@ -26,3 +28,16 @@ def filter_events(events, kinds=None, tid=None, rva_min=None, rva_max=None):
         if rva_max is not None and event.rva >= rva_max:
             continue
         yield event
+
+
+def block_coverage(events):
+    """Count recorded BLOCK events per block start, ignoring every other kind.
+
+    The result maps rva to hit count and is a plain dict, so it can be sorted,
+    serialized, or compared directly. An empty stream yields {}.
+    """
+    counts = {}
+    for event in events:
+        if event.kind == BLOCK:
+            counts[event.rva] = counts.get(event.rva, 0) + 1
+    return counts
