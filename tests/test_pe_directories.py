@@ -1018,6 +1018,31 @@ class TestRealImageDirectories(unittest.TestCase):
         types = {entry.type for entry in self.pe.debug_entries}
         self.assertIn(2, types, "IMAGE_DEBUG_TYPE_CODEVIEW (the PDB) missing")
 
+    def test_delay_imports_is_a_list(self):
+        """Real system images may have none, so a list either way."""
+        imports = self.pe.delay_imports
+        self.assertIsInstance(imports, list)
+        for entry in imports:
+            self.assertGreater(entry.iat_rva, 0)
+
+    def test_bound_imports_is_a_list(self):
+        self.assertIsInstance(self.pe.bound_imports, list)
+
+    def test_load_config_is_a_struct_or_none(self):
+        config = self.pe.load_config
+        if config is not None:
+            self.assertGreaterEqual(config.size, 0x5C)
+            self.assertIsInstance(config.timestamp, int)
+
+    def test_clr_header_is_none_on_a_native_image(self):
+        self.assertIsNone(self.pe.clr_header)
+
+    def test_authenticode_is_a_location_or_none(self):
+        location = self.pe.authenticode
+        if location is not None:
+            self.assertGreater(location.offset, 0)
+            self.assertGreater(location.size, 0)
+
 
 class TestHeaderPlacementIsNotTheCount(unittest.TestCase):
     """The section table follows SizeOfOptionalHeader, not the directory count.
