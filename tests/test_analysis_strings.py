@@ -311,6 +311,15 @@ class TestExtractStrings(unittest.TestCase):
         self.assertEqual([(s.rva, s.text) for s in extract_strings(pe)],
                          [(0x1001, "hello")])
 
+    def test_a_built_image_yields_at_least_one_string(self):
+        """The real-target acceptance check, without the real target.
+
+        tests/target/simple_target_x64.exe is not always built, so its test
+        is skipped; the same claim — a normal image's sections yield strings —
+        is made here against a PEBuilder image the suite always has.
+        """
+        self.assertGreaterEqual(len(extract_strings(self.build())), 1)
+
     @unittest.skipUnless(
         os.path.exists(TARGET_X64),
         "target not built: tests/target/simple_target_x64.exe")
