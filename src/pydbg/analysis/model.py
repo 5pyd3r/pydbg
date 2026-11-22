@@ -281,6 +281,11 @@ class AnalysisResult:
     # reference classes the run actually collected, and without this that list
     # lives in the source rather than in the result.
     xref_gaps: tuple[str, ...] = ()
+    # Warnings about the analysis itself, as readable strings — "pdb: no
+    # symbols" when a PDB handle was supplied but enumerated nothing, which is
+    # not proof that it was read (spec §10.2(6)). Empty when nothing is known
+    # to be wrong.
+    warnings: tuple[str, ...] = ()
     # Import thunk rva -> the IAT slot it jumps through. Names come from here.
     import_thunks: dict[int, int] = field(default_factory=dict)
     # Base-relative memory accesses recorded during the sweep, as

@@ -88,7 +88,10 @@ class Field:
 
     `offset` is the member's byte offset inside the struct — for a bitfield the
     offset of its storage unit, with `bit_position`/`bit_width` locating the
-    bits within it. `size` is the type's byte length (the storage unit for a
+    bits within it. A type stream never produces a negative offset, but this
+    class is also used for access-derived profiles (`analysis.types`), where a
+    signed displacement is a field location, so offset is not constrained to be
+    non-negative. `size` is the type's byte length (the storage unit for a
     bitfield). `name` or `type_name` is None when dbghelp could not read it; a
     member that failed a query is reported as `Field(offset, None, None, 0)`,
     which is why the enclosing layout's `truncated` flag matters.
@@ -102,8 +105,6 @@ class Field:
     bit_width: int | None = None
 
     def __post_init__(self):
-        if self.offset < 0:
-            raise ValueError(f"field offset cannot be negative: {self.offset}")
         if self.size < 0:
             raise ValueError(f"field size cannot be negative: {self.size}")
         if (self.bit_position is None) != (self.bit_width is None):

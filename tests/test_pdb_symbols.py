@@ -122,6 +122,23 @@ class TestBuildSymbols(unittest.TestCase):
         self.assertEqual(symbols[0].kind, "function")
         self.assertEqual(symbols[0].size, 5)
 
+    def test_a_public_alias_never_decides_the_kind_even_if_listed_first(self):
+        """Callback order is not a contract; the Tag is what a symbol means.
+
+        dbghelp happens to list the compiland record first, but relying on
+        that made `kind`/`is_public` depend on an implementation detail.
+        """
+        for tag, kind in ((5, "function"), (7, "data")):
+            with self.subTest(tag=tag):
+                symbols = build_symbols([
+                    record(10, 0x10, "dup", size=9),
+                    record(tag, 0x10, "dup", size=5),
+                ], BASE, IMAGE_SIZE)
+                self.assertEqual(len(symbols), 1)
+                self.assertFalse(symbols[0].is_public)
+                self.assertEqual(symbols[0].kind, kind)
+                self.assertEqual(symbols[0].size, 5)
+
     def test_the_same_rva_with_different_names_is_kept(self):
         symbols = build_symbols([
             record(5, 0x10, "first"),
@@ -277,15 +294,16 @@ class TestRealPdbSymbols(unittest.TestCase):
         cls.image_path = image_path
         cls.pe = PE.from_file(image_path)
 
-        # A PE parsed from bytes keeps no path, so the lookup is given the
-        # wrapper a real caller would have (an AnalyzedImage carries both).
+        # The acceptance budget covers the whole Phase 5 read path, not just
+        # symbol enumeration: find + symbols + structs in one measurement.
         started = time.perf_counter()
-        lookup = find(SimpleNamespace(pe=cls.pe, path=image_path))
+        lookup = find(cls.pe)
         if lookup.reason is not None:
             raise AssertionError(
                 f"find failed: {lookup.reason}: {lookup.message}")
         cls.lookup = lookup
         cls.symbols = lookup.pdb.symbols()
+        cls.structs = lookup.pdb.structs()
         cls.elapsed = time.perf_counter() - started
 
     def test_the_exported_static_and_data_symbols_are_present(self):
@@ -334,10 +352,12 @@ class TestRealPdbSymbols(unittest.TestCase):
                                 pdb.image_base))
         load.assert_not_called()
 
-    def test_find_and_symbols_take_under_five_seconds(self):
-        print(f"\npdb symbols: find + symbols = {self.elapsed * 1000:.1f} ms, "
-              f"{len(self.symbols)} symbols")
-        self.assertLess(self.elapsed, 5.0)
+    def test_find_symbols_and_structs_take_under_two_seconds(self):
+        """Spec §10.6(6): the whole read path is what has to stay fast."""
+        print(f"\npdb: find + symbols + structs = {self.elapsed * 1000:.1f} ms, "
+              f"{len(self.symbols)} symbols, {len(self.structs)} structs")
+        self.assertTrue(self.structs, "the type stream enumerated no UDTs")
+        self.assertLess(self.elapsed, 2.0)
 
 
 if __name__ == "__main__":

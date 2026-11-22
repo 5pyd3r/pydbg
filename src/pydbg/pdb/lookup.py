@@ -61,8 +61,9 @@ def _image_path(pe_or_image, image):
     """Where the image file lives, if either object knows.
 
     The wrapper is checked too: an AnalyzedImage may carry the path even when
-    the inner PE does not. `pydbg.pe.PE` built by from_file() keeps no path at
-    all, so the sibling-PDB step is simply unavailable for it.
+    the inner PE does not. `pydbg.pe.PE.from_file()` records it, so the
+    sibling-PDB step is available for a parsed file; a PE built from bytes or
+    from a live process's memory has no path and the step is skipped.
     """
     for candidate in (pe_or_image, image):
         path = getattr(candidate, "path", None)
@@ -109,9 +110,11 @@ def _identity_matches(info, entry):
 
     The authoritative comparison is on the raw 16 GUID bytes plus the age:
     both files store the GUID in Windows memory order, so the bytes are equal
-    exactly when the builds are. Some image-side records expose only the
-    rendered 8-4-4-4-12 GUID (`pydbg.pe.CodeViewInfo` does), so that form is
-    compared case-insensitively as a fallback. The age is compared either way.
+    exactly when the builds are, and `CodeViewInfo.guid_bytes` carries them
+    from a real image. Only a duck-typed record that exposes just the rendered
+    8-4-4-4-12 GUID falls back to comparing that string case-insensitively;
+    the fallback is display-grade, not the identity. The age is compared
+    either way.
     """
     if getattr(entry, "age", None) != info.age:
         return False

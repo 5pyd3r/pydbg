@@ -135,6 +135,19 @@ def import_names(image):
     return names
 
 
+def _warn_once(result, text):
+    """Append 'text' to `result.warnings`, once.
+
+    The warning belongs to the result, not to the returned table: the caller
+    already holds the result, and a table has nowhere to say "the enumeration
+    that was supposed to fill me failed". Deduplicating here keeps repeated
+    naming passes (auto_names, then resolve_for) from multiplying it.
+    """
+    warnings = tuple(getattr(result, "warnings", ()))
+    if text not in warnings:
+        result.warnings = warnings + (text,)
+
+
 def auto_names(result, function_starts=True, pdb=None):
     """Names the image's own metadata can supply, plus any PDB's.
 
@@ -154,6 +167,11 @@ def auto_names(result, function_starts=True, pdb=None):
     PDB names are added after exports so that the precedence table, not the
     application order, decides a conflict: an export still wins. `pdb=None`
     adds no names and is otherwise identical to not passing one.
+
+    An empty enumeration is not success. When `pdb` is supplied and
+    `pdb.symbols()` returns nothing, `"pdb: no symbols"` is appended to
+    `result.warnings` so the failure is visible instead of reading as "this
+    PDB names nothing" (spec §10.2(6)). The warning is added once.
     """
     table = NameTable()
 
@@ -163,7 +181,10 @@ def auto_names(result, function_starts=True, pdb=None):
                       SOURCE_EXPORT)
 
     if pdb is not None:
-        for symbol in pdb.symbols():
+        symbols = tuple(pdb.symbols())
+        if not symbols:
+            _warn_once(result, "pdb: no symbols")
+        for symbol in symbols:
             table.add(symbol.rva, symbol.name, SOURCE_PDB)
 
     slots = import_names(result.image)

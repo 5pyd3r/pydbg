@@ -264,16 +264,35 @@ class TestPdbNames(unittest.TestCase):
         self.assertEqual(table.name_of(0x3000), "g_counter")
         self.assertEqual(table.get(0x3000).source, "pdb")
 
-    def test_empty_symbols_add_nothing_and_do_not_raise(self):
-        """An empty enumeration is not proof of reading, so it names nothing.
+    def test_empty_symbols_add_nothing_and_record_a_warning(self):
+        """An empty enumeration is not proof of reading.
 
-        The warning belongs to the caller that owns the lookup reason
-        (spec §10.2(6)); naming silently adds no `pdb` evidence.
+        The warning travels on the result — the same object the caller already
+        keeps — so a failed read cannot be mistaken for a PDB with no names
+        (spec §10.2(6)).
         """
         result = analyze()
         plain = names.auto_names(result)
+        self.assertEqual(result.warnings, ())
         empty = names.auto_names(result, pdb=FakePdb(()))
         self.assertEqual(empty.to_dict(), plain.to_dict())
+        self.assertEqual(result.warnings, ("pdb: no symbols",))
+        # A second call adds neither names nor a duplicate warning.
+        names.auto_names(result, pdb=FakePdb(()))
+        self.assertEqual(result.warnings, ("pdb: no symbols",))
+
+    def test_a_non_empty_enumeration_records_no_warning(self):
+        result = analyze()
+        names.auto_names(result, pdb=FakePdb([FakeSymbol(TEXT_RVA, "main")]))
+        self.assertEqual(result.warnings, ())
+
+    def test_resolve_and_resolve_for_record_the_warning_on_the_result(self):
+        result = analyze()
+        names.resolve(result, pdb=FakePdb(()))
+        self.assertEqual(result.warnings, ("pdb: no symbols",))
+        result = analyze()
+        names.resolve_for(result, SimpleNamespace(names={}), pdb=FakePdb(()))
+        self.assertEqual(result.warnings, ("pdb: no symbols",))
 
     def test_pdb_names_do_not_touch_the_function_table(self):
         """Function starts stay code discovery's answer, not the PDB's."""

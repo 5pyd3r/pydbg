@@ -9,11 +9,12 @@ whole answer, so this module gives both the same query surface:
     types.structs(result, pdb=pdb)           # layouts read from the PDB
     types.layout_of(result, "Point", pdb=pdb)
 
-`pdb` is duck-typed (anything with `symbols()`, `structs()` and
-`layout_of(key)`), so this package never imports `pydbg.pdb`. The layout shape
-below mirrors `pydbg.pdb.StructLayout` attribute for attribute, which is what
-lets `field_report` compare a PDB layout against an access profile without
-either package knowing the other's classes.
+`pdb` is duck-typed (anything with `structs()` and `layout_of(key)`), so the
+type exit never has to know which Pdb implementation it was handed. The value
+classes are not duck-typed: `Field` and `StructLayout` are `pydbg.pdb`'s own,
+because a PDB layout and a profile layout are compared offset by offset and
+two copies of the shape had already drifted apart. `pydbg.pdb` is pure Python,
+so this import keeps ADR-0001 intact.
 
 Without a PDB the field names are *never invented*: a derived layout carries
 `name=None` and only offsets, widths and use counts — the honest half of
@@ -22,49 +23,9 @@ structure recovery.
 
 from dataclasses import dataclass
 
+from ..pdb import Field, StructLayout
+
 from .access import profiles
-
-
-@dataclass(frozen=True)
-class Field:
-    """One data member of a `StructLayout`.
-
-    `offset` is the byte offset inside the structure, and may be negative: a
-    base-relative access with a signed displacement is still a field location.
-    A profile-derived field has no name and no type — those cannot be read off
-    a `mov eax, [ebx+0x18]`, and guessing them would read exactly like a
-    layout that knew. `bit_position`/`bit_width` are carried for parity with
-    `pydbg.pdb.Field`; a profile never has them.
-    """
-
-    offset: int
-    name: str | None
-    type_name: str | None
-    size: int
-    bit_position: int | None = None
-    bit_width: int | None = None
-
-
-@dataclass(frozen=True)
-class StructLayout:
-    """A structure's field table, in declaration order.
-
-    `source` is "pdb" for a layout read from a type stream and "profile" for
-    one derived here from memory accesses. `truncated` says the table does not
-    describe every byte of the structure (a base class, a vtable, or a member
-    that could not be read) — it is always False for a derived layout, whose
-    span is exactly what the accesses touched.
-    """
-
-    name: str | None
-    size: int
-    fields: tuple[Field, ...]
-    source: str = "pdb"
-    truncated: bool = False
-
-    def __post_init__(self):
-        if not isinstance(self.fields, tuple):
-            object.__setattr__(self, "fields", tuple(self.fields))
 
 
 def _profile_layout(profile):
@@ -100,13 +61,17 @@ def structs(result, pdb=None):
 def layout_of(result, key, pdb=None):
     """One structure layout by name (with a PDB) or by function RVA.
 
-    A name is the portable key and only a PDB knows names. Without one, an
-    integer RVA finds the first profile layout for that function — first by
-    base register, since several registers may each describe a structure and
-    only the caller can say which one it meant. Anything else, and any miss,
-    returns None rather than raising: probing for a type is not an error.
+    A name is the portable key and only a PDB knows names, so a string key is
+    answered by the PDB when one is supplied. An integer is never a PDB key
+    here: the profile track is keyed by function RVA, while a PDB's TypeIndex
+    is a session-scoped id that an RVA must not be mistaken for. An int is
+    therefore always looked up in the profiles, with or without a PDB, and a
+    miss returns None rather than falling through to the type stream.
+
+    Anything else, and any miss, returns None rather than raising: probing for
+    a type is not an error.
     """
-    if pdb is not None:
+    if isinstance(key, str) and pdb is not None:
         return pdb.layout_of(key)
     if not isinstance(key, int):
         return None

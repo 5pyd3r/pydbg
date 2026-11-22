@@ -30,6 +30,7 @@ src/pydbg/
 ├── module/resolver.py   模块枚举与文件名
 ├── symbol/resolver.py   dbghelp 封装（dbg.symbols）
 ├── pe/                  纯 Python PE 解析（无第三方依赖）
+├── pdb/                 纯 Python PDB 读取（MSF 校验 + ctypes dbghelp 离线）
 ├── disasm/engine.py     capstone 封装；模式**按次**判定，不锁存
 ├── instrument/          插桩：硬编码 stub + LLVM 动态代码生成
 ├── hook/{iat,inline}.py IAT / inline hook（dbg.hook_iat / dbg.hook_inline）
@@ -37,7 +38,10 @@ src/pydbg/
 └── cython/              Win32 薄绑定（_pydbg 扩展）
 ```
 
-`analysis/`（18 模块、约 5k 行）是仓库里最大的模块，单独在下方说明。
+`analysis/`（19 模块、约 5k 行）是仓库里最大的模块，单独在下方说明。
+`pdb/`（6 模块）是纯 Python + ctypes dbghelp 的 PDB 读取层：`analysis` 对它是
+单向依赖，`pdb` 不认识 `analysis`；导入 `pydbg.analysis` 因此不会加载 `_pydbg`，
+ADR-0001 不破。
 
 ## 分层
 

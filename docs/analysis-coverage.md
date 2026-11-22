@@ -428,6 +428,8 @@ pydbg.trace.ProbeCall(tid, rva, args, ts)
 ### 10.2 硬约束（来自前置实测，见本地 `research/pdb-format.md`）
 
 1. GUID/age 只比**原始字节**：info stream `+8 Age`、`+12 Guid`（16 B），与镜像 `RSDS` 逐字节相同；
+   镜像侧由 `pe.parser.decode_codeview` 解出 `CodeViewInfo.guid_bytes`（16 字节原样），
+   `lookup._identity_matches` 优先比它；只有不携带原始字节的鸭子类型记录才退回字符串比较。
    字符串化用 `bytes_le=` 或与 `pe.parser` 的 8-4-4-4-12 形式一致。
 2. dbghelp 从 `System32\dbghelp.dll` 显式加载（`LoadLibraryExW` + `LOAD_LIBRARY_SEARCH_SYSTEM32`）；
    进程级、非可重入 → 库内 `RLock` 串行。
@@ -447,7 +449,7 @@ pydbg.trace.ProbeCall(tid, rva, args, ts)
 ```python
 pydbg.pdb.find(pe_or_image, search_paths=()) -> PdbLookup
 pydbg.pdb.open_for(pe_or_image, search_paths=()) -> Pdb | None      # find(...).pdb 的便捷形式
-pydbg.pdb.Pdb(path)
+pydbg.pdb.Pdb(path, image_path=None, image_base=None)
     .matches(pe_or_image) -> bool
     .symbols() -> tuple[PdbSymbol, ...]
     .structs() -> tuple[StructLayout, ...]
@@ -464,8 +466,8 @@ Field(offset, name, type_name, size, bit_position=None, bit_width=None)
   只认 `RSDS`；`NB10` 返回 `"pdb 2.0 unsupported"`（不按路径猜）。
 - `symbols()` 按 `(rva, name)` 去重；`rva = Address - ImageBase`，必须落在 `[0, image_size)`；
   `kind` 只由 `Tag`（5/7/10）决定，`unknown` 原样上报。
-- `structs()` 只返回**能完整读出的** UDT；读不出的成员保留在 `fields` 里，`name`/`type_name` 为 `None`、
-  `size` 为 0，并置 `truncated=True`——不猜宽度、不丢字段。
+- `structs()`：**能读的 UDT 都返回**；读不完整的成员保留在 `fields` 里，`name`/`type_name`
+  为 `None`、`size` 为 0，并置 `truncated=True`——不猜宽度、不丢字段。
 - 位域：`bit_position` + `bit_width`，`offset` 是存储单元偏移。
 
 ### 10.4 名字并入 analysis

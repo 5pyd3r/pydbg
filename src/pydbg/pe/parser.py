@@ -189,11 +189,13 @@ def decode_codeview(raw: bytes):
     if raw[:4] == b'RSDS':
         if len(raw) < 24:
             return None
+        guid = bytes(raw[4:20])
         return CodeViewInfo(
             signature='RSDS',
             pdb_path=_decode_path(raw[24:]),
             age=struct.unpack_from('<I', raw, 20)[0],
-            guid=_format_guid(raw[4:20]))
+            guid=_format_guid(guid),
+            guid_bytes=guid)
 
     if raw[:4] == b'NB10':
         if len(raw) < 16:

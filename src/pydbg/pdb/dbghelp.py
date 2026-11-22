@@ -40,6 +40,9 @@ from .errors import PdbError
 # Measured with dbghelp.dll 10.0.26100 (research/pdb-format.md §B5): a fresh
 # process starts with options 0x0, so the two safe defaults are set explicitly.
 # SYMOPT_UNDNAME (0x2) is deliberately not among them; see `demangle_name`.
+# SymSetOptions is process-wide and `symbol/resolver.py` sets it too, so a
+# process using both owners has the two overwrite each other — known, and not
+# solved in this phase.
 SYM_SET_OPTIONS = 0x204          # DEFERRED_LOADS | FAIL_CRITICAL_ERRORS
 LOAD_LIBRARY_SEARCH_SYSTEM32 = 0x00000800
 
@@ -172,74 +175,99 @@ def build_symbols(records, loaded_base, image_size):
 
     'records' yields (tag, address, size, text, name_len) in the order dbghelp
     reported them. A record survives only when `Address - loaded_base` lands
-    inside the image; a repeated (rva, name) keeps the first record, because
-    dbghelp lists the compiland record before the public alias of the same
-    address. The result is sorted by (rva, name) so two enumerations of one PDB
+    inside the image. A repeated (rva, name) keeps the Tag 5/7 record over a
+    Tag 10 public alias whatever order they arrive in: dbghelp happens to list
+    the compiland record first, but that is not a contract, and letting the
+    order decide `kind`/`is_public` made an implementation detail part of the
+    answer. The result is sorted by (rva, name) so two enumerations of one PDB
     compare equal regardless of callback order.
     """
     symbols = []
-    seen = set()
+    index_of = {}
     for tag, address, size, text, name_len in records:
         rva = address - loaded_base
         if not 0 <= rva < image_size:
             continue
         name = demangle_name(trim_name(text, name_len))
         key = (rva, name)
-        if key in seen:
-            continue
-        seen.add(key)
-        symbols.append(PdbSymbol(rva, name, size, symbol_kind(tag),
-                                 tag == SYMTAG_PUBLIC))
+        symbol = PdbSymbol(rva, name, size, symbol_kind(tag),
+                           tag == SYMTAG_PUBLIC)
+        index = index_of.get(key)
+        if index is None:
+            index_of[key] = len(symbols)
+            symbols.append(symbol)
+        elif (symbols[index].is_public
+              and tag in (SYMTAG_FUNCTION, SYMTAG_DATA)):
+            symbols[index] = symbol
     symbols.sort(key=lambda symbol: (symbol.rva, symbol.name))
     return tuple(symbols)
 
 
-def _record_callback(records, failures):
-    """Build the `SymEnumSymbolsW` callback that appends raw records.
+def _enumeration_callback(extract, records, failures):
+    """A ctypes-safe enumeration callback that appends 'extract(record)'.
 
     ctypes swallows an exception raised inside a callback and treats it as
     FALSE, which silently truncates the enumeration. So the callback catches
     everything, records the exception in 'failures', and returns FALSE itself;
-    `_Session.enumerate` re-raises it as a PdbError once dbghelp has returned.
+    `_collect` re-raises it as a PdbError once dbghelp has returned.
 
-    The extraction is deliberately minimal — Tag, Address, Size, name text and
-    NameLen. Trimming, demangling and range filtering happen in `build_symbols`
-    after the callback, outside the C call.
+    'extract' does the minimal copying from the borrowed SYMBOL_INFOW; the
+    translation into public objects happens after the callback, outside the C
+    call.
     """
 
     def callback(info, _size, _context):
         try:
-            symbol = info.contents
-            text = ctypes.wstring_at(ctypes.addressof(symbol) + NAME_OFFSET)
-            records.append((symbol.Tag, symbol.Address, symbol.Size, text,
-                            symbol.NameLen))
+            records.append(extract(info.contents))
         except Exception as exc:      # must not cross the C boundary
             failures.append(exc)
             return False
         return True
 
     return callback
+
+
+def _record_callback(records, failures):
+    """The `SymEnumSymbolsW` callback: Tag, Address, Size, name and NameLen."""
+
+    def extract(symbol):
+        return (symbol.Tag, symbol.Address, symbol.Size,
+                ctypes.wstring_at(ctypes.addressof(symbol) + NAME_OFFSET),
+                symbol.NameLen)
+
+    return _enumeration_callback(extract, records, failures)
 
 
 def _type_record_callback(records, failures):
     """The `SymEnumTypesW` callback: one (TypeIndex, Tag) per enumerated type.
 
-    Same exception discipline as `_record_callback`: an exception must not cross
-    into C, so it is captured and the enumeration stops. Only the two fields the
-    type layer needs are copied out; names are read later through TI_GET_SYMNAME
-    (which allocates) rather than borrowed from the callback's buffer.
+    Names are read later through TI_GET_SYMNAME (which allocates) rather than
+    borrowed from the callback's buffer.
     """
 
-    def callback(info, _size, _context):
-        try:
-            symbol = info.contents
-            records.append((symbol.TypeIndex, symbol.Tag))
-        except Exception as exc:      # must not cross the C boundary
-            failures.append(exc)
-            return False
-        return True
+    def extract(symbol):
+        return (symbol.TypeIndex, symbol.Tag)
 
-    return callback
+    return _enumeration_callback(extract, records, failures)
+
+
+def _collect(api_call, callback_factory, label):
+    """Run one enumeration and turn both of its failure channels into PdbError.
+
+    'api_call' is invoked with the callback and reports FALSE on failure; a
+    callback exception arrives in the shared failure list instead. Neither is
+    allowed to escape as itself, so every caller sees one error type.
+    """
+    records = []
+    failures = []
+    ok = api_call(callback_factory(records, failures))
+    if failures:
+        error = failures[0]
+        raise PdbError(f"dbghelp {label} enumeration failed: {error}") from error
+    if not ok:
+        raise PdbError(f"dbghelp {label} enumeration failed "
+                       f"(error {ctypes.get_last_error()})")
+    return records
 
 
 class _Dbghelp:
@@ -503,18 +531,9 @@ class _Session:
 
     def enumerate(self, base):
         """Every raw symbol record for the module loaded at 'base'."""
-        records = []
-        failures = []
-        ok = self.api.enum_symbols(self.handle, base,
-                                   _record_callback(records, failures))
-        if failures:
-            error = failures[0]
-            raise PdbError(
-                f"dbghelp symbol enumeration failed: {error}") from error
-        if not ok:
-            raise PdbError("dbghelp symbol enumeration failed "
-                           f"(error {ctypes.get_last_error()})")
-        return records
+        return _collect(
+            lambda callback: self.api.enum_symbols(self.handle, base, callback),
+            _record_callback, "symbol")
 
     def type_records(self, base):
         """Every (TypeIndex, Tag) the module loaded at 'base' describes.
@@ -529,17 +548,9 @@ class _Session:
         records = self.types_loaded.get(base)
         if records is not None:
             return records
-        collected = []
-        failures = []
-        ok = self.api.enum_types(self.handle, base,
-                                 _type_record_callback(collected, failures))
-        if failures:
-            error = failures[0]
-            raise PdbError(
-                f"dbghelp type enumeration failed: {error}") from error
-        if not ok:
-            raise PdbError("dbghelp type enumeration failed "
-                           f"(error {ctypes.get_last_error()})")
+        collected = _collect(
+            lambda callback: self.api.enum_types(self.handle, base, callback),
+            _type_record_callback, "type")
         records = tuple(collected)
         self.types_loaded[base] = records
         return records
