@@ -132,6 +132,12 @@ class TestTraceFormatErrors(TraceFileTest):
     def test_trace_format_error_is_a_value_error(self):
         self.assertTrue(issubclass(TraceFormatError, ValueError))
 
+    def test_trace_format_error_belongs_to_the_pydbg_error_tree(self):
+        """A caller catching PydbgError must see a malformed trace as one of ours."""
+        from pydbg.exceptions import PydbgError
+
+        self.assertTrue(issubclass(TraceFormatError, PydbgError))
+
     def test_a_file_that_is_not_a_trace_is_refused(self):
         self.write_bytes(b"NOTATRAC" + b"\x01\x00" + b"\x00\x00")
         with self.assertRaises(TraceFormatError) as caught:

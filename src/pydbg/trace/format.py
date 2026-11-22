@@ -12,6 +12,8 @@ test can pin `ts` and the same events always produce the same bytes.
 import struct
 from dataclasses import dataclass
 
+from ..exceptions import PydbgError
+
 MAGIC = b"PDBGTRC\0"
 VERSION = 1
 
@@ -43,8 +45,13 @@ class TraceEvent:
     b: int = 0
 
 
-class TraceFormatError(ValueError):
-    """A trace file is not format v1, or ends mid-record."""
+class TraceFormatError(PydbgError, ValueError):
+    """A trace file is not format v1, or ends mid-record.
+
+    A ValueError because the bytes are malformed, and a PydbgError because it
+    is this package refusing its own file — a caller that catches PydbgError
+    should not have to know about the trace subpackage separately.
+    """
 
 
 class TraceWriter:
