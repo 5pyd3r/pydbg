@@ -66,13 +66,33 @@ jobs:
       - name: Download prebuilt LLVM 22
         shell: pwsh
         run: |
-          # 7-Zip is not reliably preinstalled on windows-latest; install it.
-          choco install 7zip -y --no-progress | Out-Null
-          gh release download llvm-prebuilt-22.1.8 -R 5pyd3r/pydbg -p llvm-22.1.8-x86_64-windows.7z -D "$env:TEMP\llvm22"
-          7z x "$env:TEMP\llvm22\llvm-22.1.8-x86_64-windows.7z" -o"$env:TEMP\llvm22" -y | Out-Null
-          New-Item -ItemType Directory -Force "C:\llvm-22" | Out-Null
-          Move-Item -Force "$env:TEMP\llvm22\llvm-22\*" "C:\llvm-22"
-          & "C:\llvm-22\bin\llvm-config.exe" --version
+          # Network hiccups on the runner (or the choco/gh/7z steps themselves)
+          # used to fail this job before any build ran. Retry the whole step a
+          # few times with a short backoff; the asset is ~60MB and idempotent.
+          $ErrorActionPreference = "Stop"
+          $attempts = 3
+          for ($attempt = 1; $attempt -le $attempts; $attempt++) {
+            Write-Host "download attempt $attempt/$attempts"
+            try {
+              choco install 7zip -y --no-progress | Out-Null
+              if ($LASTEXITCODE -ne 0) { throw "choco install 7zip failed: $LASTEXITCODE" }
+              Remove-Item -Recurse -Force "$env:TEMP\llvm22" -ErrorAction SilentlyContinue
+              gh release download llvm-prebuilt-22.1.8 -R 5pyd3r/pydbg -p llvm-22.1.8-x86_64-windows.7z -D "$env:TEMP\llvm22"
+              if ($LASTEXITCODE -ne 0) { throw "gh release download failed: $LASTEXITCODE" }
+              7z x "$env:TEMP\llvm22\llvm-22.1.8-x86_64-windows.7z" -o"$env:TEMP\llvm22" -y | Out-Null
+              if ($LASTEXITCODE -ne 0) { throw "7z extract failed: $LASTEXITCODE" }
+              if (Test-Path "C:\llvm-22") { Remove-Item -Recurse -Force "C:\llvm-22" }
+              New-Item -ItemType Directory -Force "C:\llvm-22" | Out-Null
+              Move-Item -Force "$env:TEMP\llvm22\llvm-22\*" "C:\llvm-22"
+              & "C:\llvm-22\bin\llvm-config.exe" --version
+              if ($LASTEXITCODE -ne 0) { throw "llvm-config failed: $LASTEXITCODE" }
+              break
+            } catch {
+              if ($attempt -eq $attempts) { throw }
+              Write-Warning "attempt $attempt failed: $_"
+              Start-Sleep -Seconds (5 * $attempt)
+            }
+          }
 
       - name: Configure (LLVM instrument)
         run: meson setup build --buildtype=release -Denable-llvm-instrument=true -Dllvm-config="C:\llvm-22\bin\llvm-config.exe"
