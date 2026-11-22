@@ -11,6 +11,7 @@ import os
 import struct
 import tempfile
 import unittest
+from types import SimpleNamespace
 
 from pydbg.analysis import names, report
 from tests.pe_builder import PEBuilder
@@ -144,6 +145,169 @@ class TestAutomaticNames(unittest.TestCase):
         for text in slots.values():
             self.assertIn("!", text)
             self.assertIn(".dll", text.split("!")[0])
+
+
+class FakeSymbol:
+    """The part of `PdbSymbol` that naming reads."""
+
+    def __init__(self, rva, name, kind="function"):
+        self.rva = rva
+        self.name = name
+        self.kind = kind
+
+
+class FakePdb:
+    """A duck-typed PDB handle, so naming never needs the real class.
+
+    `analysis` must not import `pydbg.pdb` (one-way dependency), so these
+    tests stand a fake wherever a real `Pdb` would go. `symbols()` is the only
+    method naming uses.
+    """
+
+    def __init__(self, symbols=(), structs=()):
+        self._symbols = tuple(symbols)
+        self._structs = tuple(structs)
+
+    def symbols(self):
+        return self._symbols
+
+    def structs(self):
+        return self._structs
+
+    def layout_of(self, key):
+        return None
+
+
+class FakeImport:
+    """One import entry, with the attributes `import_names` reads."""
+
+    def __init__(self, rva, name, dll_name):
+        self.rva = rva
+        self.by_ordinal = False
+        self.name = name
+        self.dll_name = dll_name
+        self.ordinal = None
+
+
+def fake_result(starts, import_thunks=None):
+    """A result just complete enough for `auto_names` to run."""
+    image = SimpleNamespace(pe=SimpleNamespace(
+        exports=(), imports=(FakeImport(0x1040, "CreateFileW",
+                                        "kernel32.dll"),)))
+    return SimpleNamespace(image=image,
+                           functions=SimpleNamespace(starts=tuple(starts)),
+                           import_thunks=dict(import_thunks or {}))
+
+
+class TestPdbNames(unittest.TestCase):
+    """PDB names are evidence, but not the strongest evidence.
+
+    A compiler symbol is more precise than a thunk-derived name and much more
+    precise than `sub_401000`. It is still weaker than the export table — the
+    linker's own statement about the address — and weaker than a person.
+    """
+
+    def test_export_wins_over_a_pdb_name(self):
+        from pydbg.analysis import analyze_bytes
+        from tests.test_pe import build_pe_with_exports
+
+        result = analyze_bytes(build_pe_with_exports())
+        table = names.auto_names(result, pdb=FakePdb(
+            [FakeSymbol(0x1000, "PdbName")]))
+        self.assertEqual(table.name_of(0x1000), "MyExport")
+        self.assertEqual(table.get(0x1000).source, "export")
+
+    def test_pdb_wins_over_an_import_thunk_name(self):
+        """A precise compiler symbol beats the name on the IAT slot.
+
+        The thunk is guessed from a jmp through a slot; the PDB has the
+        compiler's own name for the function, including static ones that no
+        import table mentions.
+        """
+        result = fake_result([0x1000], import_thunks={0x1000: 0x1040})
+        plain = names.auto_names(result)
+        self.assertEqual(plain.get(0x1000).source, "import")
+
+        table = names.auto_names(result, pdb=FakePdb(
+            [FakeSymbol(0x1000, "CreateFileForReal")]))
+        self.assertEqual(table.name_of(0x1000), "CreateFileForReal")
+        self.assertEqual(table.get(0x1000).source, "pdb")
+
+    def test_pdb_wins_over_a_made_up_label(self):
+        result = analyze()
+        table = names.auto_names(result, pdb=FakePdb(
+            [FakeSymbol(TEXT_RVA, "main")]))
+        self.assertEqual(table.name_of(TEXT_RVA), "main")
+        self.assertEqual(table.get(TEXT_RVA).source, "pdb")
+
+    def test_a_person_overrides_a_pdb_name(self):
+        result = analyze()
+        table = names.resolve(result, {TEXT_RVA: "Mine"},
+                              pdb=FakePdb([FakeSymbol(TEXT_RVA, "main")]))
+        self.assertEqual(table.name_of(TEXT_RVA), "Mine")
+        self.assertEqual(table.get(TEXT_RVA).source, "user")
+
+    def test_a_workspace_name_overrides_a_pdb_name(self):
+        """`resolve_for` passes the handle through under the user's layer."""
+        result = analyze()
+        workspace = SimpleNamespace(names={TEXT_RVA: "Mine"})
+        table = names.resolve_for(result, workspace,
+                                  pdb=FakePdb([FakeSymbol(TEXT_RVA, "main")]))
+        self.assertEqual(table.name_of(TEXT_RVA), "Mine")
+        self.assertEqual(table.get(TEXT_RVA).source, "user")
+
+    def test_a_pdb_data_symbol_gets_a_name(self):
+        """Data symbols count too — a global has an address like anything."""
+        result = analyze()
+        table = names.auto_names(result, pdb=FakePdb(
+            [FakeSymbol(0x3000, "g_counter", kind="data")]))
+        self.assertEqual(table.name_of(0x3000), "g_counter")
+        self.assertEqual(table.get(0x3000).source, "pdb")
+
+    def test_empty_symbols_add_nothing_and_record_a_warning(self):
+        """An empty enumeration is not proof of reading.
+
+        The warning travels on the result — the same object the caller already
+        keeps — so a failed read cannot be mistaken for a PDB with no names
+        (spec §10.2(6)).
+        """
+        result = analyze()
+        plain = names.auto_names(result)
+        self.assertEqual(result.warnings, ())
+        empty = names.auto_names(result, pdb=FakePdb(()))
+        self.assertEqual(empty.to_dict(), plain.to_dict())
+        self.assertEqual(result.warnings, ("pdb: no symbols",))
+        # A second call adds neither names nor a duplicate warning.
+        names.auto_names(result, pdb=FakePdb(()))
+        self.assertEqual(result.warnings, ("pdb: no symbols",))
+
+    def test_a_non_empty_enumeration_records_no_warning(self):
+        result = analyze()
+        names.auto_names(result, pdb=FakePdb([FakeSymbol(TEXT_RVA, "main")]))
+        self.assertEqual(result.warnings, ())
+
+    def test_resolve_and_resolve_for_record_the_warning_on_the_result(self):
+        result = analyze()
+        names.resolve(result, pdb=FakePdb(()))
+        self.assertEqual(result.warnings, ("pdb: no symbols",))
+        result = analyze()
+        names.resolve_for(result, SimpleNamespace(names={}), pdb=FakePdb(()))
+        self.assertEqual(result.warnings, ("pdb: no symbols",))
+
+    def test_pdb_names_do_not_touch_the_function_table(self):
+        """Function starts stay code discovery's answer, not the PDB's."""
+        result = analyze()
+        starts = result.functions.starts
+        before = tuple(starts)
+        names.auto_names(result, pdb=FakePdb([FakeSymbol(FUNCTION_RVA,
+                                                         "helper")]))
+        self.assertIs(result.functions.starts, starts)
+        self.assertEqual(tuple(result.functions.starts), before)
+
+    def test_source_pdb_is_declared_and_exported(self):
+        from pydbg.analysis import SOURCE_PDB
+        self.assertEqual(SOURCE_PDB, "pdb")
+        self.assertEqual(names.SOURCE_PDB, "pdb")
 
 
 class TestWorkspace(unittest.TestCase):

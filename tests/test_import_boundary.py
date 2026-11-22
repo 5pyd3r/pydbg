@@ -37,6 +37,18 @@ print("analysis importable without the extension")
 '''
 
 
+_ANALYSIS_IMPORTS_PDB_WITHOUT_EXTENSION = '''
+import sys
+# The type exit shares pydbg.pdb's value classes, so pydbg.pdb is now part of
+# the analysis import graph. Both packages are pure Python.
+from pydbg.analysis import types
+from pydbg.pdb import Field
+assert types.Field is Field
+assert "pydbg._pydbg" not in sys.modules, "analysis pulled in _pydbg"
+print("analysis shares pydbg value classes without the extension")
+'''
+
+
 class TestImportBoundary(unittest.TestCase):
     def _run(self, code):
         return subprocess.run([sys.executable, "-c", code],
@@ -51,6 +63,11 @@ class TestImportBoundary(unittest.TestCase):
         done = self._run(_ANALYSIS_WITHOUT_EXTENSION)
         self.assertEqual(done.returncode, 0, done.stderr)
         self.assertIn("without the extension", done.stdout)
+
+    def test_analysis_imports_pdb_without_the_extension(self):
+        done = self._run(_ANALYSIS_IMPORTS_PDB_WITHOUT_EXTENSION)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertIn("value classes", done.stdout)
 
     def test_the_debugger_is_still_reachable_lazily(self):
         from pydbg import Debugger

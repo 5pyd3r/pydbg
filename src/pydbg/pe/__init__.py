@@ -1,5 +1,7 @@
 """PE format parser package - three-layer architecture (Source/View/Parse)."""
 
+import os
+
 from .types import (
     IMAGE_SCN_MEM_EXECUTE, IMAGE_SCN_MEM_WRITE,
     DosHeader, FileHeader, OptionalHeader, DataDirectory,
@@ -55,6 +57,10 @@ class PE:
         returning while directory parsing stays possible afterwards — the two
         things the previous implementation could not have at once.
 
+        The path is kept on the returned object either way: a consumer that
+        needs a neighbour file (the PDB beside the image) can only find it
+        through `PE.path`, and the sibling-PDB lookup step depends on it.
+
         lazy=True keeps the file open instead, for images too large to be worth
         slurping. The caller then owns that open handle and must close it.
         """
@@ -66,7 +72,12 @@ class PE:
                 source.close()
                 raise
         with open(path, 'rb') as handle:
-            return cls(handle.read())
+            data = handle.read()
+        pe = cls(data)
+        # The bytes are in memory, but the path is still this image's identity:
+        # a PDB lookup needs it to try <image dir>/<image stem>.pdb.
+        pe._path = os.fspath(path)
+        return pe
 
     def _adopt(self, source, view):
         """Parse the headers, sections and the two eager directories.
@@ -78,6 +89,9 @@ class PE:
         """
         self._source = source
         self._cache = {}
+        # Where the bytes came from, when they came from a file. PE(data) has
+        # no path; from_file() sets one, and other callers can ask for it.
+        self._path = getattr(source, "path", None)
 
         parser = PEParser(source, None)
         self.dos_header = parser.parse_dos_header()
@@ -220,6 +234,16 @@ class PE:
     @property
     def source(self):
         return self._source
+
+    @property
+    def path(self):
+        """The file this image was read from, or None for an in-memory PE.
+
+        A consumer that needs a neighbour file — the PDB beside the image —
+        can only find it through this. `PE(data)` and images parsed from a
+        live process's memory have no path and say so with None.
+        """
+        return self._path
 
     @property
     def view(self):

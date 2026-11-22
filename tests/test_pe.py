@@ -789,6 +789,37 @@ class TestPEConstructionIsUnified(unittest.TestCase):
             pe.source.close()
             os.remove(path)
 
+    def test_from_file_records_the_path_it_read(self):
+        """The path is what lets a consumer find the sibling PDB later."""
+        from pydbg.pe import PE
+
+        data = build_minimal_pe32plus()
+        path = _write_temp(data, ".exe")
+        try:
+            self.assertEqual(PE.from_file(path).path, path)
+            self.assertEqual(PE.from_file(path, lazy=True).path, path)
+        finally:
+            os.remove(path)
+
+    def test_a_bytes_built_pe_has_no_path(self):
+        from pydbg.pe import PE
+
+        self.assertIsNone(PE(build_minimal_pe32plus()).path)
+
+    def test_the_sources_expose_where_their_bytes_came_from(self):
+        from pydbg.pe.source import BytesSource, FileSource
+
+        self.assertIsNone(BytesSource(b"x").path)
+        path = _write_temp(b"x")
+        try:
+            source = FileSource(path)
+            try:
+                self.assertEqual(source.path, path)
+            finally:
+                source.close()
+        finally:
+            os.remove(path)
+
 
 class TestReadRva(unittest.TestCase):
     """read_rva is the accessor every directory parser will go through."""

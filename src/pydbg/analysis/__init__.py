@@ -45,7 +45,12 @@ from .owners import (
     ReceiverNote, RegionOwnership, boundary_of, classify_range, container_of,
     function_of, memory_base_registers, receiver_of,
 )
-from .names import Name, NameTable, auto_names, import_names, resolve_for
+from .names import (
+    SOURCE_PDB, Name, NameTable, auto_names, import_names, resolve_for,
+)
+from .types import (
+    Field, FieldReport, StructLayout, field_report, layout_of, structs,
+)
 from .workspace import Workspace, WorkspaceError, image_fingerprint
 from .process_source import ProcessSource
 from .refs import (
@@ -77,7 +82,8 @@ __all__ = [
     'ConstantTracker',
     'CoverageAttribution', 'UncoveredBreakdown', 'attribute_coverage',
     'deltas', 'span_summary',
-    'Name', 'NameTable', 'auto_names', 'import_names', 'resolve_for',
+    'Name', 'NameTable', 'SOURCE_PDB', 'auto_names', 'import_names',
+    'resolve_for',
     'Access', 'FieldUse', 'StructureProfile', 'collect_accesses',
     'profiles', 'STACK_REGISTERS',
     'Workspace', 'WorkspaceError', 'image_fingerprint',
@@ -96,4 +102,6 @@ __all__ = [
     'Bound', 'ValueSet', 'DECIDED', 'UNDECIDED', 'writes_to', 'value_set_of',
     'narrow_by_guards', 'unresolved_write_count',
     'DecompiledFunction', 'decompile_function',
+    'Field', 'FieldReport', 'StructLayout', 'field_report', 'layout_of',
+    'structs',
 ]
