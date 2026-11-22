@@ -237,6 +237,19 @@ class TestParseVersionInfo(unittest.TestCase):
 
 class TestPEVersionInfo(unittest.TestCase):
 
+    def test_read_version_info_is_a_public_import(self):
+        """PE.version_info delegates to it, so it belongs in the package's API.
+
+        It was imported in pe/__init__.py but left out of __all__, which made
+        the public surface depend on whether a caller used the name or the
+        star-import.
+        """
+        import pydbg.pe as pe_package
+
+        self.assertIn("read_version_info", pe_package.__all__)
+        from pydbg.pe import read_version_info
+        self.assertTrue(callable(read_version_info))
+
     def test_synthetic_image_matches_direct_parse(self):
         from pydbg.pe import PE
         from pydbg.pe.version import parse_version_info

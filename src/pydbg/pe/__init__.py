@@ -265,5 +265,5 @@ __all__ = [
     'View', 'FileView', 'LoadedView',
     'PEParser',
     'PEResourceParser', 'ResourceEntry', 'RESOURCE_TYPES',
-    'FixedFileInfo', 'VersionInfo', 'RT_VERSION',
+    'FixedFileInfo', 'VersionInfo', 'RT_VERSION', 'read_version_info',
 ]
