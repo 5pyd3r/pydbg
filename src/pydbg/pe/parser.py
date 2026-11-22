@@ -187,6 +187,34 @@ class PEParser:
             return None
         return self._src.try_read(offset, size)
 
+    def _read_rva_prefix(self, rva, size):
+        """Up to 'size' bytes at 'rva', stopping at the end of the source.
+
+        try_read answers all-or-nothing, but a file cut inside a structure is
+        not an absent structure: the fields before the cut are still readable
+        facts. Binary-search the longest prefix the source will supply (a
+        longer range cannot succeed where a shorter one failed), which keeps
+        this source-agnostic — BytesSource and FileSource both raise instead
+        of returning a short slice.
+        """
+        offset = self._view.rva_to_source_offset(rva)
+        if offset is None:
+            return None
+        data = self._src.try_read(offset, size)
+        if data is not None:
+            return data
+        low, high, readable = 0, size, 0
+        while low <= high:
+            middle = (low + high) // 2
+            if self._src.try_read(offset, middle) is not None:
+                readable = middle
+                low = middle + 1
+            else:
+                high = middle - 1
+        if not readable:
+            return b""
+        return self._src.try_read(offset, readable)
+
     def parse_dos_header(self) -> DosHeader:
         data = self._src.read(0, 64)
         magic = struct.unpack_from('<2s', data, 0)[0]
@@ -526,8 +554,10 @@ class PEParser:
 
         The structure's first field is its own size, and that size is the
         version marker: a field whose offset the declared version — or the
-        readable bytes — does not cover comes back as None. The 64-bit and
-        32-bit layouts differ, so 'magic' selects the table to read by.
+        readable bytes — does not cover comes back as None. Truncation is read
+        as a prefix rather than as absence: only zero readable bytes is None.
+        The 64-bit and 32-bit layouts differ, so 'magic' selects the table to
+        read by.
         """
         dd = data_dirs.get(DIR_LOAD_CONFIG)
         if dd is None or dd.virtual_address == 0 or dd.size == 0:
@@ -535,15 +565,19 @@ class PEParser:
 
         layout, full_size = _LOAD_CONFIG_LAYOUT.get(
             magic, (_LOAD_CONFIG_64, 0x94))
-        raw = self._read_rva(dd.virtual_address, min(dd.size, full_size))
-        if raw is None or len(raw) < 8:
+        raw = self._read_rva_prefix(dd.virtual_address,
+                                    min(dd.size, full_size))
+        if not raw:
             return None
 
-        declared = struct.unpack_from('<I', raw, 0)[0]
-        if declared < 8:
-            return None                     # zero Size is no struct at all
+        if len(raw) >= 4:
+            declared = struct.unpack_from('<I', raw, 0)[0]
+            if declared < 8:
+                return None                 # zero Size is no struct at all
+            end = min(declared, len(raw))
+        else:
+            end = len(raw)                  # the Size field itself is cut
 
-        end = min(declared, len(raw))
         values = {}
         for name, offset, fmt in layout:
             field_size = struct.calcsize(fmt)
@@ -558,21 +592,27 @@ class PEParser:
 
         Header only: the metadata directory it points at is not followed, so
         this answers "is this a .NET image and what does its header claim"
-        rather than duplicating a metadata reader.
+        rather than duplicating a metadata reader. A file cut inside the
+        header still reports every field the cut did not reach; only zero
+        readable bytes is None.
         """
         dd = data_dirs.get(DIR_CLR)
         if dd is None or dd.virtual_address == 0 or dd.size == 0:
             return None
 
-        raw = self._read_rva(dd.virtual_address, min(dd.size, CLR_HEADER_SIZE))
-        if raw is None or len(raw) < 8:
+        raw = self._read_rva_prefix(dd.virtual_address,
+                                    min(dd.size, CLR_HEADER_SIZE))
+        if not raw:
             return None
 
-        declared = struct.unpack_from('<I', raw, 0)[0]
-        if declared < 8:
-            return None                     # zero cb is no header at all
+        if len(raw) >= 4:
+            declared = struct.unpack_from('<I', raw, 0)[0]
+            if declared < 8:
+                return None                 # zero cb is no header at all
+            end = min(declared, len(raw))
+        else:
+            end = len(raw)                  # the cb field itself is cut
 
-        end = min(declared, len(raw))
         values = {}
         for name, offset, fmt in _CLR_HEADER_FIELDS:
             field_size = struct.calcsize(fmt)

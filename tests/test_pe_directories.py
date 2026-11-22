@@ -656,6 +656,20 @@ class TestDelayImports(unittest.TestCase):
         struct.pack_into("<8I", data, RVA_RDATA, *([0] * 8))
         self.assertEqual(PE(bytes(data)).delay_imports, [])
 
+    def test_a_file_cut_mid_table_returns_the_readable_descriptors(self):
+        """A real file cut, not a SizeOfDirectory that merely lies.
+
+        The first descriptor and its address fields are whole, so they are
+        reported; the descriptor the cut runs through is not.
+        """
+        from pydbg.pe import PE
+
+        data, _ = build_delay_image(entries=2)
+        imports = PE(data[:RVA_RDATA + 48]).delay_imports
+        self.assertEqual(len(imports), 1)
+        self.assertEqual(imports[0].iat_rva, 0x2300)
+        self.assertEqual(imports[0].timestamp, 0x5A000000)
+
 
 class TestBoundImports(unittest.TestCase):
     """Data directory 11 — IMAGE_BOUND_IMPORT_DESCRIPTOR.
@@ -710,6 +724,16 @@ class TestBoundImports(unittest.TestCase):
 
         builder, _ = _base_image()
         self.assertEqual(PE(builder.build()).bound_imports, [])
+
+    def test_a_file_cut_mid_table_returns_the_readable_descriptors(self):
+        """The descriptor and its forwarder ref are whole; the next one is not."""
+        from pydbg.pe import PE
+
+        data = build_bound_image()
+        entries = PE(data[:RVA_RDATA + 16]).bound_imports
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0].timestamp, 0x11111111)
+        self.assertEqual(len(entries[0].forwarders), 1)
 
 
 class TestLoadConfig(unittest.TestCase):
@@ -796,6 +820,41 @@ class TestLoadConfig(unittest.TestCase):
         data[RVA_RDATA:RVA_RDATA + 0x94] = b"\x00" * 0x94
         self.assertIsNone(PE(bytes(data)).load_config)
 
+    def test_a_file_cut_mid_struct_parses_the_readable_prefix(self):
+        """A file cut is not an absent directory: the covered fields survive.
+
+        Asking for the whole struct made try_read answer None, and the caller
+        collapsed that into "no Load Config" even though the Size, timestamp
+        and flags before the cut were perfectly readable.
+        """
+        from pydbg.pe import PE
+
+        data = build_load_config_image(0x20B)
+        config = PE(data[:RVA_RDATA + 0x20]).load_config
+        self.assertIsNotNone(config)
+        self.assertEqual(config.size, 0x94)
+        self.assertEqual(config.timestamp, 0x5A000000)
+        self.assertEqual((config.major_version, config.minor_version), (2, 5))
+        self.assertEqual(config.global_flags_set, 0x22)
+        self.assertIsNone(config.security_cookie)
+
+    def test_a_cut_with_no_readable_bytes_is_none(self):
+        """Zero readable bytes is the one truncation that has no prefix."""
+        from pydbg.pe import PE
+
+        data = build_load_config_image(0x20B)
+        self.assertIsNone(PE(data[:RVA_RDATA]).load_config)
+
+    def test_a_prefix_shorter_than_the_size_field_still_parses_nothing(self):
+        """Two readable bytes are a readable prefix, so not "absent"."""
+        from pydbg.pe import PE
+
+        data = build_load_config_image(0x20B)
+        config = PE(data[:RVA_RDATA + 2]).load_config
+        self.assertIsNotNone(config)
+        self.assertIsNone(config.size)
+        self.assertIsNone(config.timestamp)
+
 
 class TestCLRHeader(unittest.TestCase):
     """Data directory 14 — IMAGE_COR20_HEADER.
@@ -847,6 +906,25 @@ class TestCLRHeader(unittest.TestCase):
         data[RVA_RDATA:RVA_RDATA + 0x48] = b"\x00" * 0x48
         self.assertIsNone(PE(bytes(data)).clr_header)
 
+    def test_a_file_cut_mid_header_parses_the_readable_prefix(self):
+        """The fields the cut covers are facts; the rest are None, not zero."""
+        from pydbg.pe import PE
+
+        header = PE(build_clr_image()[:RVA_RDATA + 0x20]).clr_header
+        self.assertIsNotNone(header)
+        self.assertEqual(header.size, 0x48)
+        self.assertEqual((header.major_runtime_version,
+                          header.minor_runtime_version), (2, 5))
+        self.assertEqual(header.metadata_rva, 0x2200)
+        self.assertEqual(header.resources_size, 0x80)
+        self.assertIsNone(header.strong_name_rva)
+        self.assertIsNone(header.strong_name_size)
+
+    def test_a_cut_with_no_readable_bytes_is_none(self):
+        from pydbg.pe import PE
+
+        self.assertIsNone(PE(build_clr_image()[:RVA_RDATA]).clr_header)
+
 
 class TestAuthenticodeLocation(unittest.TestCase):
     """Data directory 4 — the Authenticode certificate location.
@@ -893,6 +971,20 @@ class TestAuthenticodeLocation(unittest.TestCase):
         location = PE(data).authenticode
         self.assertIsNotNone(location)
         self.assertEqual((location.offset, location.size), (offset, 0x100))
+
+    def test_a_file_cut_inside_the_certificate_still_reports_the_location(self):
+        """A truncated certificate must not be collapsed into "unsigned".
+
+        The directory still says where the signature starts and how long it
+        claims to be; the missing bytes are the file's problem, not this
+        record's.
+        """
+        from pydbg.pe import PE
+
+        data, offset = build_security_image(cert_size=0x10)
+        location = PE(data[:offset + 4]).authenticode
+        self.assertIsNotNone(location)
+        self.assertEqual((location.offset, location.size), (offset, 0x10))
 
 
 def build_broken_rich_image(blob):
