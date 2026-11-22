@@ -349,8 +349,7 @@ class StaticAnalyzer:
         data that was in hand.
         """
         if not self._stack_ids:
-            self._stack_ids = stack_register_ids(self.image.mode,
-                                                 STACK_REGISTERS)
+            self._stack_ids = stack_register_ids(self.decoder, STACK_REGISTERS)
         resolved = base_relative_access(insn, stack_ids=self._stack_ids)
         if resolved is None:
             return

@@ -1,4 +1,9 @@
-"""InstructionDecoder — decoding plus honest coverage accounting."""
+"""InstructionDecoder — decoding plus honest coverage accounting.
+
+It also owns the package's only `DisasmEngine`. Register names and decodes that
+must not record coverage are handed out by this class, so a module that needs
+one asks the decoder instead of constructing an engine of its own.
+"""
 
 from collections import OrderedDict
 
@@ -53,6 +58,25 @@ class InstructionDecoder:
         if 0 <= rva < len(self._size_at):
             return self._size_at[rva]
         return 0
+
+    def reg_name(self, reg_id):
+        """Capstone's name for a register id, or '' when it has none.
+
+        Register names are the decoder's vocabulary. A module that needs one
+        asks here instead of constructing a disassembly engine of its own —
+        that is what made eight owners for one decision.
+        """
+        return self.engine.reg_name(reg_id)
+
+    def disasm(self, va, blob):
+        """Decode 'blob' at 'va' without recording any of it.
+
+        For queries that must ask "does this decode" without changing what the
+        run claims to have covered: a listing, and coverage attribution's
+        classification of bytes no instruction claimed. Recording is what
+        `decode_one` does, and deliberately not what this does.
+        """
+        return self.engine.disasm(va, blob)
 
     def decode_one(self, rva):
         """The instruction at 'rva', or None if it will not decode.

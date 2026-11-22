@@ -14,7 +14,6 @@ whole point is to stop a plausible-looking breakdown from being read as fact.
 
 from dataclasses import dataclass, field
 
-from ..disasm.engine import DisasmEngine
 from .model import RefKind
 
 # Bytes that fill space rather than encode anything: zero padding, nop
@@ -125,10 +124,13 @@ def _decodes_as_code(result, start, end):
     if not blob:
         return False
 
-    engine = DisasmEngine(mode=image.mode)
+    # Decoded through the decoder's engine, not a fresh one: the engine is the
+    # decoder's to own, and `decoder.disasm` is the form that explicitly does
+    # not record coverage — this asks whether bytes would decode, it must not
+    # change the answer the report is explaining.
     consumed = 0
     branched = False
-    for insn in engine.disasm(image.rva_to_va(start), blob):
+    for insn in result.decoder.disasm(image.rva_to_va(start), blob):
         consumed += insn.size
         if insn.is_call or insn.is_jmp or insn.is_ret:
             branched = True

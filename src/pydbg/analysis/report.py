@@ -156,17 +156,23 @@ def render_xrefs(result, target=None, limit=8):
     return "\n".join(lines) if lines else "(no cross-references)"
 
 
-def render_listing(image, rva, size, engine=None, names=None, comments=None):
+def render_listing(result, rva, size, names=None, comments=None):
     """Disassembly of a range, annotated with references, names and comments.
 
     Branch targets are shown as names where one is known: `call 0x4012f0` and
     `call CreateFileW` are the same instruction, and only one of them can be
     read.
+
+    The decoder owns the disassembly engine; this asks it for a decode that
+    does not record coverage, because a listing is a question rather than a
+    claim about what the run covered.
     """
-    from ..disasm.engine import DisasmEngine
     from .refs import classify_refs
 
-    engine = engine or DisasmEngine(mode=image.mode)
+    image = result.image
+    decoder = result.decoder
+    if decoder is None:
+        raise ValueError("this result carries no decoder to ask")
     # Decode at the VA, as the analyzer does, so branch targets are absolute.
     # read_code_bytes rather than read_rva: asking for 64 bytes near the end of
     # a section is normal, and a short read there is not "unreadable".
@@ -183,7 +189,7 @@ def render_listing(image, rva, size, engine=None, names=None, comments=None):
         return text
 
     lines = []
-    for insn in engine.disasm(image.rva_to_va(rva), data):
+    for insn in decoder.disasm(image.rva_to_va(rva), data):
         insn_rva = image.va_to_rva(insn.address)
         refs = classify_refs(insn, image)
         annotation = ""

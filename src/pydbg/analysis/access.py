@@ -12,7 +12,7 @@ So the unit here is a (function, base register) pair, not a class.
 
 from dataclasses import dataclass, field
 
-from ..disasm.engine import ACC_WRITE, OP_MEM, DisasmEngine
+from ..disasm.engine import ACC_WRITE, OP_MEM
 
 # Registers whose `[... + disp]` form addresses the stack, not a structure.
 # Every function has one, so counting them would make every function look like
@@ -157,8 +157,13 @@ def collect_accesses(result, stack_registers=STACK_REGISTERS):
     Comes from what the sweep recorded, so the cost is a lookup rather than a
     second decode pass. Falls back to walking the decode when a result was
     produced with collection switched off.
+
+    Register names come from the decoder, which owns the only disassembly
+    engine in this package.
     """
-    engine = DisasmEngine(mode=result.image.mode)
+    decoder = result.decoder
+    if decoder is None:
+        raise ValueError("this result carries no decoder to ask")
     functions = result.functions
     recorded = getattr(result, "access_records", None)
     if recorded is None:
@@ -166,7 +171,7 @@ def collect_accesses(result, stack_registers=STACK_REGISTERS):
 
     found = []
     for rva, reg_id, offset, size, access, branch in recorded:
-        name = engine.reg_name(reg_id)
+        name = decoder.reg_name(reg_id)
         if not name or name in stack_registers:
             continue
         found.append(Access(
@@ -191,8 +196,7 @@ def _replay(result, stack_registers):
     the ids instead — see stack_register_ids.
     """
     decoder = result.decoder
-    ids = stack_register_ids(result.image.mode, stack_registers,
-                             DisasmEngine(mode=result.image.mode))
+    ids = stack_register_ids(decoder, stack_registers)
     out = []
     for rva in decoder.decoded_rvas():
         insn = decoder.decode_one(rva)
@@ -211,11 +215,10 @@ def _replay(result, stack_registers):
     return out
 
 
-def stack_register_ids(mode, names, engine=None):
-    """Capstone ids for the stack registers of 'mode'."""
-    engine = engine or DisasmEngine(mode=mode)
+def stack_register_ids(decoder, names):
+    """Capstone ids for the stack registers named in 'names'."""
     return frozenset(reg for reg in range(1, 300)
-                     if engine.reg_name(reg) in names)
+                     if decoder.reg_name(reg) in names)
 
 
 def profiles(result, accesses=None, min_offsets=None):

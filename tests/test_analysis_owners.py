@@ -383,6 +383,11 @@ class TestReceiverOf(unittest.TestCase):
         # name: (body, offset of the access)
         "constant": (b"\xb9" + (IMAGE_BASE + 0x1000).to_bytes(4, "little")
                      + b"\x8b\x41\x3d", 5),
+        # lea ecx, [IMAGE_BASE + 0x1000] then mov eax, [ecx+0x3d]
+        "lea_absolute": (b"\x8d\x0d" + (IMAGE_BASE + 0x1000).to_bytes(4, "little")
+                         + b"\x8b\x41\x3d", 6),
+        # lea ecx, [esi+0x10] then mov eax, [ecx+0x3d]
+        "lea_relative": (b"\x8d\x4e\x10" + b"\x8b\x41\x3d", 3),
         "loaded_from_slot": (b"\x8b\x4e\x18" + b"\x8b\x41\x3d", 3),
         "loaded_from_stack": (b"\x8b\x4d\xfc" + b"\x8b\x41\x3d", 3),
         "branch": (b"\xb9" + (IMAGE_BASE + 0x1000).to_bytes(4, "little")
@@ -409,6 +414,23 @@ class TestReceiverOf(unittest.TestCase):
         self.assertEqual(note.fact, "loaded_from_slot")
         self.assertEqual(note.source_rva, ENTRY_RVA)
         self.assertTrue(note.determined)
+
+    def test_lea_of_an_absolute_address_is_a_constant(self):
+        """`lea reg, [abs]` names an address; the encoding is the evidence."""
+        note = self._note("lea_absolute")
+        self.assertEqual(note.fact, "constant")
+        self.assertTrue(note.determined)
+
+    def test_lea_of_a_base_relative_address_is_not_a_constant(self):
+        """`lea reg, [esi+0x10]` points into an object this walk never resolved.
+
+        The rule is `consts.address_without_registers`, shared with
+        refs.memory_address; owners used to carry its own half-copy.
+        """
+        note = self._note("lea_relative")
+        self.assertEqual(note.fact, "unknown")
+        self.assertFalse(note.determined)
+        self.assertIn("cannot resolve", note.stopped_at)
 
     def test_a_register_from_the_stack_is_not_a_slot(self):
         note = self._note("loaded_from_stack")

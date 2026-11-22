@@ -275,6 +275,32 @@ class TestFunctionTable(unittest.TestCase):
             self.assertEqual(extents[start], expected, f"start {start:#x}")
 
 
+class TestAddressUnits(unittest.TestCase):
+    """Capstone speaks VAs; an analysis answer is an RVA.
+
+    The conversion exists once — `refs.memory_address` wraps
+    `consts.address_without_registers`, whose VA result is what the decoded
+    instruction's operands actually contain. owners used to carry a third,
+    partial copy of the same rule for `lea`.
+    """
+
+    def test_a_memory_operand_has_one_rva_answer(self):
+        from pydbg.analysis import analyze_bytes
+        from pydbg.analysis.consts import address_without_registers
+        from pydbg.analysis.refs import memory_address
+        from pydbg.disasm.engine import OP_MEM
+
+        # mov eax, dword ptr [IMAGE_BASE + TEXT_RVA]
+        code = b"\x8b\x05" + (IMAGE_BASE + TEXT_RVA).to_bytes(4, "little")
+        result = analyze_bytes(build_text(code))
+        insn = result.decoder.decode_one(TEXT_RVA)
+        operand = next(op for op in insn.operands if op.kind == OP_MEM)
+
+        self.assertEqual(address_without_registers(insn, operand),
+                         IMAGE_BASE + TEXT_RVA)
+        self.assertEqual(memory_address(insn, operand, result.image), TEXT_RVA)
+
+
 class TestImageGeometry(unittest.TestCase):
 
     def test_exec_sections_are_recognised(self):
