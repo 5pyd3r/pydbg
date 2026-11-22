@@ -9,9 +9,11 @@ from .format import (
     TraceEvent, TraceFormatError, TraceWriter, read_trace,
 )
 from .replay import block_coverage, filter_events, to_jsonl
+from .watch import MemoryWatch
 
 __all__ = [
     'StepTracer', 'CallTree', 'CallNode', 'BblTracer', 'TraceSummary',
+    'MemoryWatch',
     'STOP_MAX_EVENTS', 'STOP_TARGET_EXITED', 'STOP_IDLE_TIMEOUT',
     'STOP_NO_BLOCKS', 'TRUNCATED_REASONS',
     'TraceEvent', 'TraceWriter', 'read_trace', 'TraceFormatError',
