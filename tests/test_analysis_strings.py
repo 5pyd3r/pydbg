@@ -73,12 +73,24 @@ class TestStringsInBytes(unittest.TestCase):
                          ["Hello"])
         self.assertEqual(strings_in_bytes(data, min_length=6), [])
 
-    def test_a_utf16_run_cannot_start_inside_an_ascii_run(self):
+    def test_the_longest_run_wins_even_when_it_starts_a_byte_later(self):
+        """b"A" + UTF-16 "Hello": the maximal run starts at offset 1.
+
+        The old rule could not start a UTF-16 run after a printable byte, so
+        it reported "ello" from offset 3 and silently lost the capital H (and
+        the 'A' that shares no encoding with the rest).
+        """
+        data = b"A" + "Hello".encode("utf-16-le")
+        self.assertEqual(
+            [(s.rva, s.encoding, s.text) for s in strings_in_bytes(data)],
+            [(1, "utf-16le", "Hello")])
+
+    def test_an_ascii_run_does_not_absorb_the_next_utf16_run(self):
         """The NUL terminating an ASCII string is a valid UTF-16 high byte.
 
-        Without a boundary rule the last character of "hello\\0" is read as
-        the first of the following UTF-16 run, yielding "hell" + "oWide"
-        over the same bytes.
+        Without the longest-run comparison the last character of "hello\\0"
+        is read as the first of the following UTF-16 run, yielding "hell" +
+        "oWide" over the same bytes.
         """
         found = strings_in_bytes(b"hello\x00" + "Wide".encode("utf-16-le"))
         self.assertEqual([(s.rva, s.encoding, s.text) for s in found],

@@ -80,74 +80,66 @@ def _utf16_char_at(data, index):
             and data[index + 1] == 0)
 
 
-def _utf16_strings(data, base_rva, min_length, consumed):
-    """UTF-16LE runs whose every character is ASCII and followed by a NUL.
+def _ascii_run(data, index):
+    """Bytes in the printable run starting at 'index' (0 if it is not one)."""
+    end = index
+    while end < len(data) and _printable(data[end]):
+        end += 1
+    return end - index
 
-    A run may only start at the buffer's first byte or just after a
-    non-printable byte. The NUL that terminates an ASCII string is also a
-    valid UTF-16 high byte, so without that boundary check the last character
-    of `b"hello\\x00"` joins the next UTF-16 run as `"oWide"` instead of
-    leaving `"hello"` whole for the ASCII pass.
+
+def _utf16_run(data, index):
+    """Bytes in the UTF-16LE run starting at 'index' (0 if no pair starts).
+
+    Whether a run may begin mid-buffer is decided by the caller; the encoding
+    comparison and the NUL-boundary question are documented in
+    strings_in_bytes.
     """
-    found = []
-    index = 0
-    while index + 1 < len(data):
-        if not _utf16_char_at(data, index):
-            index += 1
-            continue
-        if index and _printable(data[index - 1]):
-            index += 1
-            continue
-        start = index
-        while index + 1 < len(data) and _utf16_char_at(data, index):
-            index += 2
-        if (index - start) // 2 >= min_length:
-            text = data[start:index:2].decode("ascii")
-            found.append(FoundString(base_rva + start, UTF16LE, text))
-            consumed[start:index] = b"\x01" * (index - start)
-    return found
-
-
-def _ascii_strings(data, base_rva, min_length, consumed):
-    """ASCII runs, skipping bytes the UTF-16 pass already claimed."""
-    found = []
-    index = 0
-    while index < len(data):
-        if consumed[index] or not _printable(data[index]):
-            index += 1
-            continue
-        start = index
-        while (index < len(data) and not consumed[index]
-               and _printable(data[index])):
-            index += 1
-        if index - start >= min_length:
-            text = data[start:index].decode("ascii")
-            found.append(FoundString(base_rva + start, ASCII, text))
-    return found
+    end = index
+    while end + 1 < len(data) and _utf16_char_at(data, end):
+        end += 2
+    return end - index
 
 
 def strings_in_bytes(data, base_rva=0, min_length=4):
     """Printable runs in `data`, each positioned at `base_rva` + its offset.
 
-    UTF-16LE is recognised first and its bytes are claimed before the ASCII
-    pass runs. Doing it the other way around reports a UTF-16 string as a run
-    of one-character ASCII fragments — five findings where there is one.
+    Two encodings are considered at every offset: an ASCII run of printable
+    bytes and a UTF-16LE run of printable-low/NUL-high pairs. The longer byte
+    span wins, so each string is reported once, whole, under the encoding
+    that actually explains its bytes; a tie goes to ASCII.
 
-    A UTF-16LE run may only start at the buffer's first byte or immediately
-    after a non-printable byte; a run that would begin inside an ASCII run is
-    left to the ASCII pass. That boundary is load-bearing: the NUL that ends
-    an ASCII string is also a valid UTF-16 high byte, so without it the last
-    character of `b"hello\\x00"` would be claimed as the start of the next
-    UTF-16 run.
+    The comparison replaces the old "a UTF-16 run may not start inside an
+    ASCII run" boundary rule, which lost characters. The NUL ending an ASCII
+    string is also a valid UTF-16 high byte, so the longest-run rule still
+    keeps ``b"hello\\x00"`` and a following wide ``Wide`` apart — but it also
+    finds ``Hello`` in ``b"A" + "Hello"`` in UTF-16LE, where the run starts at
+    offset 1 and the old rule reported only ``ello`` from offset 3.
 
-    Results are in address order, whatever order the two passes found them in.
+    A candidate shorter than `min_length` characters is not emitted, and the
+    scan then advances one byte, not the candidate's length: a run that starts
+    mid-way must not be hidden by a shorter run that starts before it.
+    Results are in address order.
     """
-    if not data:
-        return []
-    consumed = bytearray(len(data))
-    found = _utf16_strings(data, base_rva, min_length, consumed)
-    found.extend(_ascii_strings(data, base_rva, min_length, consumed))
-    found.sort(key=lambda string: (string.rva, string.encoding))
+    found = []
+    index = 0
+    while index < len(data):
+        ascii_length = _ascii_run(data, index)
+        utf16_length = _utf16_run(data, index)
+        if utf16_length > ascii_length:
+            length, encoding = utf16_length, UTF16LE
+        else:
+            length, encoding = ascii_length, ASCII
+        chars = length // 2 if encoding == UTF16LE else length
+        if length and chars >= min_length:
+            if encoding == UTF16LE:
+                text = data[index:index + length:2].decode("ascii")
+            else:
+                text = data[index:index + length].decode("ascii")
+            found.append(FoundString(base_rva + index, encoding, text))
+            index += length
+        else:
+            index += 1
     return found
 
 
