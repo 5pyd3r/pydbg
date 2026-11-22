@@ -97,6 +97,10 @@ _LOAD_CONFIG_LAYOUT = {
     0x10B: (_LOAD_CONFIG_32, 0x5C),
 }
 
+# A self-sized struct whose declared Size is below this holds only a fragment;
+# 8 is size + timestamp, the shortest prefix that versions anything.
+_MIN_DECLARED_STRUCT_SIZE = 8
+
 # IMAGE_COR20_HEADER. Only the header is read; the metadata directory it points
 # at is deliberately not followed — identifying a .NET image does not need it.
 CLR_HEADER_SIZE = 0x48
@@ -114,6 +118,38 @@ _CLR_HEADER_FIELDS = (
     ('strong_name_rva', 0x20, '<I'),
     ('strong_name_size', 0x24, '<I'),
 )
+
+
+def _declared_struct_values(raw, layout):
+    """Field values of a self-sized struct that 'raw' actually covers.
+
+    IMAGE_LOAD_CONFIG_DIRECTORY and IMAGE_COR20_HEADER both begin with their
+    own size, and that dword is the version marker: a field the declared size
+    or the readable bytes do not reach is None, not zero, because "this build
+    predates the field" and "the field is zero" are different findings.
+
+    Returns None when the declaration is unusable (no readable byte, or a
+    declared Size below the shortest meaningful prefix). Sharing this walk is
+    what keeps the truncation semantics of the two directories from drifting.
+    """
+    if not raw:
+        return None
+    if len(raw) >= 4:
+        declared = struct.unpack_from('<I', raw, 0)[0]
+        if declared < _MIN_DECLARED_STRUCT_SIZE:
+            return None                     # zero Size is no struct at all
+        end = min(declared, len(raw))
+    else:
+        end = len(raw)                      # the declared size itself is cut
+
+    values = {}
+    for name, offset, fmt in layout:
+        field_size = struct.calcsize(fmt)
+        if offset + field_size <= end:
+            values[name] = struct.unpack_from(fmt, raw, offset)[0]
+        else:
+            values[name] = None
+    return values
 
 
 def _format_guid(raw: bytes) -> str:
@@ -579,24 +615,9 @@ class PEParser:
         layout, full_size = layout_entry
         raw = self._read_rva_prefix(dd.virtual_address,
                                     min(dd.size, full_size))
-        if not raw:
+        values = _declared_struct_values(raw, layout)
+        if values is None:
             return None
-
-        if len(raw) >= 4:
-            declared = struct.unpack_from('<I', raw, 0)[0]
-            if declared < 8:
-                return None                 # zero Size is no struct at all
-            end = min(declared, len(raw))
-        else:
-            end = len(raw)                  # the Size field itself is cut
-
-        values = {}
-        for name, offset, fmt in layout:
-            field_size = struct.calcsize(fmt)
-            if offset + field_size <= end:
-                values[name] = struct.unpack_from(fmt, raw, offset)[0]
-            else:
-                values[name] = None
         return LoadConfig(**values)
 
     def parse_clr_header(self, data_dirs: dict):
@@ -614,24 +635,9 @@ class PEParser:
 
         raw = self._read_rva_prefix(dd.virtual_address,
                                     min(dd.size, CLR_HEADER_SIZE))
-        if not raw:
+        values = _declared_struct_values(raw, _CLR_HEADER_FIELDS)
+        if values is None:
             return None
-
-        if len(raw) >= 4:
-            declared = struct.unpack_from('<I', raw, 0)[0]
-            if declared < 8:
-                return None                 # zero cb is no header at all
-            end = min(declared, len(raw))
-        else:
-            end = len(raw)                  # the cb field itself is cut
-
-        values = {}
-        for name, offset, fmt in _CLR_HEADER_FIELDS:
-            field_size = struct.calcsize(fmt)
-            if offset + field_size <= end:
-                values[name] = struct.unpack_from(fmt, raw, offset)[0]
-            else:
-                values[name] = None
         return CLRHeader(**values)
 
     def parse_security(self, data_dirs: dict):
