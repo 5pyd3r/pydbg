@@ -49,6 +49,24 @@ av_target = executable(
   'target/av_target.c',
 )
 
+# Phase 5 PDB targets (spec §10.6(8)). /Zi makes the compiler write symbols and
+# types; /DEBUG makes the linker write the .pdb beside the image. They are plain
+# executables that nothing runs: the Phase 5 tests read the artefacts offline,
+# which is the whole point of the PDB work — no live debuggee needed.
+pdb_target = executable(
+  'pdb_target',
+  'target/pdb_target.c',
+  c_args: ['/Zi'],
+  link_args: ['/DEBUG'],
+)
+
+pdb_target_cpp = executable(
+  'pdb_target_cpp',
+  'target/pdb_target_cpp.cpp',
+  cpp_args: ['/Zi'],
+  link_args: ['/DEBUG'],
+)
+
 # Child-process target. Built here as native x64 and used for two different
 # things: the debuggee of the child-debugging tests, and the *64-bit child* that
 # a WOW64 parent spawns (test_wow64). Its 32-bit counterpart and the WOW64
@@ -79,6 +97,15 @@ test_env.set('TEST_WINDOW_TARGET_PATH', window_target.full_path())
 test_env.set('TEST_MODAL_TARGET_PATH', modal_target.full_path())
 test_env.set('TEST_WEDGE_TARGET_PATH', wedge_target.full_path())
 test_env.set('TEST_AV_TARGET_PATH', av_target.full_path())
+# /DEBUG leaves each .pdb next to its .exe, so the build dir already holds it.
+# Deriving the name from the built target keeps the two in step; a hard-coded
+# "pdb_target.pdb" would stop matching silently if the target were renamed.
+test_env.set('TEST_PDB_TARGET_PATH', pdb_target.full_path())
+test_env.set('TEST_PDB_PATH',
+  pdb_target.full_path().replace('.exe', '.pdb'))
+test_env.set('TEST_PDB_CPP_TARGET_PATH', pdb_target_cpp.full_path())
+test_env.set('TEST_PDB_CPP_PDB_PATH',
+  pdb_target_cpp.full_path().replace('.exe', '.pdb'))
 test_env.set('TEST_CHILD_TARGET',
   meson.project_source_root() / 'tests' / 'target' / 'child_target32.exe')
 test_env.set('TEST_CHILD_TARGET_X64', child_target.full_path())
