@@ -222,9 +222,11 @@ class TestDataSectionPointers(unittest.TestCase):
 
     def test_the_stat_counts_the_index_not_the_reads(self):
         """Two readers can name one slot; the index holds it once."""
+        from pydbg.analysis import RefKind
+
         result = self.analyze(_pointer_image()[0])
         counted = sum(1 for found in result.xrefs.values() for ref in found
-                      if ref.kind == 5)
+                      if ref.kind is RefKind.DATA)
 
         self.assertEqual(result.stats.data_refs, counted)
         self.assertGreater(result.stats.data_refs, 0)
@@ -411,8 +413,10 @@ class TestRealImageDataRefs(unittest.TestCase):
         layouts would pass while contributing nothing to the images that
         matter, which is the failure mode the seed classes were fixed for.
         """
+        from pydbg.analysis import RefKind
+
         self.assertGreater(self.result.stats.data_refs, 0)
-        self.assertIn(5, [int(kind) for kind in refs.ref_kinds(self.result)])
+        self.assertIn(RefKind.DATA, refs.ref_kinds(self.result))
 
     def test_a_real_image_has_no_xref_gaps(self):
         self.assertEqual(self.result.xref_gaps, ())
@@ -425,12 +429,14 @@ class TestRealImageDataRefs(unittest.TestCase):
         otherwise produce a plausible-looking slot that contains something
         else entirely.
         """
+        from pydbg.analysis import RefKind
+
         image = self.result.image
         slot_size = image.slot_size
         checked = 0
         for target, found in self.result.xrefs.items():
             for ref in found:
-                if ref.kind != 5:
+                if ref.kind is not RefKind.DATA:
                     continue
                 raw = image.read_rva(ref.source, slot_size)
                 self.assertIsNotNone(raw, f"slot {ref.source:#x} unreadable")

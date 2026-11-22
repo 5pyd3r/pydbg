@@ -6,26 +6,26 @@ address a *stable* name even when nothing names it, so that a name written by
 hand last week still resolves today and can be shared.
 
 Provenance is kept for every name. "This is called CreateFileW" means different
-things depending on whether a symbol table said so, an export table said so, or
-a person decided it, and merging the three into one string loses the only thing
-that tells a reader how much to trust it.
+things depending on whether an export table said so, an import slot said so, or
+a person decided it, and merging them into one string loses the only thing that
+tells a reader how much to trust it.
 """
 
 from dataclasses import dataclass
 
 # Where a name came from, most to least authoritative. Kept as strings rather
 # than an enum so a workspace file stays readable and forward-compatible.
+# Only sources this package actually produces are declared: "symbol" (dbghelp)
+# and "derived" (structure recovery) had no producer, so a name carrying them
+# could not exist and a precedence entry for them was dead ordering.
 SOURCE_USER = "user"
-SOURCE_SYMBOL = "symbol"
 SOURCE_EXPORT = "export"
 SOURCE_IMPORT = "import"
-SOURCE_DERIVED = "derived"      # from a structure this analysis recovered
 SOURCE_AUTO = "auto"            # a made-up label: sub_401000
 
 # Ordering for conflict resolution: the first source that claims an address
 # wins, and a person always wins.
-_PRECEDENCE = (SOURCE_USER, SOURCE_SYMBOL, SOURCE_EXPORT, SOURCE_IMPORT,
-               SOURCE_DERIVED, SOURCE_AUTO)
+_PRECEDENCE = (SOURCE_USER, SOURCE_EXPORT, SOURCE_IMPORT, SOURCE_AUTO)
 
 
 @dataclass(frozen=True)

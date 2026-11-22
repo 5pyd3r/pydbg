@@ -150,7 +150,7 @@ class StaticAnalyzer:
         """Record that the image holds a pointer to 'target' at 'slot'."""
         if not self.config.collect_xrefs:
             return
-        self.xrefs.setdefault(target, []).append(Xref(slot, int(RefKind.DATA)))
+        self.xrefs.setdefault(target, []).append(Xref(slot, RefKind.DATA))
         self._xref_targets.add(target)
 
     def _xref_gaps(self, seeds):
@@ -211,7 +211,7 @@ class StaticAnalyzer:
                 rva=rva, is_call=bool(insn.is_call), text=insn.op_str)
             return None
 
-        self.xrefs.setdefault(target, []).append(Xref(rva, int(RefKind.BRANCH)))
+        self.xrefs.setdefault(target, []).append(Xref(rva, RefKind.BRANCH))
         self._xref_targets.add(target)
         self.stats.indirect_resolved += 1
         return target
@@ -367,7 +367,7 @@ class StaticAnalyzer:
         if not self.config.collect_xrefs:
             return
         for target, kind in classify_refs(insn, self.image):
-            self.xrefs.setdefault(target, []).append(Xref(rva, int(kind)))
+            self.xrefs.setdefault(target, []).append(Xref(rva, kind))
             self._xref_targets.add(target)
             if kind == RefKind.IMM and self.image.is_exec(target):
                 # An immediate landing in code is a candidate entry the call
@@ -514,7 +514,7 @@ class StaticAnalyzer:
         # relocation and data-pointer readers overlap, and the number worth
         # reporting is how many DATA entries the index actually carries.
         stats.data_refs = sum(1 for refs in xrefs.values() for ref in refs
-                              if ref.kind == int(RefKind.DATA))
+                              if ref.kind == RefKind.DATA)
         stats.overlap_bytes = self.decoder.overlap_bytes
         stats.overlap_conflicts = self.decoder.overlap_conflicts
         stats.indirect_unknown = len(self.indirect_sites)

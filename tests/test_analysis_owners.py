@@ -493,13 +493,10 @@ class TestReceiverOf(unittest.TestCase):
 class TestTheDeclaredKindsHaveProducers(unittest.TestCase):
     """A kind that is declared and never produced is a missing answer class."""
 
-    def test_owner_kinds_and_owned_set_agree(self):
-        """The duplicated constant in model.py cannot drift."""
-        from pydbg.analysis import OWNER_KINDS
-        from pydbg.analysis.functions import _OWNED
-        from pydbg.analysis.model import _OWNED_KINDS
-        self.assertEqual(set(_OWNED), set(_OWNED_KINDS))
-        self.assertTrue(_OWNED <= set(OWNER_KINDS))
+    def test_owned_kinds_are_the_function_owning_subset(self):
+        """One definition in model.py; this pins the relationship, not a copy."""
+        from pydbg.analysis import OWNER_KINDS, OWNED_KINDS
+        self.assertTrue(OWNED_KINDS <= set(OWNER_KINDS))
 
     def test_the_fixture_produces_every_owner_kind(self):
         result = analyze()

@@ -22,7 +22,7 @@ from dataclasses import dataclass
 from ..disasm.engine import ACC_READ, ACC_WRITE, OP_IMM, OP_MEM, OP_REG
 from .access import STACK_REGISTERS
 from .consts import address_without_registers
-from .model import OWNER_KINDS, _OWNED_KINDS
+from .model import OWNER_KINDS, OWNED_KINDS
 
 # What the decode has at one address. Three findings, kept apart because
 # folding them collapses the distinction the whole module is about: an address
@@ -170,7 +170,7 @@ class RegionOwnership:
         if self.truncated:
             return False
         return all(self.bytes_by_kind.get(kind, 0) == 0
-                   for kind in OWNER_KINDS if kind not in _OWNED_KINDS)
+                   for kind in OWNER_KINDS if kind not in OWNED_KINDS)
 
     def render(self):
         parts = [f"0x{self.start:X}..0x{self.end:X}: "
@@ -240,7 +240,7 @@ def function_of(result, rva):
     findings and `FunctionTable.owner_of` names which one it was.
     """
     owner, kind = result.functions.owner_of(rva)
-    return owner if kind in _OWNED_KINDS else None
+    return owner if kind in OWNED_KINDS else None
 
 
 def container_of(result, rva):
@@ -341,7 +341,7 @@ def receiver_of(result, rva, base_reg=None):
         base_reg = candidates[0]
 
     owner, owner_kind = result.functions.owner_of(rva)
-    if owner is None or owner_kind not in _OWNED_KINDS:
+    if owner is None or owner_kind not in OWNED_KINDS:
         return _unknown(rva, base_reg, "the site is not inside a recovered "
                                        f"function ({owner_kind})")
 
