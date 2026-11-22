@@ -41,12 +41,17 @@ from dataclasses import dataclass
 
 from ..analysis import analyze_process
 from ..analysis.cfg import cfg_of
+from ..constants import EXCEPTION_BREAKPOINT, STATUS_WX86_BREAKPOINT
 from ..core.status import ExitReason
 from ..exceptions import BreakpointError, ProcessError, PydbgError
 from .format import BLOCK, TraceEvent
 
 # GetExitCodeProcess answers this while the process is still running.
 _STILL_ACTIVE = 259
+
+# A breakpoint stop, including the WOW64 status code a 32-bit target under a
+# 64-bit debugger reports (same pair the debugger's own dispatch checks).
+_BREAKPOINT_CODES = frozenset((EXCEPTION_BREAKPOINT, STATUS_WX86_BREAKPOINT))
 
 # Why a run stopped. These are exported so callers compare against a name and
 # not a string literal that can drift. Two of them mean the trace is partial.
@@ -391,18 +396,30 @@ class BblTracer:
     def _on_event(self, event):
         """Record a BLOCK per breakpoint hit; stop the loop at the budget.
 
-        A hit is any EXCEPTION whose address is one of the planned block
-        starts. `Debugger.run()` has already restored the original instruction
-        and is about to single-step over it, so the event names a block that
-        really began executing. Returning False leaves the target paused, which
+        A hit needs two facts, not one: the exception is a breakpoint (native
+        or WOW64) *and* its address is a planned block start. An access
+        violation delivered at a block start is not evidence the block ran —
+        counting every exception by address would turn a fault into coverage.
+        `Debugger.run()` has already restored the original instruction and is
+        about to single-step over it, so a real breakpoint hit names a block
+        that began executing. Returning False leaves the target paused, which
         is the debugger's documented stop semantics.
+
+        The budget is checked before recording, so `max_events=0` records
+        nothing instead of one event that then trips the limit.
         """
         if event.type != 'EXCEPTION':
+            return None
+        if event.exception_code not in _BREAKPOINT_CODES:
             return None
 
         rva = self._addresses.get(event.exception_addr)
         if rva is None:
             return None
+
+        if self._events >= self.max_events:
+            self._reason = STOP_MAX_EVENTS
+            return False
 
         recorded = TraceEvent(kind=BLOCK, tid=event.tid, rva=rva,
                               ts=time.perf_counter_ns(),

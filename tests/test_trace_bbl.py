@@ -128,6 +128,14 @@ class _ScriptedDebugger(_RecordingDebugger):
         return ExitStatus(None, ExitReason.STOPPED_BY_CALLBACK)
 
 
+def _event(code, addr, tid=1):
+    """A debug event with just the fields the tracer's callback reads."""
+    from types import SimpleNamespace
+
+    return SimpleNamespace(type='EXCEPTION', exception_code=code,
+                           exception_addr=addr, tid=tid)
+
+
 @unittest.skipUnless(_has_cython, "optional dependency: Cython extension")
 class TestBblTracerPlanning(_LiveTestCase):
     """plan() decides what is traceable before a single byte is patched."""
@@ -367,6 +375,53 @@ class TestBblTracerCleanup(_LiveTestCase):
         self.assertNotIn("breakpoint left", warnings)
         self.assertEqual(len(calls), 1,
                          "cleanup kept trying to write to a dead target")
+
+
+@unittest.skipUnless(_has_cython, "optional dependency: Cython extension")
+class TestBblTracerEventHonesty(_LiveTestCase):
+    """Only a breakpoint at a planned start is evidence a block ran."""
+
+    def armed_scripted(self, max_events=100):
+        proxy = _ScriptedDebugger(self.dbg)
+        tracer = BblTracer(proxy, max_events=max_events)
+        self.assertGreater(tracer.plan(), 0)
+        self.assertGreater(tracer.arm(), 0)
+        return tracer, proxy
+
+    def test_an_access_violation_at_a_block_start_is_not_a_block(self):
+        """The address matching is not enough; the exception code must too."""
+        from pydbg.constants import (EXCEPTION_ACCESS_VIOLATION,
+                                     EXCEPTION_BREAKPOINT)
+
+        tracer, proxy = self.armed_scripted()
+        block = proxy.armed[0]
+        not_a_block = max(proxy.armed) + 0x10000
+        proxy.events = [
+            _event(EXCEPTION_ACCESS_VIOLATION, block),
+            _event(EXCEPTION_BREAKPOINT, not_a_block),
+            _event(EXCEPTION_BREAKPOINT, block),
+        ]
+
+        summary = tracer.run()
+
+        self.assertEqual(summary.events, 1,
+                         "only the breakpoint at a planned start counts")
+        self.assertEqual(summary.blocks, 1)
+
+    def test_a_zero_event_budget_records_nothing(self):
+        tracer = BblTracer(self.dbg, max_events=0)
+        self.assertGreater(tracer.plan(), 0)
+        self.assertGreater(tracer.arm(), 0)
+        self.resume_pending()
+
+        summary = tracer.run()
+
+        self.assertEqual(summary.events, 0,
+                         "the budget was checked after recording an event")
+        self.assertEqual(summary.blocks, 0)
+        self.assertEqual(summary.reason, STOP_MAX_EVENTS)
+        self.assertTrue(summary.truncated)
+        self.assertTrue(summary.single_step_pending)
 
 
 if __name__ == "__main__":
