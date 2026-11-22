@@ -76,6 +76,28 @@ class TestFilterEvents(unittest.TestCase):
             list(filter_events(events, rva_min=0x1010, rva_max=0x1030)),
             [events[1], events[2]])
 
+    def test_an_empty_trace_filters_to_nothing(self):
+        self.assertEqual(list(filter_events([])), [])
+
+    def test_a_filter_that_matches_nothing_is_empty_not_an_error(self):
+        events = mixed_events()
+        self.assertEqual(list(filter_events(events, kinds=[MARK], tid=2)), [])
+
+    def test_the_source_is_pulled_only_as_far_as_the_caller_reads(self):
+        """A trace can outgrow memory; filtering must not read it all first."""
+        events = mixed_events()
+        pulled = []
+
+        def source():
+            for event in events:
+                pulled.append(event)
+                yield event
+
+        filtered = filter_events(source(), kinds=[MARK])
+        self.assertEqual(pulled, [])
+        self.assertEqual(next(filtered), events[3])
+        self.assertEqual(pulled, events[:4])
+
 
 if __name__ == "__main__":
     unittest.main()
