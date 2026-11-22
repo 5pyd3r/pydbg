@@ -4,6 +4,7 @@ from .types import (
     IMAGE_SCN_MEM_EXECUTE, IMAGE_SCN_MEM_WRITE,
     DosHeader, FileHeader, OptionalHeader, DataDirectory,
     SectionHeader, ExportEntry, ImportEntry, DelayImport,
+    BoundImport, BoundImportForwarder,
     RelocationEntry, RelocationBlock, TLSDirectory, DebugEntry,
     CodeViewInfo, ExceptionEntry, RichHeader, RichHeaderEntry,
 )
@@ -110,6 +111,12 @@ class PE:
         """Delay-load import descriptors (data directory 13)."""
         return self._cached('delay_imports', lambda: self._parser.parse_delay_imports(
             self.optional_header.data_directories, self.image_base))
+
+    @property
+    def bound_imports(self):
+        """Bound-import descriptors (data directory 11)."""
+        return self._cached('bound_imports', lambda: self._parser.parse_bound_imports(
+            self.optional_header.data_directories))
 
     @property
     def relocations(self):
@@ -221,6 +228,7 @@ __all__ = [
     'PE',
     'DosHeader', 'FileHeader', 'OptionalHeader', 'DataDirectory',
     'SectionHeader', 'ExportEntry', 'ImportEntry', 'DelayImport',
+    'BoundImport', 'BoundImportForwarder',
     'IMAGE_SCN_MEM_EXECUTE', 'IMAGE_SCN_MEM_WRITE',
     'RelocationEntry', 'RelocationBlock', 'TLSDirectory', 'DebugEntry',
     'CodeViewInfo', 'ExceptionEntry', 'RichHeader', 'RichHeaderEntry',

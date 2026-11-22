@@ -5,6 +5,7 @@ import struct
 from .types import (
     DosHeader, FileHeader, OptionalHeader, DataDirectory,
     SectionHeader, ExportEntry, ImportEntry, DelayImport,
+    BoundImport, BoundImportForwarder,
     RelocationEntry, RelocationBlock, TLSDirectory, DebugEntry,
     CodeViewInfo, ExceptionEntry, RichHeader, RichHeaderEntry,
 )
@@ -20,6 +21,7 @@ DIR_SECURITY = 4
 DIR_BASERELOC = 5
 DIR_DEBUG = 6
 DIR_TLS = 9
+DIR_BOUND_IMPORT = 11
 DIR_DELAY_IMPORT = 13
 
 # IMAGE_DEBUG_TYPE_CODEVIEW: the one debug entry type that carries the PDB.
@@ -41,6 +43,12 @@ MAX_CODEVIEW_PAYLOAD = 0x1000
 # IMAGE_DELAYLOAD_DESCRIPTOR is 32 bytes and the table is NUL-terminated. The
 # cap is what keeps a lying SizeOfDirectory bounded.
 MAX_DELAY_IMPORTS = 4096
+
+# IMAGE_BOUND_IMPORT_DESCRIPTOR and IMAGE_BOUND_FORWARDER_REF are 8 bytes each;
+# the table is NUL-terminated. The forwarder count is a 16-bit field, so the
+# cap below is telemetry about a lie rather than the format's own limit.
+MAX_BOUND_IMPORTS = 4096
+MAX_BOUND_FORWARDERS = 4096
 
 
 def _format_guid(raw: bytes) -> str:
@@ -389,6 +397,64 @@ class PEParser:
                 int_rva=values[4], bound_iat_rva=values[5],
                 unload_iat_rva=values[6], timestamp=values[7]))
         return imports
+
+    def parse_bound_imports(self, data_dirs: dict) -> list:
+        """Bound-import descriptors (data directory 11).
+
+        Unlike every other directory here, the module names are offsets from
+        the directory start rather than RVAs, so they are added to the already
+        translated base. Each descriptor is followed by its forwarder refs; a
+        truncated ref keeps the descriptor but ends the walk, because the next
+        descriptor cannot be located without knowing where those refs ended.
+        """
+        entries = []
+        dd = data_dirs.get(DIR_BOUND_IMPORT)
+        if dd is None or dd.virtual_address == 0 or dd.size == 0:
+            return entries
+
+        offset = self._view.rva_to_source_offset(dd.virtual_address)
+        if offset is None:
+            return entries
+        end = offset + dd.size
+
+        cursor = offset
+        while cursor + 8 <= end and len(entries) < MAX_BOUND_IMPORTS:
+            raw = self._src.try_read(cursor, 8)
+            if raw is None:
+                break
+            timestamp, name_offset, num_forwarders = struct.unpack_from(
+                '<IHH', raw, 0)
+            if timestamp == 0 and name_offset == 0 and num_forwarders == 0:
+                break                       # all-zero descriptor terminates it
+
+            module_name = self._read_string_at_offset(offset + name_offset)
+            cursor += 8
+
+            forwarders = []
+            refs_to_read = min(num_forwarders, MAX_BOUND_FORWARDERS)
+            truncated = num_forwarders > refs_to_read
+            for _ in range(refs_to_read):
+                if cursor + 8 > end:
+                    truncated = True
+                    break
+                ref = self._src.try_read(cursor, 8)
+                if ref is None:
+                    truncated = True
+                    break
+                ref_timestamp, ref_name_offset, _reserved = struct.unpack_from(
+                    '<IHH', ref, 0)
+                forwarders.append(BoundImportForwarder(
+                    module_name=self._read_string_at_offset(
+                        offset + ref_name_offset),
+                    timestamp=ref_timestamp))
+                cursor += 8
+
+            entries.append(BoundImport(
+                module_name=module_name, timestamp=timestamp,
+                forwarders=forwarders))
+            if truncated:
+                break
+        return entries
 
     # ── data directories 3, 5, 6, 9 and the Rich header ────────
     #

@@ -186,6 +186,28 @@ def build_delay_image(magic=0x20B, va_based=False, entries=1,
     return builder.build(), image_base
 
 
+def build_bound_image(declared_size=None):
+    """Bound-import directory: two modules, one of them with a forwarder.
+
+    Module names are offsets relative to the directory start, not RVAs, so the
+    strings live at 0x40/0x50/0x60 past the descriptor table and are reused by
+    no other fixture.
+    """
+    builder, _ = _base_image()
+    rdata = bytearray(0x400)
+    _place(rdata, RVA_RDATA, struct.pack("<IHH", 0x11111111, 0x40, 1))
+    _place(rdata, RVA_RDATA + 8, struct.pack("<IHH", 0x22222222, 0x50, 0))
+    _place(rdata, RVA_RDATA + 16, struct.pack("<IHH", 0x33333333, 0x60, 0))
+    _place(rdata, RVA_RDATA + 24, b"\x00" * 8)          # terminator
+    _place(rdata, RVA_RDATA + 0x40, b"user32.dll\x00")
+    _place(rdata, RVA_RDATA + 0x50, b"kernel32.dll\x00")
+    _place(rdata, RVA_RDATA + 0x60, b"advapi32.dll\x00")
+    builder.add_section(".rdata", bytes(rdata), RVA_RDATA, 0x40000040)
+    size = 32 if declared_size is None else declared_size
+    builder.add_dir(11, RVA_RDATA, size)
+    return builder.build()
+
+
 def build_rich_image(key=0x12345678, pairs=((0x0101, 5), (0x0202, 3))):
     builder, _ = _base_image()
     blob = struct.pack("<I", 0x536E6144 ^ key)          # "DanS", encoded
@@ -535,6 +557,61 @@ class TestDelayImports(unittest.TestCase):
         data = bytearray(data)
         struct.pack_into("<8I", data, RVA_RDATA, *([0] * 8))
         self.assertEqual(PE(bytes(data)).delay_imports, [])
+
+
+class TestBoundImports(unittest.TestCase):
+    """Data directory 11 — IMAGE_BOUND_IMPORT_DESCRIPTOR.
+
+    A descriptor is followed by its forwarder refs, and every module name is an
+    offset from the directory start rather than an RVA. Both rules are why this
+    is not the import directory with a different struct.
+    """
+
+    def test_descriptor_and_forwarder_fields(self):
+        from pydbg.pe import PE
+
+        entries = PE(build_bound_image()).bound_imports
+        self.assertEqual(len(entries), 2)
+        first = entries[0]
+        self.assertEqual(first.module_name, "user32.dll")
+        self.assertEqual(first.timestamp, 0x11111111)
+        self.assertEqual(len(first.forwarders), 1)
+        forwarder = first.forwarders[0]
+        self.assertEqual(forwarder.module_name, "kernel32.dll")
+        self.assertEqual(forwarder.timestamp, 0x22222222)
+
+    def test_second_descriptor_follows_the_forwarder_refs(self):
+        """The forwarder refs are part of the descriptor, not a side table."""
+        from pydbg.pe import PE
+
+        entries = PE(build_bound_image()).bound_imports
+        self.assertEqual(entries[1].module_name, "advapi32.dll")
+        self.assertEqual(entries[1].timestamp, 0x33333333)
+        self.assertEqual(entries[1].forwarders, [])
+
+    def test_truncated_descriptor_returns_the_parsed_entries(self):
+        """A size that stops part-way through the second descriptor."""
+        from pydbg.pe import PE
+
+        entries = PE(build_bound_image(declared_size=20)).bound_imports
+        self.assertEqual([entry.module_name for entry in entries],
+                         ["user32.dll"])
+        self.assertEqual(len(entries[0].forwarders), 1)
+
+    def test_truncated_forwarder_table_keeps_the_descriptor(self):
+        """The descriptor itself was whole, so it survives with no forwarders."""
+        from pydbg.pe import PE
+
+        entries = PE(build_bound_image(declared_size=12)).bound_imports
+        self.assertEqual([entry.module_name for entry in entries],
+                         ["user32.dll"])
+        self.assertEqual(entries[0].forwarders, [])
+
+    def test_absent_directory_is_empty(self):
+        from pydbg.pe import PE
+
+        builder, _ = _base_image()
+        self.assertEqual(PE(builder.build()).bound_imports, [])
 
 
 def build_broken_rich_image(blob):

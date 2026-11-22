@@ -121,6 +121,29 @@ class DelayImport:
 
 
 @dataclass
+class BoundImportForwarder:
+    """One IMAGE_BOUND_FORWARDER_REF: a forwarded-to module and its stamp."""
+
+    module_name: str
+    timestamp: int
+
+
+@dataclass
+class BoundImport:
+    """One IMAGE_BOUND_IMPORT_DESCRIPTOR (data directory 11).
+
+    'module_name' and every forwarder's name are offsets relative to the
+    directory start, not RVAs — the reason this is not the import directory
+    with a different struct. The timestamp is the bound module's
+    TimeDateStamp, which is the identity a binder matches on.
+    """
+
+    module_name: str
+    timestamp: int
+    forwarders: list      # list[BoundImportForwarder]
+
+
+@dataclass
 class RelocationEntry:
     """One IMAGE_REL_BASED_* fixup within a relocation block."""
 
