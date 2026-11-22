@@ -12,6 +12,7 @@ import struct
 import tempfile
 import unittest
 
+from pydbg.analysis import names, report
 from tests.pe_builder import PEBuilder
 
 TEXT_RVA = 0x1000
@@ -91,13 +92,13 @@ class TestAutomaticNames(unittest.TestCase):
         from tests.test_pe import build_pe_with_exports
 
         result = analyze_bytes(build_pe_with_exports())
-        table = result.names()
+        table = names.resolve_for(result)
         self.assertEqual(table.name_of(0x1000), "MyExport")
         self.assertEqual(table.get(0x1000).source, "export")
 
     def test_unnamed_function_starts_get_a_made_up_label(self):
         result = analyze()
-        table = result.names()
+        table = names.resolve_for(result)
         self.assertEqual(table.name_of(TEXT_RVA), f"sub_{TEXT_RVA:06x}")
         self.assertEqual(table.get(TEXT_RVA).source, "auto")
 
@@ -225,9 +226,10 @@ class TestWorkspace(unittest.TestCase):
         workspace.name(TEXT_RVA, "WinMain")
 
         result = analyze_file(self.image_path)
-        self.assertEqual(result.names().label(TEXT_RVA), f"sub_{TEXT_RVA:06x}")
+        self.assertEqual(names.resolve_for(result).label(TEXT_RVA),
+                         f"sub_{TEXT_RVA:06x}")
 
-        table = result.names(workspace)
+        table = names.resolve_for(result, workspace)
         self.assertEqual(table.label(TEXT_RVA), "WinMain")
         self.assertEqual(table.get(TEXT_RVA).source, "user")
 
@@ -236,13 +238,13 @@ class TestRendering(unittest.TestCase):
 
     def test_the_names_report_shows_provenance(self):
         result = analyze()
-        text = result.render_names(limit=5)
+        text = report.render_names(result, limit=5)
         self.assertIn("source", text)
         self.assertIn("auto", text)
 
     def test_the_function_listing_shows_names(self):
         result = analyze()
-        text = result.render_functions(limit=3)
+        text = report.render_functions(result, limit=3)
         self.assertIn("name", text)
         self.assertIn("sub_001000", text)
 
@@ -252,7 +254,9 @@ class TestRendering(unittest.TestCase):
         workspace = Workspace()
         workspace.name(TEXT_RVA, "WinMain")
         workspace.comment(TEXT_RVA, "starts here")
-        text = result.render_listing(TEXT_RVA, 8, workspace=workspace)
+        text = report.render_listing(result.image, TEXT_RVA, 8,
+                                     names=names.resolve_for(result, workspace),
+                                     comments=workspace.comments)
         self.assertIn("WinMain", text)
         self.assertIn("starts here", text)
 

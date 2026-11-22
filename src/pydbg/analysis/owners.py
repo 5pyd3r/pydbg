@@ -232,6 +232,40 @@ def classify_range(result, start, end, limit=100_000):
     )
 
 
+def function_of(result, rva):
+    """The function owning 'rva', or None.
+
+    Bounded, unlike `FunctionTable.containing`. An address past everything the
+    analysis claimed, before its first start, or outside the image is not
+    attributed to the nearest function by accident: those three are different
+    findings and `FunctionTable.owner_of` names which one it was.
+    """
+    owner, kind = result.functions.owner_of(rva)
+    return owner if kind in _OWNED_KINDS else None
+
+
+def container_of(result, rva):
+    """(SlotTable, index) for the table covering 'rva', or None.
+
+    Answers "which table is this byte in" for an address that lives inside a
+    run of slots rather than inside a function. None means no table covers the
+    address at all.
+
+    'index' is the slot number when the address is slot-aligned and **None when
+    it is not** — a byte partway into a pointer is inside the run but is not an
+    entry, and rounding it to the enclosing index would report it as a case.
+    The two facts are therefore kept separate rather than the whole answer
+    being withheld: the byte the feature exists for is exactly the unaligned
+    one. In a table embedded in .text, a pseudo-instruction decoded out of the
+    table's own bytes starts mid-slot, so refusing to name the table for it
+    refuses for the only caller that has one.
+    """
+    for table in result.slot_tables:
+        if table.covers(rva):
+            return (table, table.index_of(rva))
+    return None
+
+
 @dataclass(frozen=True, slots=True)
 class ReceiverNote:
     """Where the base register of one access came from.

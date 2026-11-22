@@ -31,7 +31,7 @@ def _parse_int(text):
 
 def cmd_stats(args):
     result = analyze_file(args.image)
-    print(result.render_summary())
+    print(report.render_summary(result))
     return 0
 
 
@@ -48,13 +48,13 @@ def cmd_seeds(args):
 
 def cmd_funcs(args):
     result = analyze_file(args.image)
-    print(result.render_functions(limit=args.limit))
+    print(report.render_functions(result, limit=args.limit))
     return 0
 
 
 def cmd_xref(args):
     result = analyze_file(args.image)
-    print(result.render_xrefs(target=args.target, limit=args.limit))
+    print(report.render_xrefs(result, target=args.target, limit=args.limit))
     return 0
 
 
@@ -82,14 +82,14 @@ def cmd_callers(args):
 def cmd_gaps(args):
     """What the reference index is known to be missing."""
     result = analyze_file(args.image)
-    print(result.render_xref_gaps())
+    print(report.render_xref_gaps(result))
     return 0
 
 
 def cmd_indirect(args):
     """Branches with no resolved target — the call graph's blind spots."""
     result = analyze_file(args.image)
-    print(result.render_indirect_sites(limit=args.limit,
+    print(report.render_indirect_sites(result, limit=args.limit,
                                        calls_only=not args.all))
     return 0
 
@@ -111,7 +111,7 @@ def _load_workspace(image, path, create=False):
 def cmd_names(args):
     result = analyze_file(args.image)
     workspace = _load_workspace(args.image, args.workspace)
-    print(result.render_names(workspace=workspace, limit=args.limit,
+    print(report.render_names(result, workspace=workspace, limit=args.limit,
                               source=args.source))
     return 0
 
@@ -139,7 +139,7 @@ def cmd_structures(args):
     """Base-register access profiles — the raw material for struct layouts."""
     result = analyze_file(args.image)
     workspace = _load_workspace(args.image, args.workspace)
-    print(result.render_structures(workspace=workspace, limit=args.limit,
+    print(report.render_structures(result, workspace=workspace, limit=args.limit,
                                    function=args.function,
                                    min_offsets=args.min_offsets))
     return 0
@@ -147,14 +147,17 @@ def cmd_structures(args):
 
 def cmd_attribution(args):
     """Why the coverage and overlap numbers are what they are."""
+    from pydbg.analysis import attribute_coverage
     result = analyze_file(args.image)
-    print(result.render_attribution(limit=args.limit))
+    print(report.render_attribution(attribute_coverage(result),
+                                    limit=args.limit))
     return 0
 
 
 def cmd_cfg(args):
+    from pydbg.analysis import cfg_of
     result = analyze_file(args.image)
-    cfg = result.cfg_of(args.at)
+    cfg = cfg_of(result, args.at)
     if cfg is None:
         print(f"{args.at:#x} is not inside any recovered function")
         return 1
@@ -163,9 +166,9 @@ def cmd_cfg(args):
 
 
 def cmd_dot(args):
-    from pydbg.analysis import cfg_to_dot
+    from pydbg.analysis import cfg_of, cfg_to_dot
     result = analyze_file(args.image)
-    cfg = result.cfg_of(args.at)
+    cfg = cfg_of(result, args.at)
     if cfg is None:
         print(f"{args.at:#x} is not inside any recovered function")
         return 1
@@ -175,7 +178,7 @@ def cmd_dot(args):
 
 def cmd_list(args):
     result = analyze_file(args.image)
-    print(result.render_listing(args.at, args.size))
+    print(report.render_listing(result.image, args.at, args.size))
     return 0
 
 
@@ -187,7 +190,8 @@ def cmd_owners(args):
         print(f"{args.at:#x}: owned by nothing ({kind})")
     else:
         print(f"{args.at:#x}: {kind} of the function at {owner:#x}")
-    container = result.container_of(args.at)
+    from pydbg.analysis import container_of
+    container = container_of(result, args.at)
     if container is not None:
         table, index = container
         where = "entry %d" % index if index is not None else "not slot-aligned"
@@ -198,8 +202,9 @@ def cmd_owners(args):
 
 def cmd_boundary(args):
     """Whether an address starts an instruction, sits inside one, or neither."""
+    from pydbg.analysis import boundary_of
     result = analyze_file(args.image)
-    print(result.boundary_of(args.at).render())
+    print(boundary_of(result, args.at).render())
     return 0
 
 
@@ -234,11 +239,12 @@ def cmd_tables(args):
 
 def cmd_values(args):
     """What a fixed memory address can hold, and the evidence for saying so."""
+    from pydbg.analysis import narrow_by_guards, value_set_of
     result = analyze_file(args.image)
     if args.guarded:
-        value = result.narrow_value_set(args.at)
+        value = narrow_by_guards(result, args.at)
     else:
-        value = result.value_set_of(args.at)
+        value = value_set_of(result, args.at)
     print(value.render())
     return 0
 

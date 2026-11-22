@@ -158,6 +158,22 @@ def build_function_cfg(decoder, image, functions, entry, max_blocks=4096):
     return cfg
 
 
+def cfg_of(result, rva, max_blocks=4096):
+    """The CFG of the function containing 'rva', or None if there is none.
+
+    "Containing" is `FunctionTable.containing`: the nearest start at or before
+    'rva', unbounded by that function's extent. That is what this query has
+    always meant — it is how a listing labels the function it is inside — and
+    `owners.function_of` is the bounded question for a caller that needs to
+    tell "inside a function" from "past everything the analysis claimed".
+    """
+    entry = result.functions.containing(rva)
+    if entry is None:
+        return None
+    return build_function_cfg(result.decoder, result.image, result.functions,
+                              entry, max_blocks=max_blocks)
+
+
 def cfg_to_dot(cfg, name=None):
     """Render a CFG as Graphviz source.
 

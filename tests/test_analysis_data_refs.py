@@ -25,6 +25,7 @@ import os
 import struct
 import unittest
 
+from pydbg.analysis import refs, report
 from tests.pe_builder import PEBuilder
 
 IMAGE_BASE = 0x400000
@@ -207,7 +208,7 @@ class TestDataSectionPointers(unittest.TestCase):
         self.assertEqual(result.callers_of(0x1010), ())
         self.assertEqual(result.data_refs_of(0x1010), ())
         self.assertEqual(result.ref_kinds_of(0x1010), ())
-        self.assertIn(RefKind.DATA, result.ref_kinds(),
+        self.assertIn(RefKind.DATA, refs.ref_kinds(result),
                       "the class was produced; this address is just not in it")
 
     def test_the_pointer_slot_is_the_one_holding_the_value(self):
@@ -222,7 +223,7 @@ class TestDataSectionPointers(unittest.TestCase):
     def test_the_stat_counts_the_index_not_the_reads(self):
         """Two readers can name one slot; the index holds it once."""
         result = self.analyze(_pointer_image()[0])
-        counted = sum(1 for refs in result.xrefs.values() for ref in refs
+        counted = sum(1 for found in result.xrefs.values() for ref in found
                       if ref.kind == 5)
 
         self.assertEqual(result.stats.data_refs, counted)
@@ -270,7 +271,7 @@ class TestEveryRefKindHasAProducer(unittest.TestCase):
 
         result = analyze_bytes(self.build_all_kinds())
 
-        self.assertEqual(set(result.ref_kinds()), set(RefKind),
+        self.assertEqual(set(refs.ref_kinds(result)), set(RefKind),
                          "a kind in the enum that no run produces is a class "
                          "of reference missing from every answer")
         self.assertIn(RefKind.IMM, result.ref_kinds_of(DATA_RVA))
@@ -297,7 +298,7 @@ class TestXrefGaps(unittest.TestCase):
         result = self.analyze(_pointer_image()[0])
 
         self.assertEqual(result.xref_gaps, ())
-        self.assertTrue(result.xrefs_are_complete())
+        self.assertTrue(refs.xrefs_are_complete(result))
 
     def test_a_seed_class_that_was_not_run_is_named(self):
         """Turning a class off must not read as the binary having none.
@@ -311,7 +312,7 @@ class TestXrefGaps(unittest.TestCase):
 
         self.assertEqual(result.callers_of(0x1020), (),
                          "the class really was not run")
-        self.assertFalse(result.xrefs_are_complete())
+        self.assertFalse(refs.xrefs_are_complete(result))
         self.assertTrue(any("data_pointers" in gap for gap in result.xref_gaps))
         self.assertTrue(any("relocation_pointers" in gap
                             for gap in result.xref_gaps))
@@ -320,7 +321,7 @@ class TestXrefGaps(unittest.TestCase):
         result = self.analyze(_pointer_image()[0], collect_xrefs=False)
 
         self.assertEqual(result.xrefs, {})
-        self.assertFalse(result.xrefs_are_complete())
+        self.assertFalse(refs.xrefs_are_complete(result))
         self.assertTrue(any("collect_xrefs" in gap
                             for gap in result.xref_gaps))
 
@@ -329,7 +330,7 @@ class TestXrefGaps(unittest.TestCase):
         result = self.analyze(_pointer_image()[0], max_total_instructions=2)
 
         self.assertTrue(result.stats.budget_exhausted)
-        self.assertFalse(result.xrefs_are_complete())
+        self.assertFalse(refs.xrefs_are_complete(result))
         self.assertTrue(any("ceiling" in gap for gap in result.xref_gaps))
 
     def test_a_data_pointer_ceiling_is_a_gap(self):
@@ -354,10 +355,10 @@ class TestXrefGaps(unittest.TestCase):
                                seed_classes=("entry_point",))
         whole = self.analyze(_pointer_image()[0])
 
-        self.assertIn("data_pointers", partial.render_xref_gaps())
-        self.assertIn("classes not collected", partial.render_summary())
-        self.assertNotIn("classes not collected", whole.render_summary())
-        self.assertIn("complete", whole.render_xref_gaps())
+        self.assertIn("data_pointers", report.render_xref_gaps(partial))
+        self.assertIn("classes not collected", report.render_summary(partial))
+        self.assertNotIn("classes not collected", report.render_summary(whole))
+        self.assertIn("complete", report.render_xref_gaps(whole))
 
 
 class TestReporting(unittest.TestCase):
@@ -369,14 +370,14 @@ class TestReporting(unittest.TestCase):
 
     def test_the_summary_counts_the_data_references(self):
         result = self.analyze(_pointer_image()[0])
-        summary = result.render_summary()
+        summary = report.render_summary(result)
 
         self.assertIn("from data slots", summary)
         self.assertIn("data", summary.split("reference kinds")[1].split("\n")[0])
 
     def test_xrefs_are_grouped_under_their_kind(self):
         result = self.analyze(_pointer_image()[0])
-        text = result.render_xrefs(target=0x1020)
+        text = report.render_xrefs(result, target=0x1020)
 
         self.assertIn("data", text)
         self.assertIn(f"{DATA_RVA:#x}", text)
@@ -385,7 +386,7 @@ class TestReporting(unittest.TestCase):
     def test_a_complete_index_says_so_rather_than_nothing(self):
         result = self.analyze(_pointer_image()[0])
 
-        self.assertIn("complete", result.render_xref_gaps())
+        self.assertIn("complete", report.render_xref_gaps(result))
 
 
 class TestRealImageDataRefs(unittest.TestCase):
@@ -411,7 +412,7 @@ class TestRealImageDataRefs(unittest.TestCase):
         matter, which is the failure mode the seed classes were fixed for.
         """
         self.assertGreater(self.result.stats.data_refs, 0)
-        self.assertIn(5, [int(kind) for kind in self.result.ref_kinds()])
+        self.assertIn(5, [int(kind) for kind in refs.ref_kinds(self.result)])
 
     def test_a_real_image_has_no_xref_gaps(self):
         self.assertEqual(self.result.xref_gaps, ())
@@ -427,8 +428,8 @@ class TestRealImageDataRefs(unittest.TestCase):
         image = self.result.image
         slot_size = image.slot_size
         checked = 0
-        for target, refs in self.result.xrefs.items():
-            for ref in refs:
+        for target, found in self.result.xrefs.items():
+            for ref in found:
                 if ref.kind != 5:
                     continue
                 raw = image.read_rva(ref.source, slot_size)

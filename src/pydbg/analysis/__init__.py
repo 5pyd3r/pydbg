@@ -27,7 +27,9 @@ from .attribution import (
     CoverageAttribution, UncoveredBreakdown, attribute_coverage, deltas,
     span_summary,
 )
-from .cfg import CFGBlock, FunctionCFG, build_function_cfg, cfg_to_dot
+from .cfg import (
+    CFGBlock, FunctionCFG, build_function_cfg, cfg_of, cfg_to_dot,
+)
 from .consts import ConstantTracker
 from .engine import (
     StaticAnalyzer, analyze_bytes, analyze_file, analyze_pe, analyze_process,
@@ -40,13 +42,16 @@ from .model import (
 )
 from .owners import (
     DETERMINED_FACTS, BOUNDARY_KINDS, RECEIVER_FACTS, Boundary,
-    ReceiverNote, RegionOwnership, boundary_of, classify_range,
-    memory_base_registers, receiver_of,
+    ReceiverNote, RegionOwnership, boundary_of, classify_range, container_of,
+    function_of, memory_base_registers, receiver_of,
 )
-from .names import Name, NameTable, auto_names, import_names
+from .names import Name, NameTable, auto_names, import_names, resolve_for
 from .workspace import Workspace, WorkspaceError, image_fingerprint
 from .process_source import ProcessSource
-from .refs import branch_target, classify_refs, is_indirect_branch, memory_address
+from .refs import (
+    branch_target, call_graph_is_complete, classify_refs, indirect_call_sites,
+    is_indirect_branch, memory_address, ref_kinds, xrefs_are_complete,
+)
 from .scan import (
     LinearScan, Resync, Undecodable, linear_scan, scan_executable, scan_section,
 )
@@ -63,20 +68,22 @@ __all__ = [
     'FunctionTable', 'SeedProvider', 'SeedSet', 'looks_like_entry',
     'AnalysisResult', 'AnalysisStats', 'CoverageReport', 'Function',
     'IndirectSite', 'RefKind', 'SeedConfig', 'Xref',
-    'FunctionCFG', 'CFGBlock', 'build_function_cfg', 'cfg_to_dot',
+    'FunctionCFG', 'CFGBlock', 'build_function_cfg', 'cfg_of', 'cfg_to_dot',
     'ConstantTracker',
     'CoverageAttribution', 'UncoveredBreakdown', 'attribute_coverage',
     'deltas', 'span_summary',
-    'Name', 'NameTable', 'auto_names', 'import_names',
+    'Name', 'NameTable', 'auto_names', 'import_names', 'resolve_for',
     'Access', 'FieldUse', 'StructureProfile', 'collect_accesses',
     'profiles', 'STACK_REGISTERS',
     'Workspace', 'WorkspaceError', 'image_fingerprint',
     'branch_target', 'classify_refs', 'is_indirect_branch', 'memory_address',
+    'call_graph_is_complete', 'indirect_call_sites', 'ref_kinds',
+    'xrefs_are_complete',
     'LinearScan', 'Resync', 'Undecodable', 'linear_scan', 'scan_executable',
     'scan_section',
     'SlotTable', 'OWNER_KINDS',
     'Boundary', 'BOUNDARY_KINDS', 'boundary_of',
-    'RegionOwnership', 'classify_range',
+    'RegionOwnership', 'classify_range', 'container_of', 'function_of',
     'ReceiverNote', 'RECEIVER_FACTS', 'DETERMINED_FACTS', 'receiver_of',
     'memory_base_registers',
     'Bound', 'ValueSet', 'DECIDED', 'UNDECIDED', 'writes_to', 'value_set_of',

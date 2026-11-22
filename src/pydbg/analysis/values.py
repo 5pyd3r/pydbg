@@ -38,7 +38,7 @@ from enum import IntEnum
 
 from ..disasm.engine import ACC_WRITE, OP_IMM, OP_MEM, OP_REG
 from .consts import MOV_LIKE
-from .refs import memory_address
+from .refs import indirect_call_sites, memory_address
 
 
 class Bound(IntEnum):
@@ -302,7 +302,7 @@ def writes_to(result, address, include_unresolved_calls=True):
             found.append((rva, value))
 
     if include_unresolved_calls:
-        for site in result.indirect_call_sites():
+        for site in indirect_call_sites(result):
             found.append((site.rva, ValueSet.of_unmodeled(
                 [(site.rva, "call through an unresolved target could write "
                             "this address")])))

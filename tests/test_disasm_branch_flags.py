@@ -175,8 +175,9 @@ class TestTheConsequences(unittest.TestCase):
         code = b"\x90" + b"\xe2\xfd" + b"\xc3"
         result = self.analyze(code)
 
-        self.assertTrue(result.call_graph_is_complete())
-        self.assertEqual([s.rva for s in result.indirect_call_sites()], [])
+        from pydbg.analysis import refs
+        self.assertTrue(refs.call_graph_is_complete(result))
+        self.assertEqual([s.rva for s in refs.indirect_call_sites(result)], [])
 
     def test_a_sweep_stops_at_iret(self):
         """Without is_ret the sweep decodes straight past the handler.

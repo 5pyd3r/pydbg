@@ -1,7 +1,23 @@
-"""Value types for static analysis."""
+"""Value types for static analysis.
+
+This is the leaf of the package: it imports nothing from a sibling module, at
+module level or inside a function. A result record has no business asking the
+decoder, the function table or a renderer anything — those answers are free
+functions in the module that owns them, taking the result as an argument. The
+one exception is the four per-address lookups on `AnalysisResult`, which read
+its own reference index and nothing else.
+"""
+
+from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import IntEnum
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:               # annotations only; this must stay a leaf
+    from .decoder import InstructionDecoder
+    from .functions import FunctionTable
+    from .image import AnalyzedImage
 
 
 class RefKind(IntEnum):
@@ -234,40 +250,50 @@ class SeedConfig:
 
 @dataclass
 class AnalysisResult:
-    """Everything a run produced."""
+    """Everything a run produced.
 
-    image: object                # AnalyzedImage
-    functions: object            # FunctionTable
-    xrefs: dict = field(default_factory=dict)   # target_rva -> tuple[Xref, ...]
+    A record plus the four lookups over its own reference index. Every other
+    question — ownership, names, accesses, a CFG, a text report — is a free
+    function in the module that owns the answer, taking this result as an
+    argument: `owners.function_of(result, rva)`, `scan.linear_scan(
+    result.decoder, ...)`, `report.render_summary(result)`. Putting those on
+    the record is what made model.py import eight sibling modules through
+    method bodies while pretending to be the bottom layer.
+    """
+
+    image: AnalyzedImage
+    functions: FunctionTable
+    xrefs: dict[int, tuple[Xref, ...]] = field(default_factory=dict)
     stats: AnalysisStats = field(default_factory=AnalysisStats)
-    coverage: dict = field(default_factory=dict)  # section name -> CoverageReport
-    undecodable: tuple = ()      # RVAs a branch targeted that would not decode
+    coverage: dict[str, CoverageReport] = field(default_factory=dict)
+    # RVAs a branch targeted that would not decode.
+    undecodable: tuple[int, ...] = ()
     # Branches with no resolved target. Present so that "no callers" can be
     # told apart from "no callers we could see".
-    indirect_sites: tuple = ()
+    indirect_sites: tuple[IndirectSite, ...] = ()
     # Reasons this run's index may be missing *classes* of reference rather
     # than individual sites, as readable strings. Empty when nothing is known
     # to be missing. Present for the same reason indirect_sites is: an answer
     # of "nothing references this" is only worth as much as the list of
     # reference classes the run actually collected, and without this that list
     # lives in the source rather than in the result.
-    xref_gaps: tuple = ()
+    xref_gaps: tuple[str, ...] = ()
     # Import thunk rva -> the IAT slot it jumps through. Names come from here.
-    import_thunks: dict = field(default_factory=dict)
+    import_thunks: dict[int, int] = field(default_factory=dict)
     # Base-relative memory accesses recorded during the sweep, as
     # (rva, reg id, offset, size, access flags, is branch). None when the run
-    # was configured not to collect them. Named 'records' because
-    # `accesses()` below turns them into Access objects.
-    access_records: tuple = None
+    # was configured not to collect them. `access.collect_accesses` turns them
+    # into Access objects.
+    access_records: tuple[tuple, ...] | None = None
     # Runs of indexed slots the sweep read, as SlotTable objects ascending by
     # base. Present so that an address which is a *value in a table* can be
     # told from one which is a *position in code* — the two are otherwise
     # indistinguishable once the bytes have been decoded.
-    slot_tables: tuple = ()
+    slot_tables: tuple[SlotTable, ...] = ()
     # Kept so a CFG can be built after the fact without re-decoding. The
     # decoder's bookkeeping is small (bytearrays, not Instruction objects), so
     # holding it costs little and re-running the analysis would cost a lot.
-    decoder: object = None
+    decoder: InstructionDecoder | None = None
 
     def callers_of(self, rva):
         """RVAs of everything that references 'rva', ascending.
@@ -281,7 +307,7 @@ class AnalysisResult:
         32-bit Delphi target it turned 11,310 addresses that had no reference
         of any kind into referenced ones.
 
-        Incomplete in two ways, and both are answerable. `indirect_call_sites`
+        Incomplete in two ways, and both are answerable. `refs.indirect_call_sites`
         lists the branches whose target was never resolved, and `xref_gaps`
         names the classes of reference this run did not collect at all.
         """
@@ -318,240 +344,3 @@ class AnalysisResult:
         return tuple(sorted({RefKind(ref.kind)
                              for ref in self.xrefs.get(rva, ())
                              if ref.kind in _ALL_KINDS}))
-
-    def ref_kinds(self):
-        """Every RefKind this run produced anywhere, ascending.
-
-        A kind that is declared in the enum and absent here has no producer,
-        which is how an entire class of reference goes missing while every
-        individual answer still looks right. Asserting this set is the shape
-        of "no declared kind is unproduced" — the check that would have caught
-        DATA being labelled in the reports and emitted by nothing.
-        """
-        return tuple(sorted({RefKind(ref.kind)
-                             for refs in self.xrefs.values() for ref in refs
-                             if ref.kind in _ALL_KINDS}))
-
-    def xrefs_are_complete(self):
-        """False when the index is known to be missing *classes* of reference.
-
-        The counterpart of `call_graph_is_complete`, one level up. That one is
-        about individual call sites this analysis could not resolve; this one
-        is about kinds of reference the run did not collect at all. Both are
-        needed, because a run can have every call site resolved and still be
-        blind to every pointer in the image.
-        """
-        return not self.xref_gaps
-
-    def indirect_call_sites(self):
-        """Branches left unresolved that could be calling something.
-
-        The honest footnote to `callers_of`: these are the places a call edge
-        could be hidden. A target reached only through one of them appears to
-        have no callers at all.
-        """
-        return tuple(site for site in self.indirect_sites if site.is_call)
-
-    def call_graph_is_complete(self):
-        """False when some call site has no resolved target."""
-        return not self.indirect_call_sites()
-
-    def function_of(self, rva):
-        """The function owning 'rva', or None.
-
-        Bounded, unlike `functions.containing`. An address past everything the
-        analysis claimed, before its first start, or outside the image is not
-        attributed to the nearest function by accident: those three are
-        different findings and `owner_of` names which one it was.
-        """
-        owner, kind = self.functions.owner_of(rva)
-        return owner if kind in _OWNED_KINDS else None
-
-    def owner_of(self, rva):
-        """(owner, kind) — see `FunctionTable.owner_of` for the kinds."""
-        return self.functions.owner_of(rva)
-
-    def container_of(self, rva):
-        """(SlotTable, index) for the table covering 'rva', or None.
-
-        Answers "which table is this byte in" for an address that lives inside
-        a run of slots rather than inside a function. None means no table
-        covers the address at all.
-
-        'index' is the slot number when the address is slot-aligned and **None
-        when it is not** — a byte partway into a pointer is inside the run but
-        is not an entry, and rounding it to the enclosing index would report it
-        as a case. The two facts are therefore kept separate rather than the
-        whole answer being withheld: the byte the feature exists for is exactly
-        the unaligned one. In a table embedded in .text, a pseudo-instruction
-        decoded out of the table's own bytes starts mid-slot, so refusing to
-        name the table for it refuses for the only caller that has one.
-        """
-        for table in self.slot_tables:
-            if table.covers(rva):
-                return (table, table.index_of(rva))
-        return None
-
-    def boundary_of(self, rva):
-        """A `Boundary` describing what the decode has at 'rva'."""
-        from .owners import boundary_of
-        return boundary_of(self, rva)
-
-    def classify_range(self, start, end, limit=100_000):
-        """Per-kind byte counts over [start, end) — the ownership denominator."""
-        from .owners import classify_range
-        return classify_range(self, start, end, limit=limit)
-
-    def receiver_of(self, rva, base_reg=None):
-        """Where the base register of the access at 'rva' came from."""
-        from .owners import receiver_of
-        return receiver_of(self, rva, base_reg=base_reg)
-
-    def value_set_of(self, rva, **kwargs):
-        """The `ValueSet` for the fixed memory address 'rva'.
-
-        Named the long way so it cannot be confused with `xrefs_of` or
-        `callers_of`, which answer about a *position in code*. This answers
-        about a memory location, which in a data section has no code at it at
-        all, and a name like `values_of` would read as though it did.
-        """
-        from .values import value_set_of
-        return value_set_of(self, rva, **kwargs)
-
-    def narrow_value_set(self, rva, **kwargs):
-        """`value_set_of` narrowed by the guards that constrain 'rva'."""
-        from .values import narrow_by_guards
-        return narrow_by_guards(self, rva, **kwargs)
-
-    def references_of(self, rva):
-        """Xrefs made *by* the instruction at 'rva'."""
-        return tuple(xref for refs in self.xrefs.values() for xref in refs
-                     if xref.source == rva)
-
-    # ── rendering (delegated to report.py) ─────────────────────
-
-    def render_summary(self):
-        from .report import render_summary
-        return render_summary(self)
-
-    def render_functions(self, limit=None):
-        from .report import render_functions
-        return render_functions(self, limit=limit)
-
-    def render_xrefs(self, target=None, limit=8):
-        from .report import render_xrefs
-        return render_xrefs(self, target=target, limit=limit)
-
-    def render_coverage(self):
-        from .report import render_coverage
-        return render_coverage(self)
-
-    def render_stats(self):
-        from .report import render_stats
-        return render_stats(self)
-
-    def render_listing(self, rva, size, workspace=None):
-        from .report import render_listing
-        table = self.names(workspace) if workspace is not None else None
-        comments = workspace.comments if workspace is not None else None
-        return render_listing(self.image, rva, size, names=table,
-                              comments=comments)
-
-    def render_indirect_sites(self, limit=40, calls_only=True):
-        from .report import render_indirect_sites
-        return render_indirect_sites(self, limit=limit, calls_only=calls_only)
-
-    def render_xref_gaps(self):
-        from .report import render_xref_gaps
-        return render_xref_gaps(self)
-
-    # ── names ──────────────────────────────────────────────────
-
-    def names(self, workspace=None):
-        """Recovered names, with any a person supplied on top.
-
-        Built on request: it walks the exports and every function start, which
-        is real work for an image with thousands of them, and a caller
-        interested only in coverage should not pay for it.
-        """
-        from .names import resolve
-        supplied = None
-        if workspace is not None:
-            supplied = {rva: name for rva, name in workspace.names.items()}
-        return resolve(self, supplied)
-
-    def label(self, rva, workspace=None):
-        """A stable name for 'rva', inventing one when nothing named it."""
-        return self.names(workspace).label(rva)
-
-    def render_names(self, workspace=None, limit=None, source=None):
-        from .report import render_names
-        return render_names(self, workspace=workspace, limit=limit,
-                            source=source)
-
-    def accesses(self, **kwargs):
-        """Every `[reg + disp]` access in the decoded code."""
-        from .access import collect_accesses
-        return collect_accesses(self, **kwargs)
-
-    def structures(self, min_offsets=None, accesses=None):
-        """(function, base register) -> StructureProfile, plausible ones only.
-
-        Keyed by register, not by class: which register holds an object is not
-        statically determinable, so the honest unit is "inside this function,
-        this register is used as a base at these offsets".
-        """
-        from .access import profiles
-        return profiles(self, accesses=accesses, min_offsets=min_offsets)
-
-    def render_structures(self, workspace=None, limit=None, function=None,
-                          min_offsets=None):
-        from .report import render_structures
-        return render_structures(self, workspace=workspace, limit=limit,
-                                 function=function, min_offsets=min_offsets)
-
-    def attribution(self, min_run=4):
-        """Break the coverage and overlap numbers down by cause.
-
-        Computed on request rather than during the run: it re-decodes the
-        uncovered regions to classify them, and most callers only want the
-        totals.
-        """
-        from .attribution import attribute_coverage
-        return attribute_coverage(self, min_run=min_run)
-
-    def render_attribution(self, limit=10):
-        from .report import render_attribution
-        return render_attribution(self.attribution(), limit=limit)
-
-    def scan(self, start, end, **kwargs):
-        """Decode [start, end) linearly, reporting the gaps it had to cross.
-
-        The answer to "what is in this range" for a caller who cannot assume
-        the range decodes cleanly. The sweep that produced this result follows
-        seeds and stops at whatever it cannot reach, so it is not a substitute:
-        its silence about a region means the region was never reached, not that
-        it was decoded and found empty.
-        """
-        from .scan import linear_scan
-        return linear_scan(self.decoder, start, end, **kwargs)
-
-    def scan_section(self, name, **kwargs):
-        """`scan` over one section, by name."""
-        from .scan import scan_section
-        return scan_section(self.image, self.decoder, name, **kwargs)
-
-    def scan_text(self, **kwargs):
-        """`scan` over every executable section."""
-        from .scan import scan_executable
-        return scan_executable(self.image, self.decoder, **kwargs)
-
-    def cfg_of(self, rva, max_blocks=4096):
-        """The CFG of the function containing 'rva', or None if there is none."""
-        from .cfg import build_function_cfg
-
-        entry = self.functions.containing(rva)
-        if entry is None:
-            return None
-        return build_function_cfg(self.decoder, self.image, self.functions,
-                                  entry, max_blocks=max_blocks)

@@ -11,6 +11,7 @@ what it reports.
 import struct
 import unittest
 
+from pydbg.analysis import access, report
 from tests.pe_builder import PEBuilder
 
 TEXT_RVA = 0x1000
@@ -40,7 +41,7 @@ def mov_eax_from(offset, base=3):
 class TestWhatIsRecorded(unittest.TestCase):
 
     def accesses(self, code):
-        return analyze(code).accesses()
+        return access.collect_accesses(analyze(code))
 
     def test_a_base_relative_read_is_recorded_with_its_offset_and_width(self):
         # mov eax, [ebx+0x18]  (8b 43 18)
@@ -73,7 +74,7 @@ class TestWhatIsRefused(unittest.TestCase):
     """The exclusions matter as much as the inclusions."""
 
     def accesses(self, code):
-        return analyze(code).accesses()
+        return access.collect_accesses(analyze(code))
 
     def test_stack_relative_accesses_are_not_structure_fields(self):
         """Every function has a frame; none of them is a structure.
@@ -123,7 +124,7 @@ class TestProfiles(unittest.TestCase):
         code = (b"\x8b\x43\x18" + b"\x8b\x4b\x1c" + b"\x8b\x53\x20"
                 + b"\xc3")
         result = analyze(code)
-        found = result.structures()
+        found = access.profiles(result)
         self.assertTrue(found)
         ((function, base), profile), = list(found.items())[:1]
         self.assertEqual(base, "ebx")
@@ -133,7 +134,7 @@ class TestProfiles(unittest.TestCase):
     def test_one_offset_is_not_a_structure(self):
         """A lone offset through a register is a global, not a layout."""
         result = analyze(b"\x8b\x43\x18" + b"\xc3")
-        self.assertEqual(result.structures(), {})
+        self.assertEqual(access.profiles(result), {})
 
     def test_a_field_that_is_called_through_is_a_function_pointer(self):
         """The one field kind this can identify outright.
@@ -144,7 +145,7 @@ class TestProfiles(unittest.TestCase):
         code = (b"\x8b\x43\x18" + b"\x8b\x4b\x1c" + b"\x8b\x53\x20"
                 + b"\xff\x53\x18" + b"\xc3")
         result = analyze(code)
-        found = result.structures()
+        found = access.profiles(result)
         self.assertTrue(found)
         profile = list(found.values())[0]
         self.assertTrue(profile.fields[0x18].called)
@@ -155,7 +156,7 @@ class TestProfiles(unittest.TestCase):
         # register clears the structural threshold at all.
         code = (b"\x8b\x43\x18" + b"\x8b\x43\x18" + b"\x89\x43\x18"
                 + b"\x8b\x4b\x1c" + b"\x8b\x53\x20" + b"\xc3")
-        profile = list(analyze(code).structures().values())[0]
+        profile = list(access.profiles(analyze(code)).values())[0]
         use = profile.fields[0x18]
         self.assertEqual(use.reads, 2)
         self.assertEqual(use.writes, 1)
@@ -163,7 +164,7 @@ class TestProfiles(unittest.TestCase):
     def test_the_report_names_the_function_and_the_register(self):
         code = (b"\x8b\x43\x18" + b"\x8b\x4b\x1c" + b"\x8b\x53\x20"
                 + b"\xc3")
-        text = analyze(code).render_structures()
+        text = report.render_structures(analyze(code))
         self.assertIn("base ebx", text)
         self.assertIn("+0x0018", text)
 
@@ -174,7 +175,7 @@ class TestProfiles(unittest.TestCase):
         result = analyze_bytes(build(code),
                                config=SeedConfig(collect_accesses=False))
         self.assertIsNone(result.access_records)
-        self.assertEqual(len(result.accesses()), 3)
+        self.assertEqual(len(access.collect_accesses(result)), 3)
 
     def test_the_replay_applies_the_same_image_base_rule_as_the_sweep(self):
         """Both paths must answer the same question the same way.
@@ -188,7 +189,7 @@ class TestProfiles(unittest.TestCase):
         code = b"\x8b\x83" + struct.pack("<I", IMAGE_BASE) + b"\xc3"
         result = analyze_bytes(build(code),
                                config=SeedConfig(collect_accesses=False))
-        self.assertEqual(result.accesses(), ())
+        self.assertEqual(access.collect_accesses(result), ())
 
 
 class TestRealImageTraces(unittest.TestCase):
@@ -222,18 +223,19 @@ class TestRealImageTraces(unittest.TestCase):
             "no records: collect_accesses defaulted off, or was removed")
 
     def test_traces_are_found_and_bounded(self):
-        found = self.result.accesses()
+        found = access.collect_accesses(self.result)
         self.assertGreater(len(found), 100)
         # No access may claim a displacement beyond the image base.
-        for access in found:
-            self.assertLess(abs(access.offset), self.result.image.image_base)
+        for record in found:
+            self.assertLess(abs(record.offset), self.result.image.image_base)
 
     def test_stack_registers_do_not_appear_as_bases(self):
-        bases = {access.base_reg for access in self.result.accesses()}
+        bases = {item.base_reg
+                 for item in access.collect_accesses(self.result)}
         self.assertFalse(bases & {"rsp", "rbp", "esp", "ebp"})
 
     def test_structural_profiles_are_produced(self):
-        profiles = self.result.structures()
+        profiles = access.profiles(self.result)
         self.assertGreater(len(profiles), 10)
         for (function, base), profile in profiles.items():
             self.assertNotIn(base, ("rsp", "rbp"))

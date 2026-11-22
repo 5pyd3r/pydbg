@@ -138,17 +138,18 @@ class TestCFGTruncation(unittest.TestCase):
     """F11 — 'truncated' did not say whether the cause was size or data."""
 
     def test_hitting_the_block_limit_says_so(self):
-        from pydbg.analysis import SeedConfig
+        from pydbg.analysis import SeedConfig, cfg as cfg_module
         # A chain of conditional branches produces many blocks.
         code = b"".join(b"\x75\x00" for _ in range(20)) + RET
         result = analyze(code, config=SeedConfig(max_instructions=1000))
-        cfg = result.cfg_of(TEXT_RVA, max_blocks=2)
+        cfg = cfg_module.cfg_of(result, TEXT_RVA, max_blocks=2)
         self.assertTrue(cfg.truncated)
         self.assertEqual(cfg.truncated_reason, "block_limit")
 
     def test_running_out_of_decoded_code_says_that_instead(self):
+        from pydbg.analysis import cfg as cfg_module
         result = analyze(b"\x90\x90\x90\x90")        # nops into nothing
-        cfg = result.cfg_of(TEXT_RVA)
+        cfg = cfg_module.cfg_of(result, TEXT_RVA)
         self.assertFalse(cfg.complete)
         self.assertEqual(cfg.truncated_reason, "undecoded")
 
