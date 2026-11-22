@@ -47,23 +47,16 @@ from ..core.status import ExitReason
 from ..exceptions import (
     BreakpointError, ProcessError, PydbgError, TimeoutError as PydbgTimeoutError,
 )
+from . import _shared
 from .bbl import (
-    STOP_IDLE_TIMEOUT, STOP_MAX_EVENTS, STOP_TARGET_EXITED, TRUNCATED_REASONS,
+    STOP_IDLE_TIMEOUT, STOP_MAX_EVENTS, STOP_NO_MODULE, STOP_NO_TARGET,
+    STOP_TARGET_EXITED, TRUNCATED_REASONS,
 )
 from .format import API, TraceEvent
-
-# GetExitCodeProcess answers this while the process is still running.
-_STILL_ACTIVE = 259
 
 # A single-step stop, including the WOW64 status code a 32-bit target under a
 # 64-bit debugger reports (the pair the debugger's own dispatch checks).
 _SINGLE_STEP_CODES = frozenset((EXCEPTION_SINGLE_STEP, STATUS_WX86_SINGLE_STEP))
-
-# Why a probe run stopped without a call budget or the target deciding it.
-# Exported beside the shared STOP_* names so a caller compares a name, not a
-# literal that can drift.
-STOP_NO_MODULE = "no module"
-STOP_NO_TARGET = "no target"
 
 # The x64 integer-argument registers, in ABI order. The x86 path reads stack
 # slots instead; both are limited to four because that is what Windows x64
@@ -194,7 +187,7 @@ class FunctionProbe:
         # completes it; the slot address must be restored on that event.
         self._step_pending = False
         # True when the run ended on an uncontinued debug event.
-        self._single_step_pending = False
+        self._uncontinued = False
 
     @property
     def hook_id(self):
@@ -234,22 +227,13 @@ class FunctionProbe:
                 f"cannot open thread {self._tid} to probe: {exc}")
 
         try:
-            for slot in range(4):
-                try:
-                    bp_id = self.dbg.set_hw_breakpoint(
-                        self.addr, "x", 1, slot, self._tid)
-                except BreakpointError as exc:
-                    if "already in use" not in str(exc):
-                        raise
-                    continue
-                self._slot = slot
-                self._h_thread = h_thread
-                self._bp_id = bp_id
-                return bp_id
-            raise BreakpointError("no free debug-register slot")
+            self._bp_id, self._slot = _shared.arm_free_slot(
+                self.dbg, self.addr, "x", 1, self._tid)
         except BaseException:
             self._close_thread(h_thread)
             raise
+        self._h_thread = h_thread
+        return self._bp_id
 
     def _close_thread(self, h_thread):
         """Close a thread handle, ignoring a failure to close a dead one."""
@@ -284,19 +268,12 @@ class FunctionProbe:
         try:
             self.dbg.remove_breakpoint(bp_id)
         except (BreakpointError, ProcessError):
-            if self._target_exited():
+            if _shared.target_exited(self.dbg):
                 return ("target exited during cleanup",)
             return ("breakpoint left",)
         finally:
             self._close_thread(h_thread)
         return ()
-
-    def _target_exited(self):
-        """Whether the target is gone, so its debug registers are gone too."""
-        try:
-            return self.dbg.get_exit_code() != _STILL_ACTIVE
-        except (PydbgError, OSError):
-            return True
 
     # ── running ────────────────────────────────────────────────
 
@@ -347,7 +324,8 @@ class FunctionProbe:
             reason=self._reason,
             elapsed_ns=time.perf_counter_ns() - started,
             warnings=tuple(self._warnings),
-            single_step_pending=self._single_step_pending,
+            single_step_pending=_shared.single_step_pending(
+                self.dbg, self._uncontinued),
         )
 
     def _reset(self):
@@ -360,19 +338,9 @@ class FunctionProbe:
         self._calls = []
         self._reason = None
         self._warnings = []
-        self._single_step_pending = False
+        self._uncontinued = False
 
     # ── module ─────────────────────────────────────────────────
-
-    def _find_module(self):
-        """The module to measure RVAs against, or None when there is none."""
-        if self.module is not None:
-            return self.module
-        try:
-            modules = self.dbg.enum_modules()
-        except (PydbgError, OSError, TypeError):
-            return None
-        return modules[0] if modules else None
 
     def _resolve_module(self):
         """(base, size) of the probed module, or None when either is unknown.
@@ -381,35 +349,19 @@ class FunctionProbe:
         honest answer is STOP_NO_MODULE rather than an RVA against a guessed
         window.
         """
-        module = self._find_module()
+        module = _shared.find_module(self.dbg, self.module)
         if module is None:
             return None
-        if isinstance(module, dict):
-            base = module.get('base_address') or 0
-            size = module.get('size')
-        else:
-            try:
-                base, size = module
-            except (TypeError, ValueError):
-                return None
-            base = base or 0
+        try:
+            base, size = _shared.module_region(module)
+        except (TypeError, ValueError):
+            return None
         if not base:
             return None
-        if not size:
-            size = self._mapped_size(base)
+        size = _shared.module_size(self.dbg, module) if not size else size
         if not size:
             return None
         return base, size
-
-    def _mapped_size(self, base):
-        """Size of the region mapped at 'base', or None when unreadable."""
-        try:
-            for region in self.dbg.enum_regions():
-                if region.get('base_address') == base:
-                    return region.get('region_size')
-        except (PydbgError, OSError, TypeError):
-            return None
-        return None
 
     # ── the hit / step-over dance ──────────────────────────────
 
@@ -494,12 +446,21 @@ class FunctionProbe:
         """
         self._set_context({f'dr{self._slot}': 0, 'dr6': 0})
         self._reason = STOP_MAX_EVENTS
-        self._single_step_pending = True
+        self._uncontinued = True
 
     # ── reading the call ───────────────────────────────────────
 
     def _get_context(self):
-        """The probed thread's context, through the handle arm() opened."""
+        """The probed thread's context, through the handle arm() opened.
+
+        Deliberately the capability object rather than `dbg.get_registers(tid)`:
+        the facade's register helpers accept a tid by enumerating the process's
+        threads to tell it apart from a handle (~36 ms measured per call), and
+        the probed target calls its function every 20 ms. The README allows
+        capability objects by attribute; ADR-0002's facade rule is about the
+        public debugger surface, not about a component holding a handle it
+        opened. See docs/KNOWN_ISSUES.md §追踪.
+        """
         return self.dbg.thread.get_context(self._h_thread)
 
     def _set_context(self, context):
@@ -519,7 +480,7 @@ class FunctionProbe:
             raw = self.dbg.read_memory(regs.get('rsp', 0), 8)
             ret = struct.unpack('<Q', raw)[0]
 
-        if self._base <= ret < self._base + self._size:
+        if _shared.in_module(ret, self._base, self._size):
             return ret - self._base
         self._warn(_RETURN_ADDRESS_OUTSIDE_MODULE)
         return 0

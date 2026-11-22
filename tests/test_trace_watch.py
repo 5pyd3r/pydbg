@@ -33,28 +33,20 @@ _TEST_TARGET = os.environ.get(
 )
 
 
-def _export_address(dbg, exe_path, base, name):
-    from pydbg.pe import PE
-    pe = PE.from_file(exe_path)
-    for exp in pe.exports:
-        if exp.name == name:
-            return base + exp.rva
-    raise AssertionError(f"export {name} not found in {exe_path}")
-
-
 @unittest.skipUnless(_has_cython, "optional dependency: Cython extension")
+@unittest.skipUnless(os.path.isfile(_TEST_TARGET),
+                     "target not built: instrument_target.exe (meson)")
 class _WatchLiveCase(unittest.TestCase):
     """A target paused on its loader breakpoint, with its exports resolved."""
 
     def setUp(self):
-        from tests.helpers import create_debugger
+        from tests.helpers import create_debugger, export_address
 
         self.dbg, self.pid, self.tid = create_debugger(_TEST_TARGET)
-        base = self.dbg.enum_modules()[0]['base_address']
-        self.base = base
-        self.g_sum = _export_address(self.dbg, _TEST_TARGET, base, 'g_sum')
-        self.add_numbers = _export_address(
-            self.dbg, _TEST_TARGET, base, 'add_numbers')
+        module = self.dbg.enum_modules()[0]
+        self.base = module['base_address']
+        self.g_sum = export_address(self.dbg, _TEST_TARGET, 'g_sum')
+        self.add_numbers = export_address(self.dbg, _TEST_TARGET, 'add_numbers')
 
     def tearDown(self):
         from tests.helpers import teardown
@@ -77,7 +69,6 @@ class _WatchLiveCase(unittest.TestCase):
         return event
 
 
-@unittest.skipUnless(_has_cython, "optional dependency: Cython extension")
 class TestMemoryWatchAlignment(_WatchLiveCase):
     """Only the lengths and alignments Windows can encode are accepted."""
 
@@ -95,7 +86,6 @@ class TestMemoryWatchAlignment(_WatchLiveCase):
         self.assertIn("length", str(caught.exception).lower())
 
 
-@unittest.skipUnless(_has_cython, "optional dependency: Cython extension")
 class TestMemoryWatchArming(_WatchLiveCase):
     """Slots 0-3 are shared; a fifth watch must say so, not overwrite one."""
 
@@ -133,9 +123,10 @@ class TestMemoryWatchRun(_WatchLiveCase):
     """Every write to the watched range becomes one MEM_WRITE event."""
 
     def test_continuous_writes_are_recorded(self):
+        """Two writes are exactly two facts: the budget stops on the third."""
         event = self.resume_at_function()
         before = int.from_bytes(self.dbg.read_memory(self.g_sum, 4), 'little')
-        watch = MemoryWatch(self.dbg, self.g_sum, 4, max_events=5)
+        watch = MemoryWatch(self.dbg, self.g_sum, 4, max_events=2)
         recorded = []
         watch.sink = recorded.append
         self.assertIsInstance(watch.arm(), int)
@@ -143,9 +134,11 @@ class TestMemoryWatchRun(_WatchLiveCase):
 
         summary = watch.run(max_idle_timeouts=5)
 
-        self.assertGreaterEqual(summary.events, 2,
-                                "the watched address was never written")
+        self.assertEqual(summary.events, 2,
+                         "max_events=2 must record exactly two writes")
         self.assertEqual(summary.events, len(recorded))
+        self.assertTrue(summary.truncated)
+        self.assertEqual(summary.reason, STOP_MAX_EVENTS)
         self.assertEqual(summary.blocks, 0)
         self.assertEqual(summary.instructions, 0)
         for item in recorded:
@@ -165,6 +158,29 @@ class TestMemoryWatchRun(_WatchLiveCase):
 
         self.dbg.terminate_process(0)
         self.assertEqual(self.dbg.get_exit_code(), 0)
+
+    def test_the_budget_stop_clears_the_latched_dr6_slot(self):
+        """dr6's slot bit must not survive a budget stop.
+
+        The hit that trips the budget is a real hardware hit: its dr6 bit is
+        set. Leaving it latched makes the caller's next single-step look like
+        another write. The whole low nibble is checked, so the test does not
+        depend on which slot was free.
+        """
+        event = self.resume_at_function()
+        watch = MemoryWatch(self.dbg, self.g_sum, 4, max_events=2)
+        try:
+            watch.arm()
+            self.dbg.continue_event(event.pid, event.tid)
+            summary = watch.run(max_idle_timeouts=5)
+            dr6 = self.dbg.get_registers(self.tid)['dr6']
+        finally:
+            self.assertEqual(watch.disarm(), ())
+
+        self.assertEqual(summary.events, 2)
+        self.assertEqual(summary.reason, STOP_MAX_EVENTS)
+        self.assertEqual(dr6 & 0xF, 0,
+                         "the budget stop left a slot latched in dr6")
 
     def test_a_one_event_budget_truncates_before_the_second_write(self):
         event = self.resume_at_function()

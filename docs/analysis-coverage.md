@@ -292,8 +292,9 @@ TraceSummary(events, blocks, reason, elapsed_ns,
 - **已知行为**：硬件断点在初始 loader 断点处写入会被随后的 continue 丢弃（实测不触发）；三个
   新入口都要求在**正常停止点**（例如 `run_until` 之后）arm/watch。
 - **诚实停止**：窗口离开模块、遇到调用方的断点、遇到异常，都以 `TraceSummary.reason` 显式停止，
-  不把「没记录到」说成「没发生」。预算截断时事件不 continue，`single_step_pending` 为真，
-  调用方拥有那个未 continue 的调试事件。
+  不把「没记录到」说成「没发生」。**已经驱动过目标**的预算截断不 continue 事件，
+  `single_step_pending` 为真，调用方拥有那个未 continue 的调试事件；驱动前的预检停止
+  （0 预算、`start` 在模块外）不消费事件，该标志为假。
 
 ### 9.2 记录格式 v1 扩展
 
@@ -348,8 +349,9 @@ pydbg.trace.ProbeCall(tid, rva, args, ts)
   （单步事件的 ExceptionAddress 是**下一条**指令），再置 TF、继续。TF 在异常交付时被清掉，
   所以每一步都要重设，不能设一次。
 - 预算在记录前检查；`max_instructions=0` 记录 0 条并以 `STOP_MAX_EVENTS` 截断。
-- 下一条指令落在模块外 → 记完当前条后以 `STOP_LEFT_MODULE` 停止；`rva` 因此始终落在
-  `[0, size)`。
+- 下一条指令落在模块外 → 记完当前条后以 `STOP_LEFT_MODULE` 停止；`start` 本身、或
+  `start=None` 时的当前 RIP 已在模块外 → 在驱动目标之前就以 `STOP_LEFT_MODULE` 停止
+  （不置 TF、不 continue）。`rva` 因此始终落在 `[0, size)`。
 - 窗口内命中断点 → `STOP_BREAKPOINT`；出现其他异常 → `STOP_EXCEPTION`；目标退出 →
   `STOP_TARGET_EXITED`；空闲超时 → `STOP_IDLE_TIMEOUT`。后两者之外的停止都不 continue 事件。
 - 解码失败（capstone 缺失除外）→ 该条 `a=0`，`warnings` 记一次 `"undecodable instruction"`，
@@ -361,8 +363,9 @@ pydbg.trace.ProbeCall(tid, rva, args, ts)
   且 `addr % length == 0`，不满足抛 `BreakpointError`（8 字节在 x86 目标上由 manager 拒绝）。
 - `arm()` 自动挑一个空闲槽（0–3）；4 个都占用时抛 `BreakpointError`
   `"no free debug-register slot"`。`tid=None` 为进程级（含 CREATE_THREAD 复制）。
-- `run()` 不自动 disarm（watch 可跨多次 run）；`disarm()` 只移除自己 arm 的那个 bp，
-  清理失败的语义与 `BblTracer.disarm()` 一致（`"breakpoint left"` /
+- `run()` 未 arm 时先 arm（同 `BblTracer`，存在竞态：arm 之后目标可能已经跑过一段，
+  应尽量在暂停时 `arm()`）；不自动 disarm（watch 可跨多次 run）。`disarm()` 只移除自己
+  arm 的那个 bp，清理失败的语义与 `BblTracer.disarm()` 一致（`"breakpoint left"` /
   `"target exited during cleanup"`）。
 - 命中判定：事件的异常码是单步，且该线程 `dr6` 的槽位位为 1；记录 `MEM_WRITE(a=addr, b=length,
   rva=0)` 后把 `dr6` 清零（下一次命中才可区分）。清不掉时报 `"could not clear dr6"` 并停止。
@@ -378,7 +381,8 @@ pydbg.trace.ProbeCall(tid, rva, args, ts)
   取低 32 位。记 `ProbeCall(tid, rva, args, ts)`；`rva = 返回地址 - 模块基址`，不在模块内记 0
   并 warning。`sink` 收到 `TraceEvent(kind=API, tid, rva, ts, a=hook_id)`，`hook_id` 即断点 id。
 - 步过舞蹈：命中后把该槽地址清零、`dr6` 清零、置 TF，让原指令执行；下一条单步事件里恢复
-  槽地址与 `dr7` 使能位、清 `dr6`。预算用尽时不清地址、不置 TF，直接停（继续后目标正常执行）。
+  槽地址与 `dr7` 使能位、清 `dr6`。预算用尽时把槽地址与 `dr6` 清零、不置 TF，直接停
+  （不清地址则继续后会立刻再次命中）。
 - `disarm()` 移除 bp；槽位释放后可被 watch/另一个 probe 复用。
 - 已知限制（写进 docstring 与 `KNOWN_ISSUES`）：4 槽共享；无返回值；单线程；不写目标字节，
   因此不做 detour、也不需要 RIP-relative 重定位。

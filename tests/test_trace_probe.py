@@ -23,7 +23,7 @@ import tempfile
 import time
 import unittest
 
-from pydbg.exceptions import BreakpointError, PydbgError
+from pydbg.exceptions import BreakpointError
 from pydbg.trace import (
     API, STOP_MAX_EVENTS, STOP_NO_MODULE, STOP_NO_TARGET, FunctionProbe,
     ProbeCall, ProbeSummary, TraceWriter, read_trace,
@@ -42,40 +42,12 @@ _TARGET = os.environ.get(
     os.path.join(_TARGET_DIR, "target", "instrument_target.exe"))
 
 
-try:
-    from tests.helpers import stop_at
-except ImportError:  # P10 owns helpers.stop_at; keep the live test runnable first.
-    def stop_at(dbg, addr, timeout_ms=5000):
-        """Run to addr with a temporary breakpoint, then finish its single-step.
-
-        Leaves the target paused on the single-step debug event with no pending
-        breakpoint single-step; the caller resumes it with continue_event().
-        """
-        dbg.run_until(addr, max_wait_ms=timeout_ms, max_idle_timeouts=3)
-        pid, tid = dbg._session.pid, dbg._session.tid
-        dbg.continue_event(pid, tid)
-        event = dbg.wait_event(timeout_ms)
-        if event is None or not dbg.handle_ss_manual(tid):
-            raise AssertionError(
-                "expected the temporary breakpoint's single-step")
-        return event
-
-
 def _module_base(dbg, basename):
     """Base address of the module named `basename`."""
     for module in dbg.enum_modules():
         if module.get("name", "").split("\\")[-1].lower() == basename.lower():
             return module["base_address"], module["size"]
     raise AssertionError(f"module {basename} is not loaded")
-
-
-def _export_address(dbg, exe_path, base, name):
-    """Absolute address of an export, via the PE export table."""
-    from pydbg.pe import PE
-    for exp in PE.from_file(exe_path).exports:
-        if exp.name == name:
-            return base + exp.rva
-    raise AssertionError(f"export {name} not found in {exe_path}")
 
 
 @unittest.skipUnless(_has_cython, "optional dependency: Cython extension")
@@ -85,14 +57,12 @@ class _LiveProbeTestCase(unittest.TestCase):
     """The target paused at a normal stop just before calling add_numbers."""
 
     def setUp(self):
-        from pydbg import Debugger
+        from tests.helpers import create_debugger, export_address, stop_at
 
-        self.dbg = Debugger()
-        self.pid, self.tid = self.dbg.create_process(_TARGET)
-        self._drain_to_loader_stop()
+        self.dbg, self.pid, self.tid = create_debugger(_TARGET)
         self.base, self.size = _module_base(
             self.dbg, os.path.basename(_TARGET))
-        self.addr = _export_address(self.dbg, _TARGET, self.base, "add_numbers")
+        self.addr = export_address(self.dbg, _TARGET, "add_numbers")
         # The loader breakpoint is still holding the target on its pending
         # event; release it so run_until() inside stop_at() gets to run.
         self.dbg.continue_event(self.pid, self.tid)
@@ -104,27 +74,11 @@ class _LiveProbeTestCase(unittest.TestCase):
 
         teardown(self.dbg)
 
-    def _drain_to_loader_stop(self):
-        """Consume events until the initial (loader) breakpoint is delivered."""
-        event = self.dbg.wait_event(5000)
-        if event is not None:
-            self.dbg.continue_event(event.pid, event.tid)
-        for _ in range(50):
-            event = self.dbg.wait_event(2000)
-            if event is None or event.type == "EXIT_PROCESS":
-                return
-            if event.type == "EXCEPTION":
-                return
-            self.dbg.continue_event(event.pid, event.tid)
-
     def resume_after_stop(self):
         """Release the single-step event `stop_at` left the target on."""
         self.dbg.continue_event(self.pid, self.tid)
 
 
-@unittest.skipUnless(_has_cython, "optional dependency: Cython extension")
-@unittest.skipUnless(os.path.isfile(_TARGET),
-                     "target not built: instrument_target.exe (meson)")
 class TestFunctionProbeCalls(_LiveProbeTestCase):
     """A call becomes a fact: thread, return RVA, int args, timestamp."""
 
@@ -164,9 +118,6 @@ class TestFunctionProbeCalls(_LiveProbeTestCase):
                          "the target must still terminate normally")
 
 
-@unittest.skipUnless(_has_cython, "optional dependency: Cython extension")
-@unittest.skipUnless(os.path.isfile(_TARGET),
-                     "target not built: instrument_target.exe (meson)")
 class TestFunctionProbeBudget(_LiveProbeTestCase):
     """The call budget stops the run and says the caller owns the event."""
 
@@ -230,9 +181,6 @@ class TestFunctionProbeBudget(_LiveProbeTestCase):
         self.assertEqual(probe.disarm(), ())
 
 
-@unittest.skipUnless(_has_cython, "optional dependency: Cython extension")
-@unittest.skipUnless(os.path.isfile(_TARGET),
-                     "target not built: instrument_target.exe (meson)")
 class TestFunctionProbeSlots(_LiveProbeTestCase):
     """Four debug-register slots are the whole budget, shared with watches."""
 
@@ -253,9 +201,6 @@ class TestFunctionProbeSlots(_LiveProbeTestCase):
         self.assertIsNone(self.dbg.find_breakpoint(self.addr))
 
 
-@unittest.skipUnless(_has_cython, "optional dependency: Cython extension")
-@unittest.skipUnless(os.path.isfile(_TARGET),
-                     "target not built: instrument_target.exe (meson)")
 class TestFunctionProbeSink(_LiveProbeTestCase):
     """A sink receives the same calls the summary counts, as API events."""
 
@@ -292,15 +237,12 @@ class TestFunctionProbeArguments(unittest.TestCase):
         from pydbg import Debugger
 
         for params in (5, -1):
-            with self.assertRaises((ValueError, PydbgError)) as raised:
+            with self.assertRaises(ValueError) as raised:
                 FunctionProbe(Debugger(), 0x1000, params=params)
             self.assertIn("0-4", str(raised.exception),
                           "the error must name the supported range")
 
 
-@unittest.skipUnless(_has_cython, "optional dependency: Cython extension")
-@unittest.skipUnless(os.path.isfile(_TARGET),
-                     "target not built: instrument_target.exe (meson)")
 class TestFunctionProbeHonestStops(_LiveProbeTestCase):
     """No module, or no target, is a reason — not an empty, silent run."""
 

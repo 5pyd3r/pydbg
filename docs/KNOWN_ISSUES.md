@@ -35,6 +35,19 @@ _核对：2026-11-22_
 
 _核对：2026-11-22_
 
+## 追踪（trace）
+
+- v1 格式新增 `INSTR`（6）；`MEM_READ` 仍未产生：硬件数据断点没有读/写方向信息，
+  本阶段拒绝猜，读观察留给 Phase 3c 的插桩路径。
+- `InstructionTracer` 是单线程窗口，离开模块即停；TF 在异常交付时被清掉，因此每一步都重设，
+  不能设一次。
+- `MemoryWatch` 只观察写；4 个调试寄存器槽与 `FunctionProbe` 共享；必须在正常停止点 arm
+  （初始 loader 停止点写入会被下一次 continue 丢弃）；watch 跨多次 `run()`，不自动 disarm。
+- `FunctionProbe` 是硬件执行断点探针，不是 detour/LLVM：不写目标字节，但无返回值、单线程、
+  与 `MemoryWatch` 共享 4 个槽位。
+
+_核对：2026-11-22_
+
 ## 平台与打包
 
 - 宿主恒为 x64；32 位通过 WOW64 调试。

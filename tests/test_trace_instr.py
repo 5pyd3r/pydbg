@@ -155,6 +155,36 @@ class TestZeroBudget(unittest.TestCase):
         self.assertEqual(dbg.driven, [])
 
 
+class _ScriptedThread:
+    """The thread capability object, forwarding to the fake's registers.
+
+    `InstructionTracer` reaches the context through a handle (one open per
+    run), so the fake has to expose the same capability shape the real
+    `Debugger.thread` does.
+    """
+
+    def __init__(self, dbg):
+        self._dbg = dbg
+
+    def _tid(self, h_thread):
+        """The tid a fake handle names, so the fake can key by tid as before."""
+        base = 0x1000
+        index = h_thread - base
+        if 0 <= index < len(self._dbg.opened):
+            return self._dbg.opened[index]
+        return h_thread
+
+    def get_context(self, h_thread):
+        return self._dbg.get_registers(self._tid(h_thread))
+
+    def set_context(self, h_thread, context):
+        for name, value in context.items():
+            self._dbg.set_register(self._tid(h_thread), name, value)
+
+    def set_register(self, h_thread, name, value):
+        self._dbg.set_register(self._tid(h_thread), name, value)
+
+
 class _ScriptedDebugger(_FakeDebugger):
     """A debugger whose run() replays a fixed event list to the callback.
 
@@ -162,8 +192,15 @@ class _ScriptedDebugger(_FakeDebugger):
     is exercised through its public entry point, without a live target.
     """
 
-    def __init__(self, events, ip=0x401000, eflags=0, error=None,
+    def __init__(self, events, ip=0x400800, eflags=0, error=None,
                  status=None):
+        """`ip` defaults inside the (0x400000, 0x1000) window the tests name.
+
+        It used to be 0x401000 — one past the window's end — which only worked
+        because the tracer used to drive the target without checking the
+        cursor. The pre-drive check is now a fact under test, so a fixture
+        whose IP is outside the window would test the stop, not the loop.
+        """
         super().__init__()
         self.events = list(events)
         self.ip = ip
@@ -171,6 +208,17 @@ class _ScriptedDebugger(_FakeDebugger):
         self.error = error
         self.status = status or ExitStatus(None, ExitReason.STOPPED_BY_CALLBACK)
         self.register_writes = []
+        self.opened = []
+        self.closed = []
+        self.thread = _ScriptedThread(self)
+
+    def open_thread(self, tid):
+        h_thread = 0x1000 + len(self.opened)
+        self.opened.append(tid)
+        return h_thread
+
+    def close_handle(self, h_thread):
+        self.closed.append(h_thread)
 
     def get_registers(self, tid):
         return {'rip': self.ip, 'eflags': self.eflags}
@@ -247,6 +295,18 @@ class TestWindowStopsByRule(unittest.TestCase):
         self.assertEqual(name, 'eflags')
         self.assertEqual(value & 0x100, 0x100)
 
+    def test_the_window_opens_one_thread_handle_and_closes_it(self):
+        """One handle per run, not one per step: tid access enumerates threads."""
+        dbg = _ScriptedDebugger([])
+        tracer = InstructionTracer(dbg, module=(0x400000, 0x1000))
+
+        tracer.run()
+
+        self.assertEqual(dbg.opened, [8],
+                         "the run must open the thread it steps")
+        self.assertEqual(dbg.closed, [0x1000],
+                         "the run must close the handle it opened")
+
     def test_an_idle_timeout_is_a_truncated_stop(self):
         from pydbg.exceptions import TimeoutError as PydbgTimeoutError
 
@@ -280,16 +340,6 @@ def _instrument_target():
                      "target", "instrument_target.exe"))
 
 
-def _export_address(target, base, name):
-    """Absolute address of an export, via the PE export table."""
-    from pydbg.pe import PE
-
-    for export in PE.from_file(target).exports:
-        if export.name == name:
-            return base + export.rva
-    raise AssertionError(f"export {name} not found in {target}")
-
-
 @unittest.skipUnless(_has_cython, "optional dependency: Cython extension")
 class _LiveWindowCase(unittest.TestCase):
     """A live instrument_target paused on its loader breakpoint, then released.
@@ -303,14 +353,13 @@ class _LiveWindowCase(unittest.TestCase):
         if not os.path.isfile(self.target):
             self.skipTest(f"target not built: {self.target}")
 
-        from tests.helpers import create_debugger
+        from tests.helpers import create_debugger, export_address
 
         self.dbg, self.pid, self.tid = create_debugger(self.target)
         module = self.dbg.enum_modules()[0]
         self.base = module['base_address']
         self.size = module['size']
-        self.add_numbers = _export_address(self.target, self.base,
-                                           'add_numbers')
+        self.add_numbers = export_address(self.dbg, self.target, 'add_numbers')
 
     def tearDown(self):
         from tests.helpers import teardown
@@ -322,7 +371,6 @@ class _LiveWindowCase(unittest.TestCase):
         self.dbg.continue_event(self.pid, self.tid)
 
 
-@unittest.skipUnless(_has_cython, "optional dependency: Cython extension")
 class TestLiveWindow(_LiveWindowCase):
     """run(start=...) records real instructions and stops by the rules."""
 
@@ -419,6 +467,52 @@ class TestLiveWindow(_LiveWindowCase):
         for event in recorded:
             self.assertGreaterEqual(event.rva, 0)
             self.assertLess(event.rva, self.size)
+        self.assertIn(summary.reason, (STOP_LEFT_MODULE, STOP_TARGET_EXITED))
+
+    def test_a_current_ip_outside_the_named_window_stops_before_driving(self):
+        """The window must not set TF/continue when the RIP is already outside.
+
+        The loader stop's RIP is in the exe; the named window is a fresh
+        allocation. Without the pre-drive check the tracer stepped once anyway
+        and recorded an instruction whose RVA was outside the window — the
+        exact bug §9.4's "rva always in [0, size)" claim rules out.
+        """
+        from tests.helpers import alloc_writable
+
+        window = alloc_writable(self.dbg)
+        self.assertNotEqual(window, 0, "the target refused the allocation")
+
+        tracer = InstructionTracer(self.dbg, module=(window, 0x1000))
+        summary = tracer.run()          # start=None: RIP is the loader stop
+
+        self.assertEqual(summary.events, 0,
+                         "an instruction outside the window was recorded")
+        self.assertEqual(summary.reason, STOP_LEFT_MODULE)
+        self.assertFalse(summary.truncated)
+        self.assertFalse(summary.single_step_pending,
+                         "nothing was driven, so no event is owed")
+        eflags = self.dbg.get_registers(self.tid)['eflags']
+        self.assertEqual(eflags & 0x100, 0,
+                         "the trap flag was set without driving the target")
+
+    def test_a_default_window_does_not_enumerate_threads_per_step(self):
+        """Seven instructions are timed, not seven thread enumerations.
+
+        Each `get_registers(tid)` enumerates the process's threads (~36 ms
+        measured); a per-step regression puts this window at about half a
+        second. The limit is deliberately loose: it catches the enumerating
+        path, not machine load.
+        """
+        tracer = InstructionTracer(self.dbg)
+        self.release_loader()
+        summary = tracer.run(start=self.add_numbers)
+
+        print(f"\ninstr default window: events={summary.events} "
+              f"elapsed={summary.elapsed_ns / 1e9:.3f}s")
+        self.assertEqual(summary.events, 7,
+                         "the default window over add_numbers changed shape")
+        self.assertLess(summary.elapsed_ns, 2_000_000_000,
+                        "the window is enumerating threads on every step")
         self.assertIn(summary.reason, (STOP_LEFT_MODULE, STOP_TARGET_EXITED))
 
     def test_the_target_terminates_after_a_stopped_window(self):
