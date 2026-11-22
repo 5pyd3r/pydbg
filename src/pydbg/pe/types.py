@@ -101,6 +101,26 @@ class ImportEntry:
 
 
 @dataclass
+class DelayImport:
+    """One IMAGE_DELAYLOAD_DESCRIPTOR (data directory 13).
+
+    The format stores the same addresses as either RVAs or old-style VAs,
+    selected by bit 0 of 'attributes' ('RvaBased'). This record always reports
+    RVAs: the VA form is converted with the image's ImageBase, so a consumer
+    never has to know which form the linker chose.
+    """
+
+    dll_name: str
+    attributes: int
+    module_handle_rva: int
+    iat_rva: int
+    int_rva: int
+    bound_iat_rva: int
+    unload_iat_rva: int
+    timestamp: int
+
+
+@dataclass
 class RelocationEntry:
     """One IMAGE_REL_BASED_* fixup within a relocation block."""
 

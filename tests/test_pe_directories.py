@@ -147,6 +147,45 @@ def build_pdata_image(terminate=False):
     return builder.build()
 
 
+RVA_DELAY_NAMES = 0x2140
+
+
+def _delay_descriptor(attributes, image_base, dll_name_rva, timestamp=0x5A000000):
+    """One IMAGE_DELAYLOAD_DESCRIPTOR; VAs when bit 0 of Attributes is clear."""
+    def addr(rva):
+        return rva if attributes & 1 else image_base + rva
+
+    return struct.pack("<8I", attributes, addr(dll_name_rva),
+                       addr(0x2200), addr(0x2300), addr(0x2400),
+                       addr(0x2500), addr(0x2600), timestamp)
+
+
+def build_delay_image(magic=0x20B, va_based=False, entries=1,
+                      declared_size=None):
+    """Image with a delay-import directory holding 'entries' descriptors.
+
+    The names sit past the descriptors and the table is closed with an all-zero
+    descriptor, which is how a real linker writes it. A VA-based descriptor
+    stores 32-bit VAs, so that form can only be PE32.
+    """
+    if va_based and magic != 0x10B:
+        raise ValueError("VA-based delay descriptors are a PE32-only form")
+    builder, image_base = _base_image(magic)
+    attributes = 0 if va_based else 1
+    rdata = bytearray(0x400)
+    for index in range(entries):
+        dll_rva = RVA_DELAY_NAMES + index * 0x20
+        _place(rdata, RVA_RDATA + index * 32,
+               _delay_descriptor(attributes, image_base, dll_rva))
+        name = f"module{index}.dll".encode("ascii") + b"\x00"
+        _place(rdata, dll_rva, name)
+    _place(rdata, RVA_RDATA + entries * 32, b"\x00" * 32)
+    builder.add_section(".rdata", bytes(rdata), RVA_RDATA, 0x40000040)
+    size = entries * 32 if declared_size is None else declared_size
+    builder.add_dir(13, RVA_RDATA, size)
+    return builder.build(), image_base
+
+
 def build_rich_image(key=0x12345678, pairs=((0x0101, 5), (0x0202, 3))):
     builder, _ = _base_image()
     blob = struct.pack("<I", 0x536E6144 ^ key)          # "DanS", encoded
@@ -416,6 +455,86 @@ class TestExceptionDirectory(unittest.TestCase):
 
         builder, _ = _base_image(magic=0x10B)
         self.assertEqual(PE(builder.build()).exception_entries, [])
+
+
+class TestDelayImports(unittest.TestCase):
+    """Data directory 13 — IMAGE_DELAYLOAD_DESCRIPTOR.
+
+    The descriptor stores its addresses either as RVAs (bit 0 of Attributes
+    set) or as old-style VAs, and the two forms are byte-identical otherwise:
+    a parser that ignores the bit reads a VA as an RVA and lands ~4GB off.
+    """
+
+    def test_rva_based_descriptor_is_read_field_by_field(self):
+        from pydbg.pe import PE
+
+        data, _ = build_delay_image()
+        imports = PE(data).delay_imports
+        self.assertEqual(len(imports), 1)
+        entry = imports[0]
+        self.assertEqual(entry.dll_name, "module0.dll")
+        self.assertEqual(entry.attributes, 1)
+        self.assertEqual(entry.module_handle_rva, 0x2200)
+        self.assertEqual(entry.iat_rva, 0x2300)
+        self.assertEqual(entry.int_rva, 0x2400)
+        self.assertEqual(entry.bound_iat_rva, 0x2500)
+        self.assertEqual(entry.unload_iat_rva, 0x2600)
+        self.assertEqual(entry.timestamp, 0x5A000000)
+
+    def test_va_based_descriptor_is_converted_to_rvas(self):
+        """Without bit 0 the fields are VAs; ImageBase is what removes."""
+        from pydbg.pe import PE
+
+        data, image_base = build_delay_image(va_based=True, magic=0x10B)
+        entry = PE(data).delay_imports[0]
+        self.assertEqual(entry.attributes, 0)
+        self.assertEqual(entry.dll_name, "module0.dll")
+        self.assertEqual(entry.module_handle_rva, 0x2200)
+        self.assertEqual(entry.iat_rva, 0x2300)
+        self.assertEqual(entry.int_rva, 0x2400)
+        self.assertEqual(entry.bound_iat_rva, 0x2500)
+        self.assertEqual(entry.unload_iat_rva, 0x2600)
+        self.assertEqual(image_base, 0x400000)
+
+    def test_walks_until_the_all_zero_descriptor(self):
+        from pydbg.pe import PE
+
+        data, _ = build_delay_image(entries=2)
+        imports = PE(data).delay_imports
+        self.assertEqual([entry.dll_name for entry in imports],
+                         ["module0.dll", "module1.dll"])
+
+    def test_truncated_descriptor_returns_the_parsed_entries(self):
+        """A size that stops mid-descriptor ends the walk at the last whole one."""
+        from pydbg.pe import PE
+
+        data, _ = build_delay_image(entries=2, declared_size=48)
+        imports = PE(data).delay_imports
+        self.assertEqual([entry.dll_name for entry in imports], ["module0.dll"])
+
+    def test_a_va_below_the_image_base_skips_only_that_entry(self):
+        """'Out of bounds' is a skip, not a reason to abandon the table."""
+        from pydbg.pe import PE
+
+        data, _ = build_delay_image(va_based=True, magic=0x10B, entries=2)
+        data = bytearray(data)
+        struct.pack_into("<7I", data, RVA_RDATA + 4, *([0x1000] * 7))
+        imports = PE(bytes(data)).delay_imports
+        self.assertEqual([entry.dll_name for entry in imports], ["module1.dll"])
+
+    def test_absent_directory_is_empty(self):
+        from pydbg.pe import PE
+
+        builder, _ = _base_image()
+        self.assertEqual(PE(builder.build()).delay_imports, [])
+
+    def test_all_zero_descriptor_is_empty(self):
+        from pydbg.pe import PE
+
+        data, _ = build_delay_image()
+        data = bytearray(data)
+        struct.pack_into("<8I", data, RVA_RDATA, *([0] * 8))
+        self.assertEqual(PE(bytes(data)).delay_imports, [])
 
 
 def build_broken_rich_image(blob):

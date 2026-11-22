@@ -4,7 +4,7 @@ import struct
 
 from .types import (
     DosHeader, FileHeader, OptionalHeader, DataDirectory,
-    SectionHeader, ExportEntry, ImportEntry,
+    SectionHeader, ExportEntry, ImportEntry, DelayImport,
     RelocationEntry, RelocationBlock, TLSDirectory, DebugEntry,
     CodeViewInfo, ExceptionEntry, RichHeader, RichHeaderEntry,
 )
@@ -20,6 +20,7 @@ DIR_SECURITY = 4
 DIR_BASERELOC = 5
 DIR_DEBUG = 6
 DIR_TLS = 9
+DIR_DELAY_IMPORT = 13
 
 # IMAGE_DEBUG_TYPE_CODEVIEW: the one debug entry type that carries the PDB.
 DEBUG_TYPE_CODEVIEW = 2
@@ -36,6 +37,10 @@ MAX_IMPORTS_PER_DLL = 65536
 # A CodeView payload is a 24-byte header plus a path. Both bounds are what stop
 # a debug entry whose SizeOfData lies from turning into a huge read.
 MAX_CODEVIEW_PAYLOAD = 0x1000
+
+# IMAGE_DELAYLOAD_DESCRIPTOR is 32 bytes and the table is NUL-terminated. The
+# cap is what keeps a lying SizeOfDirectory bounded.
+MAX_DELAY_IMPORTS = 4096
 
 
 def _format_guid(raw: bytes) -> str:
@@ -329,6 +334,60 @@ class PEParser:
                             rva=iat_rva + t_index * thunk_size))
                     thunk_offset += thunk_size
             cursor += 20
+        return imports
+
+    # ── data directories 4, 10, 11, 13 and 14 ──────────────────
+    #
+    # The other five of the sixteen. Lazy for the same reason as the group
+    # below: most consumers want none of them.
+
+    def parse_delay_imports(self, data_dirs: dict,
+                            image_base: int = 0) -> list:
+        """Delay-load import descriptors (data directory 13).
+
+        'image_base' is the optional header's ImageBase, needed only for the
+        old VA-based form ('attributes & 1' clear) whose fields are VAs rather
+        than RVAs. Every address reported here is an RVA either way, and an
+        entry whose VAs fall below ImageBase is skipped: the subtraction is the
+        only definition of "out of bounds" this directory has.
+        """
+        imports = []
+        dd = data_dirs.get(DIR_DELAY_IMPORT)
+        if dd is None or dd.virtual_address == 0 or dd.size == 0:
+            return imports
+
+        offset = self._view.rva_to_source_offset(dd.virtual_address)
+        if offset is None:
+            return imports
+
+        count = min(dd.size // 32, MAX_DELAY_IMPORTS)
+        for index in range(count):
+            raw = self._src.try_read(offset + index * 32, 32)
+            if raw is None:
+                break
+            values = list(struct.unpack_from('<8I', raw, 0))
+            if not any(values):
+                break                       # all-zero descriptor terminates it
+
+            attributes = values[0]
+            if attributes & 1 == 0:
+                values[1:7] = [value - image_base for value in values[1:7]]
+                if any(value < 0 for value in values[1:7]):
+                    continue                # VA below ImageBase: not addressable
+
+            name_rva = values[1]
+            if name_rva == 0:
+                continue
+            name_offset = self._view.rva_to_source_offset(name_rva)
+            dll_name = ''
+            if name_offset is not None:
+                dll_name = self._read_string_at_offset(name_offset)
+
+            imports.append(DelayImport(
+                dll_name=dll_name, attributes=attributes,
+                module_handle_rva=values[2], iat_rva=values[3],
+                int_rva=values[4], bound_iat_rva=values[5],
+                unload_iat_rva=values[6], timestamp=values[7]))
         return imports
 
     # ── data directories 3, 5, 6, 9 and the Rich header ────────
