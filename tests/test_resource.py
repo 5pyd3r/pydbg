@@ -249,6 +249,18 @@ class TestResourceTypes(unittest.TestCase):
         self.assertEqual(RESOURCE_TYPES[10], "RT_RCDATA")
         self.assertEqual(RESOURCE_TYPES[24], "RT_MANIFEST")
 
+    def test_rt_version_has_one_definition(self):
+        """The type ID lives beside the type table; version.py imports it.
+
+        A second literal in version.py is a second answer to "which resource
+        is a version resource", and the two could drift.
+        """
+        from pydbg.pe import version
+        from pydbg.pe.resource import RESOURCE_TYPES, RT_VERSION
+
+        self.assertEqual(RESOURCE_TYPES[RT_VERSION], "RT_VERSION")
+        self.assertIs(version.RT_VERSION, RT_VERSION)
+
 
 class TestPEResourceParser(unittest.TestCase):
     """Tests for PEResourceParser with synthetic PE data."""

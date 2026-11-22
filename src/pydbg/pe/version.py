@@ -19,8 +19,7 @@ without a readable root there is nothing to return, so that is None.
 import struct
 from dataclasses import dataclass
 
-# RT_VERSION: the resource type ID a version resource sits under.
-RT_VERSION = 16
+from .resource import RT_VERSION
 
 # VS_FIXEDFILEINFO.dwSignature — the only proof that the value is that struct.
 VS_FFI_SIGNATURE = 0xFEEF04BD

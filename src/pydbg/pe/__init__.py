@@ -13,10 +13,10 @@ from .source import Source, FileSource, BytesSource
 from .view import View, FileView, LoadedView
 from .parser import PEParser
 from .resource import (
-    PEResourceParser, ResourceEntry, RESOURCE_TYPES,
+    PEResourceParser, ResourceEntry, RESOURCE_TYPES, RT_VERSION,
 )
 from .version import (
-    FixedFileInfo, VersionInfo, RT_VERSION, read_version_info,
+    FixedFileInfo, VersionInfo, read_version_info,
 )
 
 
