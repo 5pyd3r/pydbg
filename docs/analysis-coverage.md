@@ -83,8 +83,7 @@
 ## 5. 阶段
 
 - **Phase 1（本规格）**：S1 补全、S8 字符串/熵/壳启发。纯 Python，无新依赖。
-- **Phase 2**：S2 边界（`.pdata` 的 `end_rva` 与 UNWIND_INFO）+ S9 反编译器（按
-  `decompiler-options` 的 S0–S5）。
+- **Phase 2**：S2 边界（`.pdata` 的 `end_rva` 精确定界；UNWIND_INFO 的帧信息留到 Phase 5 的变量恢复）+ S9 反编译器（按 `decompiler-options` 的 S0–S5）。
 - **Phase 3**：D5/D6 追踪与插桩（BBL 用断点 + stub 起步，格式自定）。
 - **Phase 4**：D8 dump 与 PE 重建。
 - **Phase 5**：S6/S7 类型与符号（PDB）。
@@ -114,7 +113,68 @@
 验收以各 ticket 的正文为准；Phase 1 整体另需：上述新测试全绿、`flake8 --max-line-length=120` 干净、
 `pyproject.toml` 无改动。
 
-## 7. 明确不做
+## 7. Phase 2：反编译 MVP（S2 边界 + S9）
+
+目标：单函数伪代码——表达式 + 控制流结构，**不做类型还原**。路线与取舍见本地调研
+`decompiler-options.md`（S0–S5、六条验收），本阶段只实现其中的最小链。
+
+### 7.1 共同约束
+
+- 纯 Python；capstone 已是 `disasm` extra，不新增依赖。
+- `pydbg.analysis.decompile` 不加载 `_pydbg`（ADR-0001）。
+- 诚实降级：未建模指令 → `// unhandled: <mnemonic> <op_str>`；不可约区域 → `label` + `goto`；
+  任何指令都不静默丢。
+- 失败：函数不在函数表、或没有可解码指令 → 返回 `None`，不抛。
+
+### 7.2 交付项
+
+1. **S2 精确定界**：x64 优先用 `.pdata` 的 `begin/end`（`ExceptionEntry`），替换「下一个起点」
+   启发；无 `.pdata` 时行为不变。
+2. **S9 核心**：`analysis/decompile/`（`ir.py` / `expr.py` / `render.py`），公开
+   `decompile_function(result, rva)`。S0 取范围、S1 降 IR、S2 块内表达式、S5 文本。
+3. **S9 结构化**：`structure.py`——支配树 + 自然循环（区间法是可选替代，本实现不用它）、
+   `if/else`、`while`、`do-while`、`switch`、不可约 `goto`。
+
+### 7.3 API
+
+```python
+decompile_function(result, rva, max_blocks=4096) -> DecompiledFunction | None
+DecompiledFunction(rva, text, blocks, extra_blocks, complete, unhandled, warnings)
+```
+
+- `blocks`：CFG 自己的块起点，升序，仅此而已。
+- `extra_blocks`：跳表命名的、CFG 从未构建的块起点，升序；非空时 `warnings` 含
+  `jump-table blocks`。两者分开，调用方拿 `blocks` 与 `build_function_cfg` 对照时不会
+  因为并入而自动成立。
+- `text`：C 风格，带地址注释；函数命名用 `sub_<rva>`，内存操作数保持原始
+  `[base + disp]` 形状，不做变量/字段命名——变量与结构体恢复属 Phase 5，本阶段不承诺。
+- `unhandled`：`(rva, mnemonic)` 元组，数量与 `text` 里 `// unhandled:` 行数一致。
+- `complete=False`：CFG 有未解析边或被截断；`warnings` 说明原因。
+
+### 7.4 支持子集
+
+整数指令：`mov` / `lea` / `add` / `sub` / `and` / `or` / `xor` / `imul` / `inc` / `dec` /
+`neg` / `not` / `cmp` / `test` / `jcc` / `jmp` / `call` / `ret` / `push` / `pop`。
+EFLAGS 作为伪寄存器：写指令声明写全 6 个标志，`jcc` 声明读它实际需要的子集；子寄存器别名
+（`al/ax/eax/rax` 等）归一。`push`/`pop` 可能降成显式的栈指针调整；栈指针不用于参数/局部变量
+恢复（属 Phase 5），也不做完整帧还原。
+
+### 7.5 验收
+
+1. 五类控制流各有 golden 测试：`if/else`、`while`、`do-while`、嵌套循环（C 的 `for` 与
+   `while` 共用一种形状）+ `break/continue`、4 分支 `switch`；其中 `if/else` 与 `while`
+   断言整段文本（golden），其余形状断言关键词与缩进。
+2. 输出引用的 RVA 集合 ==（CFG 块的指令集合 ∪ `extra_blocks` 的指令集合），且
+   CFG 块的指令集合 ⊆ 输出；不静默丢，switch 也按此等式验收（不排除）。
+3. `// unhandled:` 行数 == IR 里 `Opaque` 语句数。
+4. 不可约函数输出 `label`/`goto`，仍满足第 2 条。
+5. 500 条指令的函数反编译 < 100 ms（复用 `InstructionDecoder` 缓存，不重复解码）。
+6. 同一函数两次调用输出字节级一致（无集合迭代顺序泄漏）。
+
+Phase 2 整体另需：新测试全绿、`flake8 --max-line-length=120` 干净、`pyproject.toml` 无改动、
+README 在集成阶段统一更新。
+
+## 8. 明确不做
 
 GUI、正式 CLI、插件机制、AArch64、.NET/CLR 分析、内核/ETW、自建 DBI 引擎、BinDiff、
 一键自动脱壳、商业类型库与签名库本体。

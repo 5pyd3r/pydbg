@@ -64,6 +64,7 @@ from .values import (
     DECIDED, UNDECIDED, Bound, ValueSet, narrow_by_guards,
     unresolved_write_count, value_set_of, writes_to,
 )
+from .decompile import DecompiledFunction, decompile_function
 
 __all__ = [
     'StaticAnalyzer', 'analyze_file', 'analyze_bytes', 'analyze_pe',
@@ -94,4 +95,5 @@ __all__ = [
     'memory_base_registers',
     'Bound', 'ValueSet', 'DECIDED', 'UNDECIDED', 'writes_to', 'value_set_of',
     'narrow_by_guards', 'unresolved_write_count',
+    'DecompiledFunction', 'decompile_function',
 ]
