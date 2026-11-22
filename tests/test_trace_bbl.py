@@ -163,6 +163,26 @@ class TestBblTracerPlanning(_LiveTestCase):
         self.assertEqual(summary.reason, STOP_NO_BLOCKS,
                          "an untraceable module must state why, not be silent")
 
+    def test_plan_returns_zero_for_a_region_that_is_not_a_pe(self):
+        """A region with no CFG is untraceable; plan() answers 0, not an error."""
+        from tests.helpers import alloc_writable
+
+        base = alloc_writable(self.dbg, 0x1000)
+        self.assertTrue(base, "could not allocate a scratch region in the target")
+        tracer = BblTracer(self.dbg, module=(base, 0x1000))
+
+        self.assertEqual(tracer.plan(), 0)
+        summary = tracer.run()
+        self.assertEqual(summary.events, 0)
+        self.assertEqual(summary.reason, STOP_NO_BLOCKS)
+
+    def test_a_module_can_be_named_by_a_base_and_size_tuple(self):
+        module = self.dbg.enum_modules()[0]
+        tracer = BblTracer(self.dbg, module=(module['base_address'],
+                                             module['size']))
+
+        self.assertGreater(tracer.plan(), 0)
+
 
 @unittest.skipUnless(_has_cython, "optional dependency: Cython extension")
 class TestBblTracerRun(_LiveTestCase):

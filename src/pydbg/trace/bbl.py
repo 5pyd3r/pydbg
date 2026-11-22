@@ -36,6 +36,7 @@ leaves its debug event uncontinued and the target paused —
 `summary.single_step_pending` says so, and the caller owns that event.
 """
 
+import struct
 import time
 from dataclasses import dataclass
 
@@ -125,8 +126,9 @@ class BblTracer:
 
         Args:
             dbg: A `Debugger` with a target created or attached.
-            module: A module dict from `dbg.enum_modules()` to trace, or None
-                for the process's main module (the first one).
+            module: A module dict from `dbg.enum_modules()`, a
+                `(base_address, size)` tuple naming any region, or None for the
+                process's main module (the first one).
             max_events: Stop the run after this many BLOCK events.
             max_blocks: Never plan more block starts than this.
             sink: Callable taking each `TraceEvent`; None counts without
@@ -165,6 +167,12 @@ class BblTracer:
         decoded, or that is not in an executable section, is skipped rather
         than armed at an address that would never fire.
 
+        A module whose bytes do not parse as a PE, or whose analysis fails, is
+        untraceable too: the answer is 0, not an exception. The caller asked
+        "are there blocks to arm?", and "no" is a valid answer for a region
+        that is not code. The `module` argument accepts a `(base, size)` tuple
+        precisely so such a region can be named.
+
         Calling it twice answers with the same plan; an empty plan is recomputed
         because a module that was not loaded yet is the normal reason for one.
         """
@@ -174,14 +182,17 @@ class BblTracer:
         module = self._find_module()
         if module is None:
             return 0
-        base = module.get('base_address') or 0
+        base, _ = self._module_region(module)
         if not base:
             return 0
 
         self._base = base
         module_size = self._module_size(module)
-        result = analyze_process(self.dbg._session, base,
-                                 module_size=module_size)
+        try:
+            result = analyze_process(self.dbg._session, base,
+                                     module_size=module_size)
+        except (PydbgError, OSError, ValueError, struct.error):
+            return 0
 
         blocks = {}
         for function in result.functions.functions():
@@ -203,23 +214,33 @@ class BblTracer:
         return len(self._blocks)
 
     def _find_module(self):
-        """The module to analyze, or None when there is nothing to trace."""
+        """The module to analyze, or None when there is nothing to trace.
+
+        An unattached debugger has no module table: enum_modules() fails with
+        TypeError when there is no process handle, and that is the answer
+        rather than a reason to peek at session state first.
+        """
         if self.module is not None:
             return self.module
-        if getattr(self.dbg._session, 'pid', None) is None:
-            return None         # not attached: no module table to enumerate
         try:
             modules = self.dbg.enum_modules()
         except (PydbgError, OSError, TypeError):
             return None
         return modules[0] if modules else None
 
+    @staticmethod
+    def _module_region(module):
+        """(base_address, size) for a module dict or a (base, size) tuple."""
+        if isinstance(module, dict):
+            return module.get('base_address') or 0, module.get('size')
+        base, size = module
+        return base or 0, size
+
     def _module_size(self, module):
         """Byte span of the module: its PE image size, or its mapped region."""
-        size = module.get('size')
+        base, size = self._module_region(module)
         if size:
             return size
-        base = module.get('base_address')
         try:
             for region in self.dbg.enum_regions():
                 if region.get('base_address') == base:
