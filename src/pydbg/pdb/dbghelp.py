@@ -1,11 +1,14 @@
-"""Symbol enumeration through an offline dbghelp session (spec §10.2, §10.3).
+"""dbghelp sessions for symbols and types, offline (spec §10.2, §10.3).
 
 dbghelp can read a PDB without a debuggee, but only if it is handed the image:
 the image names the PDB and its preferred base, and the PDB's directory is the
-symbol search path. This module owns that session, the ctypes bindings, and the
-translation from SYMBOL_INFOW records to `PdbSymbol`.
+symbol search path. This module owns that session, the ctypes bindings, the
+translation from SYMBOL_INFOW records to `PdbSymbol`, and the TI_* type reader
+the layouts are built from. Both readers share one session and one lock because
+that is what dbghelp requires; `types.py` decides what a type *means*, this
+module only asks the questions.
 
-Three measured properties shape the code (research/pdb-format.md §B5-B9):
+Four measured properties shape the code (research/pdb-format.md §B5-B9):
 
 - dbghelp is process-wide and single threaded, so every call — including the
   enumeration callback's — runs under one module-level `RLock`.
@@ -13,16 +16,21 @@ Three measured properties shape the code (research/pdb-format.md §B5-B9):
   loaded". The session remembers what it loaded and resolves the base instead.
 - An exception must never cross back into C: the callback captures it, stops
   the enumeration by returning FALSE, and the Python side raises after.
+- A type stream must be opened before it can be queried: SymGetTypeInfo answers
+  E_INVALIDARG for ids that are valid afterwards, and SymGetTypeFromNameW
+  returns a bogus index, until SymEnumTypesW has run. `TypeReader` therefore
+  primes through the session before every query.
 
 `symbols()` returning an empty tuple is not evidence of success — dbghelp
 returns TRUE for an empty or fully mismatched enumeration. The caller
 (`analysis`) records "pdb: no symbols" when that happens; this layer does not
-turn emptiness into an error.
+turn emptiness into an error. The same holds for an empty type stream.
 """
 
 import atexit
 import ctypes
 import os
+import struct
 import threading
 from dataclasses import dataclass
 
@@ -56,6 +64,25 @@ KIND_UNKNOWN = "unknown"
 # structure size, and ctypes arrays cannot express "however long the callback
 # says", so the name is read with `wstring_at` from this offset.
 NAME_OFFSET = 84
+
+# `IMAGEHLP_SYMBOL_TYPE_INFO` values this package calls, measured in
+# research/pdb-format.md §B8. pInfo is the pointer type each query writes:
+# DWORD for tags/ids/offsets/counts, ULONG64 for lengths, WCHAR** for names,
+# and the raw TI_FINDCHILDREN_PARAMS buffer for a child array.
+TI_GET_SYMTAG = 0
+TI_GET_SYMNAME = 1
+TI_GET_LENGTH = 2
+TI_GET_TYPE = 3
+TI_GET_BASETYPE = 5
+TI_FINDCHILDREN = 7
+TI_GET_OFFSET = 10
+TI_GET_COUNT = 12
+TI_GET_CHILDRENCOUNT = 13
+TI_GET_BITPOSITION = 14
+
+# SymGetTypeFromNameW fills a SYMBOL_INFOW whose name is copied into the
+# caller's buffer; 1 KiB is far beyond any measured type name.
+MAX_TYPE_NAME = 0x400
 
 
 @dataclass(frozen=True)
@@ -194,6 +221,27 @@ def _record_callback(records, failures):
     return callback
 
 
+def _type_record_callback(records, failures):
+    """The `SymEnumTypesW` callback: one (TypeIndex, Tag) per enumerated type.
+
+    Same exception discipline as `_record_callback`: an exception must not cross
+    into C, so it is captured and the enumeration stops. Only the two fields the
+    type layer needs are copied out; names are read later through TI_GET_SYMNAME
+    (which allocates) rather than borrowed from the callback's buffer.
+    """
+
+    def callback(info, _size, _context):
+        try:
+            symbol = info.contents
+            records.append((symbol.TypeIndex, symbol.Tag))
+        except Exception as exc:      # must not cross the C boundary
+            failures.append(exc)
+            return False
+        return True
+
+    return callback
+
+
 class _Dbghelp:
     """ctypes prototypes for the dbghelp entry points this package calls.
 
@@ -245,6 +293,18 @@ class _Dbghelp:
             ctypes.c_void_p, ctypes.c_uint64, ctypes.c_wchar_p,
             ctypes.c_void_p, ctypes.c_void_p]
         dll.SymEnumSymbolsW.restype = ctypes.c_int
+        dll.SymEnumTypesW.argtypes = [
+            ctypes.c_void_p, ctypes.c_uint64, ctypes.c_void_p,
+            ctypes.c_void_p]
+        dll.SymEnumTypesW.restype = ctypes.c_int
+        dll.SymGetTypeFromNameW.argtypes = [
+            ctypes.c_void_p, ctypes.c_uint64, ctypes.c_wchar_p,
+            ctypes.POINTER(SYMBOL_INFOW)]
+        dll.SymGetTypeFromNameW.restype = ctypes.c_int
+        dll.SymGetTypeInfo.argtypes = [
+            ctypes.c_void_p, ctypes.c_uint64, ctypes.c_uint32, ctypes.c_int,
+            ctypes.c_void_p]
+        dll.SymGetTypeInfo.restype = ctypes.c_int
         dll.UnDecorateSymbolName.argtypes = [
             ctypes.c_wchar_p, ctypes.c_wchar_p, ctypes.c_uint32,
             ctypes.c_uint32]
@@ -286,6 +346,42 @@ class _Dbghelp:
         procedure = callback_type(callback)
         return bool(self._load().SymEnumSymbolsW(
             handle, base, None, ctypes.cast(procedure, ctypes.c_void_p), None))
+
+    def enum_types(self, handle, base, callback):
+        """Enumerate one module's types through 'callback'.
+
+        This is also what opens the module's type stream for SymGetTypeInfo and
+        SymGetTypeFromNameW (see `TypeReader`), so callers that only want the
+        stream opened still go through here.
+        """
+        callback_type = ctypes.WINFUNCTYPE(
+            ctypes.c_int, ctypes.POINTER(SYMBOL_INFOW), ctypes.c_uint32,
+            ctypes.c_void_p)
+        procedure = callback_type(callback)
+        return bool(self._load().SymEnumTypesW(
+            handle, base, ctypes.cast(procedure, ctypes.c_void_p), None))
+
+    def get_type_info(self, handle, base, type_id, kind, info):
+        """One `SymGetTypeInfo` call; 'info' is the pInfo buffer for 'kind'."""
+        return bool(self._load().SymGetTypeInfo(handle, base, type_id, kind,
+                                                info))
+
+    def type_from_name(self, handle, base, name):
+        """The type id `SymGetTypeFromNameW` assigns to 'name', or None.
+
+        Requires the type stream to be open first: on a fresh module this call
+        was measured to answer with a bogus index instead of failing (see
+        `TypeReader.find_type`).
+        """
+        buffer = ctypes.create_string_buffer(
+            ctypes.sizeof(SYMBOL_INFOW) + MAX_TYPE_NAME)
+        symbol = SYMBOL_INFOW.from_buffer(buffer)
+        symbol.SizeOfStruct = ctypes.sizeof(SYMBOL_INFOW)
+        symbol.MaxNameLen = MAX_TYPE_NAME
+        if not self._load().SymGetTypeFromNameW(handle, base, name,
+                                                ctypes.byref(symbol)):
+            return None
+        return symbol.TypeIndex
 
     def undecorate(self, name):
         """The NAME_ONLY form of 'name', or None when dbghelp cannot decode it."""
@@ -343,16 +439,36 @@ class _Session:
         self.api = api
         self.search_path = search_path
         self.loaded = {}
-        self.handle = api.current_process()
-        api.set_options(SYM_SET_OPTIONS)
-        if not api.initialize(self.handle, search_path):
+        self.types_loaded = {}
+        self._open()
+
+    def _open(self):
+        """Start a fresh SymInitializeW session for `self.search_path`."""
+        self.handle = self.api.current_process()
+        self.api.set_options(SYM_SET_OPTIONS)
+        if not self.api.initialize(self.handle, self.search_path):
             raise PdbError("dbghelp session could not be initialized "
                            f"(error {ctypes.get_last_error()})")
+
+    def restart(self):
+        """Drop every loaded module and start a fresh session.
+
+        dbghelp holds at most one module per address. Unloading a module by
+        hand would leave the other Pdb's cache claiming a module that is gone,
+        so a collision resets the session and lets each reader reload what it
+        asks for. Two images that share a preferred base therefore alternate
+        rather than coexist; their already-returned results stay valid.
+        """
+        self.api.cleanup(self.handle)
+        self.loaded.clear()
+        self.types_loaded.clear()
+        self._open()
 
     def close(self):
         """End the session; a failure is not worth raising during teardown."""
         self.api.cleanup(self.handle)
         self.loaded.clear()
+        self.types_loaded.clear()
 
     def load(self, image_path, requested_base, preferred_base):
         """Load 'image_path' once and return the base its symbols use.
@@ -360,11 +476,20 @@ class _Session:
         `SymLoadModuleExW` returns 0 both on failure and when the module is
         already loaded, so 0 is resolved with SymGetModuleBase64 instead of
         being reported as an error (research/pdb-format.md §B6).
+
+        A *different* image already loaded at the address this one needs cannot
+        be loaded alongside it — dbghelp would silently answer with the first
+        module's symbols — so the session is restarted first.
         """
         key = (os.path.normcase(os.path.abspath(image_path)), requested_base)
         loaded = self.loaded.get(key)
         if loaded:
             return loaded
+        target = requested_base or preferred_base
+        occupied = any(other_base == target and other_key != key
+                       for other_key, other_base in self.loaded.items())
+        if occupied:
+            self.restart()
         loaded = self.api.load_module_ex(self.handle, image_path,
                                          requested_base)
         if not loaded:
@@ -390,6 +515,145 @@ class _Session:
             raise PdbError("dbghelp symbol enumeration failed "
                            f"(error {ctypes.get_last_error()})")
         return records
+
+    def type_records(self, base):
+        """Every (TypeIndex, Tag) the module loaded at 'base' describes.
+
+        This call has a side effect the type layer depends on: measured,
+        SymGetTypeInfo answers E_INVALIDARG for a valid type id until
+        SymEnumTypesW has run, and SymGetTypeFromNameW instead returns a bogus
+        index (1 for a type whose real index is 227). Enumerating therefore
+        primes the stream, and the result is cached per loaded module so later
+        reads do not pay for it again.
+        """
+        records = self.types_loaded.get(base)
+        if records is not None:
+            return records
+        collected = []
+        failures = []
+        ok = self.api.enum_types(self.handle, base,
+                                 _type_record_callback(collected, failures))
+        if failures:
+            error = failures[0]
+            raise PdbError(
+                f"dbghelp type enumeration failed: {error}") from error
+        if not ok:
+            raise PdbError("dbghelp type enumeration failed "
+                           f"(error {ctypes.get_last_error()})")
+        records = tuple(collected)
+        self.types_loaded[base] = records
+        return records
+
+
+class TypeReader:
+    """The TI_* queries for one module, used only inside `read_types`.
+
+    A TypeIndex is meaningful only for the session that produced it, so this
+    object is handed to an action for the duration of one call and never kept.
+    Callers must already hold `_lock`; `read_types` guarantees that.
+
+    Every query opens the module's type stream first (`types()`): measured,
+    SymGetTypeInfo answers E_INVALIDARG for ids that are valid afterwards until
+    SymEnumTypesW has run, so a fresh session cannot answer even a raw id it was
+    handed. The first call pays for the enumeration; later ones hit the cache.
+    """
+
+    def __init__(self, session, base):
+        self._session = session
+        self._base = base
+
+    def _value(self, type_id, kind, fmt, size):
+        """One scalar `SymGetTypeInfo` query, or None when it fails."""
+        self.types()
+        buffer = ctypes.create_string_buffer(size)
+        if not self._session.api.get_type_info(
+                self._session.handle, self._base, type_id, kind, buffer):
+            return None
+        return struct.unpack_from(fmt, buffer.raw)[0]
+
+    def sym_tag(self, type_id):
+        """`TI_GET_SYMTAG`: the SymTag kind of 'type_id', or None."""
+        return self._value(type_id, TI_GET_SYMTAG, "<I", 4)
+
+    def length(self, type_id):
+        """`TI_GET_LENGTH`: bytes for a type, bits for a bitfield *member*."""
+        return self._value(type_id, TI_GET_LENGTH, "<Q", 8)
+
+    def base_type(self, type_id):
+        """`TI_GET_BASETYPE`: the cvconst BasicType number, or None."""
+        return self._value(type_id, TI_GET_BASETYPE, "<I", 4)
+
+    def type_of(self, type_id):
+        """`TI_GET_TYPE`: the pointed-to, element, underlying or member type."""
+        return self._value(type_id, TI_GET_TYPE, "<I", 4)
+
+    def count(self, type_id):
+        """`TI_GET_COUNT`: an array's element count, or None."""
+        return self._value(type_id, TI_GET_COUNT, "<I", 4)
+
+    def offset(self, member_id):
+        """`TI_GET_OFFSET`: a member's byte offset, or None."""
+        return self._value(member_id, TI_GET_OFFSET, "<I", 4)
+
+    def bit_position(self, member_id):
+        """`TI_GET_BITPOSITION`: bit offset inside the storage unit, or None.
+
+        A plain member answers FALSE, which is how a bitfield is recognised.
+        """
+        return self._value(member_id, TI_GET_BITPOSITION, "<I", 4)
+
+    def sym_name(self, type_id):
+        """`TI_GET_SYMNAME`: the type or member name, or None.
+
+        dbghelp allocates the string with LocalAlloc; it is copied into Python
+        and freed before returning, on both the success and failure paths.
+        """
+        self.types()
+        pointer = ctypes.c_void_p()
+        if not self._session.api.get_type_info(
+                self._session.handle, self._base, type_id, TI_GET_SYMNAME,
+                ctypes.byref(pointer)):
+            return None
+        if not pointer:
+            return None
+        try:
+            return ctypes.wstring_at(pointer)
+        finally:
+            local_free(pointer)
+
+    def children(self, type_id):
+        """The child ids: () for no children, None when a query failed."""
+        count = self._value(type_id, TI_GET_CHILDRENCOUNT, "<I", 4)
+        if count is None:
+            return None
+        if not count:
+            return ()
+        # TI_FINDCHILDREN_PARAMS declares ChildId[1] but dbghelp writes Count
+        # entries; indexing the ctypes array past [0] would read out of bounds,
+        # so the ids are unpacked from the raw buffer (research §B8 rule 4).
+        raw = ctypes.create_string_buffer(8 + 4 * count)
+        struct.pack_into("<II", raw, 0, count, 0)
+        if not self._session.api.get_type_info(
+                self._session.handle, self._base, type_id, TI_FINDCHILDREN,
+                raw):
+            return None
+        return tuple(struct.unpack_from("<I", raw, 8 + 4 * index)[0]
+                     for index in range(count))
+
+    def types(self):
+        """Every (TypeIndex, SymTag) in the module's type stream."""
+        return self._session.type_records(self._base)
+
+    def find_type(self, name):
+        """`SymGetTypeFromNameW`: the TypeIndex for 'name', or None.
+
+        The stream is opened first; on a fresh module the call returns index 1
+        for a name whose real index is 227 (measured), so it is only usable
+        after `types()`.
+        """
+        self.types()
+        return self._session.api.type_from_name(self._session.handle,
+                                                self._base, name)
 
 
 def _close_session():
@@ -422,6 +686,28 @@ def _session_for(search_path):
     return _session
 
 
+def _loadable_image(image_path, what):
+    """The parsed image for a read, or the PdbError explaining why there is none.
+
+    Both readers (symbols and types) need the image: dbghelp locates the PDB
+    through it, and the image supplies the preferred base the module is loaded
+    at. 'what' names the read in the message ("symbols" or "types").
+    """
+    if image_path is None:
+        raise PdbError(
+            f"image path is required to read PDB {what}; construct "
+            "Pdb(path, image_path=...) or use find() on an image that has a "
+            "path")
+    image_path = os.fspath(image_path)
+    if not os.path.isfile(image_path):
+        raise PdbError(f"image for PDB {what} does not exist: {image_path}")
+    try:
+        return PE.from_file(image_path), image_path
+    except Exception as exc:          # a user-supplied file is a boundary
+        raise PdbError(f"image for PDB {what} could not be read: "
+                       f"{image_path}: {exc}") from exc
+
+
 def symbols(pdb_path, image_path, image_base=None):
     """Every named address in the PDB for 'image_path', sorted and deduplicated.
 
@@ -440,20 +726,8 @@ def symbols(pdb_path, image_path, image_base=None):
         PdbError: no image path was supplied, the image cannot be read, or
             dbghelp failed to initialize, load or enumerate.
     """
-    if image_path is None:
-        raise PdbError(
-            "image path is required to enumerate PDB symbols; construct "
-            "Pdb(path, image_path=...) or use find() on an image that has a "
-            "path")
-    image_path = os.fspath(image_path)
     pdb_path = os.fspath(pdb_path)
-    if not os.path.isfile(image_path):
-        raise PdbError(f"image for PDB symbols does not exist: {image_path}")
-    try:
-        pe = PE.from_file(image_path)
-    except Exception as exc:          # a user-supplied file is a boundary
-        raise PdbError(f"image for PDB symbols could not be read: "
-                       f"{image_path}: {exc}") from exc
+    pe, image_path = _loadable_image(image_path, "symbols")
     image_size = pe.optional_header.size_of_image
     search_path = os.path.dirname(os.path.abspath(pdb_path))
 
@@ -462,3 +736,28 @@ def symbols(pdb_path, image_path, image_base=None):
         loaded_base = session.load(image_path, image_base or 0, pe.image_base)
         records = session.enumerate(loaded_base)
         return build_symbols(records, loaded_base, image_size)
+
+
+def read_types(pdb_path, image_path, image_base, action):
+    """Run 'action(reader)' against the PDB's type stream, under the lock.
+
+    The same session and the same search-path rule as `symbols`: dbghelp is
+    process-wide and single threaded, so the action — all of whose dbghelp calls
+    go through the `TypeReader` it is given — runs inside the lock. The reader
+    is valid only for the duration of the call: TypeIndex values are session
+    scoped and must not escape.
+
+    Returns whatever 'action' returns.
+
+    Raises:
+        PdbError: no image path was supplied, the image cannot be read, or
+            dbghelp failed to load the module or enumerate its types.
+    """
+    pdb_path = os.fspath(pdb_path)
+    pe, image_path = _loadable_image(image_path, "types")
+    search_path = os.path.dirname(os.path.abspath(pdb_path))
+
+    with _lock:
+        session = _session_for(search_path)
+        loaded_base = session.load(image_path, image_base or 0, pe.image_base)
+        return action(TypeReader(session, loaded_base))

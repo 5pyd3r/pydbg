@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from .dbghelp import symbols as read_symbols
 from .errors import PdbFormatError
 from .msf import MSFFile
+from .types import layout_of as read_layout, structs as read_structs
 
 RSDS = "RSDS"     # PDB 7.0 CodeView record; the only form that carries a GUID
 NB10 = "NB10"     # PDB 2.0 CodeView record; no GUID, so no identity to check
@@ -237,6 +238,7 @@ class Pdb:
         self.image_base = image_base
         self._msf = None
         self._symbols = None
+        self._structs = None
 
     def _file(self):
         if self._msf is None:
@@ -267,6 +269,45 @@ class Pdb:
             self._symbols = read_symbols(self.path, self.image_path,
                                          self.image_base)
         return self._symbols
+
+    def structs(self):
+        """Every UDT this PDB describes, sorted by name and size.
+
+        The first call reads the type stream and caches the tuple, so repeated
+        calls compare equal and cost nothing. A layout carries no TypeIndex
+        (spec §10.2(4)); use `layout_of(name)` rather than keeping an id from
+        one call and passing it to another, because dbghelp restarts its session
+        when the symbol search path changes.
+
+        Returns:
+            tuple[StructLayout, ...]: empty when no UDT was enumerated, which —
+            like `symbols() == ()` — is not proof the PDB was read.
+
+        Raises:
+            PdbError: no image path was given, the image is missing or
+                unreadable, or dbghelp failed to enumerate the types.
+        """
+        if self._structs is None:
+            self._structs = read_structs(self.path, self.image_path,
+                                         self.image_base)
+        return self._structs
+
+    def layout_of(self, name_or_type_index):
+        """The field table of one UDT, by type name or by TypeIndex, or None.
+
+        A name is the portable key. A TypeIndex is a session-scoped id
+        (spec §10.2(4)): it is accepted for callers holding one from the same
+        live session, and means nothing in another. An unknown name, an id
+        dbghelp does not know and a type that is not a UDT all return None
+        instead of raising, so probing for a type is not an error path.
+
+        Raises:
+            TypeError: the key is neither a name nor a TypeIndex.
+            PdbError: no image path was given, the image is missing or
+                unreadable, or dbghelp failed to load the module.
+        """
+        return read_layout(self.path, self.image_path, self.image_base,
+                           name_or_type_index)
 
     def matches(self, pe_or_image):
         """Whether this PDB is the same build as 'pe_or_image'.

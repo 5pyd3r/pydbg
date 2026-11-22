@@ -11,6 +11,7 @@ from .dbghelp import PdbSymbol
 from .errors import PdbError, PdbFormatError
 from .lookup import Pdb, PdbLookup, find, open_for
 from .msf import MSFFile, PdbInfo
+from .types import Field, StructLayout
 
-__all__ = ['MSFFile', 'Pdb', 'PdbError', 'PdbFormatError', 'PdbInfo',
-           'PdbLookup', 'PdbSymbol', 'find', 'open_for']
+__all__ = ['Field', 'MSFFile', 'Pdb', 'PdbError', 'PdbFormatError', 'PdbInfo',
+           'PdbLookup', 'PdbSymbol', 'StructLayout', 'find', 'open_for']
