@@ -15,17 +15,19 @@ from dataclasses import dataclass
 
 # Where a name came from, most to least authoritative. Kept as strings rather
 # than an enum so a workspace file stays readable and forward-compatible.
-# Only sources this package actually produces are declared: "symbol" (dbghelp)
-# and "derived" (structure recovery) had no producer, so a name carrying them
-# could not exist and a precedence entry for them was dead ordering.
+# A PDB symbol is the compiler's own statement, so it outranks the two guesses
+# (`import`, `auto`) but not the export table: adding a PDB must never change a
+# name the image already supplied (spec §10.4).
 SOURCE_USER = "user"
 SOURCE_EXPORT = "export"
+SOURCE_PDB = "pdb"
 SOURCE_IMPORT = "import"
 SOURCE_AUTO = "auto"            # a made-up label: sub_401000
 
 # Ordering for conflict resolution: the first source that claims an address
 # wins, and a person always wins.
-_PRECEDENCE = (SOURCE_USER, SOURCE_EXPORT, SOURCE_IMPORT, SOURCE_AUTO)
+_PRECEDENCE = (SOURCE_USER, SOURCE_EXPORT, SOURCE_PDB, SOURCE_IMPORT,
+               SOURCE_AUTO)
 
 
 @dataclass(frozen=True)
@@ -133,18 +135,25 @@ def import_names(image):
     return names
 
 
-def auto_names(result, function_starts=True):
-    """Names the image's own metadata can supply.
+def auto_names(result, function_starts=True, pdb=None):
+    """Names the image's own metadata can supply, plus any PDB's.
 
-    Three sources, in the order they are applied — which matters, because the
-    fallback pass names everything and would otherwise bury the two that are
+    Four sources, in the order they are applied — which matters, because the
+    fallback pass names everything and would otherwise bury the ones that are
     evidence:
 
       - exports, which are the linker's own statement about what an address is;
+      - PDB symbols, the compiler's own names for functions and data, when a
+        `pdb` handle is supplied. It is duck-typed (anything with `symbols()`),
+        so this package never imports `pydbg.pdb`;
       - import thunks, which turn `sub_401234` into `CreateFileW` for any
         binary that imports it, and need no symbols at all;
       - `sub_<rva>` for every other recovered function start, so nothing is
         left without a name to refer to it by.
+
+    PDB names are added after exports so that the precedence table, not the
+    application order, decides a conflict: an export still wins. `pdb=None`
+    adds no names and is otherwise identical to not passing one.
     """
     table = NameTable()
 
@@ -152,6 +161,10 @@ def auto_names(result, function_starts=True):
         if export.rva:
             table.add(export.rva, export.name or f"ordinal_{export.ordinal}",
                       SOURCE_EXPORT)
+
+    if pdb is not None:
+        for symbol in pdb.symbols():
+            table.add(symbol.rva, symbol.name, SOURCE_PDB)
 
     slots = import_names(result.image)
     for thunk_rva, slot_rva in getattr(result, "import_thunks", {}).items():
@@ -167,13 +180,13 @@ def auto_names(result, function_starts=True):
     return table
 
 
-def resolve(result, names=None):
+def resolve(result, names=None, pdb=None):
     """The table to report with: recovered names, plus any supplied ones.
 
     Supplied names are added last so that they win — a person overriding an
     export is a deliberate act, not a conflict to be resolved silently.
     """
-    table = auto_names(result)
+    table = auto_names(result, pdb=pdb)
     for rva, name in (names or {}).items():
         if isinstance(name, Name):
             table.add(rva, name.text, name.source)
@@ -182,11 +195,12 @@ def resolve(result, names=None):
     return table
 
 
-def resolve_for(result, workspace=None):
+def resolve_for(result, workspace=None, pdb=None):
     """`resolve` over a result, with a workspace's supplied names on top.
 
     Built on request rather than during the run: it walks the exports and every
     function start, which is real work for an image with thousands of them, and
     a caller interested only in coverage should not pay for it.
     """
-    return resolve(result, workspace.names if workspace is not None else None)
+    return resolve(result, workspace.names if workspace is not None else None,
+                   pdb=pdb)
