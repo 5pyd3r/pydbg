@@ -135,10 +135,6 @@ def _eval_binary(op, left, right):
         return left | right
     if op == "^":
         return left ^ right
-    if op == "<<":
-        return left << right
-    if op == ">>":
-        return left >> right
     return None
 
 

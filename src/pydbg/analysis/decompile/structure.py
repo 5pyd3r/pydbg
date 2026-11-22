@@ -1144,14 +1144,11 @@ class _Builder:
 def build(entry, blocks, successors, slot_tables=(), decoder=None, image=None):
     """Structure one function. 'blocks' maps RVA -> IRBlock (recovered).
 
-    The blocks are expected to be already normalised (see `normalize_blocks`);
-    a mapping of raw `CFGBlock`s is normalised here as a convenience. The
-    caller that lowered the blocks owns the successor map, so the split edges
-    must come from the same normalisation it did.
+    The blocks must already be normalised (see `normalize_blocks`). The caller
+    that lowered them owns the successor map, and the split edges in that map
+    must come from the same normalisation; normalising a raw `CFGBlock` mapping
+    here would produce edges the caller never built.
     """
-    sample = next(iter(blocks.values()), None)
-    if sample is not None and hasattr(sample, "instructions"):
-        blocks = normalize_blocks(blocks)
     builder = _Builder(entry, blocks, successors,
                        slot_tables=slot_tables, decoder=decoder, image=image)
     return builder.build()
