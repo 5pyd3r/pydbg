@@ -344,6 +344,29 @@ class TestSwitch(unittest.TestCase):
         self.assertIn("eax = 99;", result.text)          # the default body
         self.assertIn(0x1038, result.blocks)             # the merge
 
+    def test_blocks_are_cfg_starts_and_extra_blocks_hold_case_starts(self):
+        """The CFG never built the case blocks; they are reported separately.
+
+        `blocks` is the CFG's block set and nothing else, so a caller comparing
+        the decompiler against `build_function_cfg` is comparing like with
+        like. The jump-table targets live in `extra_blocks`, and the warning
+        says the block set grew.
+        """
+        from pydbg.analysis import build_function_cfg, decompile_function
+        result = analyze(SWITCH, image_base=SWITCH_BASE,
+                         extra_sections=switch_extra())
+        cfg = build_function_cfg(result.decoder, result.image,
+                                 result.functions, TEXT_RVA)
+
+        decompiled = decompile_function(result, TEXT_RVA)
+
+        self.assertEqual(decompiled.blocks, tuple(sorted(cfg.blocks)))
+        self.assertEqual(tuple(sorted(decompiled.extra_blocks)),
+                         SWITCH_CASE_RVAS)
+        self.assertIn("jump-table blocks", decompiled.warnings)
+        for case_rva in SWITCH_CASE_RVAS:
+            self.assertNotIn(case_rva, decompiled.blocks)
+
     def test_the_unresolved_dispatch_edge_is_still_reported(self):
         """Structuring a switch does not make the CFG's window dressing true.
 
@@ -413,14 +436,34 @@ class TestNoSilentDrop(unittest.TestCase):
     """The P5 set equality survives every structuring decision."""
 
     def test_every_cfg_instruction_is_still_addressable(self):
-        for name, code in (("if/else", IF_ELSE), ("while", WHILE),
-                           ("do-while", DO_WHILE), ("nested", NESTED),
-                           ("irreducible", IRREDUCIBLE),
-                           ("cross edge", CROSS_EDGE)):
+        """Acceptance 2, switch included: the CFG's set plus the extra blocks.
+
+        A switch is the one shape whose case blocks the CFG never built, so its
+        expected set is the CFG instructions *union* the instructions of the
+        jump-table blocks the result names. Including it here keeps the
+        equality from being true only for the shapes that need no help.
+        """
+        from pydbg.analysis import build_function_cfg, decompile_function
+        cases = (
+            ("if/else", IF_ELSE, {}),
+            ("while", WHILE, {}),
+            ("do-while", DO_WHILE, {}),
+            ("nested", NESTED, {}),
+            ("irreducible", IRREDUCIBLE, {}),
+            ("cross edge", CROSS_EDGE, {}),
+            ("switch", SWITCH, {"image_base": SWITCH_BASE,
+                                "extra_sections": switch_extra()}),
+        )
+        for name, code, kwargs in cases:
             with self.subTest(shape=name):
-                result = analyze(code)
-                decompiled = decompile(code)
+                result = analyze(code, **kwargs)
+                decompiled = decompile_function(result, TEXT_RVA)
                 expected = cfg_instructions(result)
+                for extra in decompiled.extra_blocks:
+                    extra_cfg = build_function_cfg(
+                        result.decoder, result.image, result.functions, extra)
+                    expected |= {addr for block in extra_cfg.blocks.values()
+                                 for addr in block.instructions}
                 covered = (text_addresses(decompiled.text)
                            | text_labels(decompiled.text))
                 self.assertEqual(covered, expected, decompiled.text)

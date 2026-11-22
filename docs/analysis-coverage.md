@@ -139,9 +139,13 @@
 
 ```python
 decompile_function(result, rva, max_blocks=4096) -> DecompiledFunction | None
-DecompiledFunction(rva, text, blocks, complete, unhandled, warnings)
+DecompiledFunction(rva, text, blocks, extra_blocks, complete, unhandled, warnings)
 ```
 
+- `blocks`：CFG 自己的块起点，升序，仅此而已。
+- `extra_blocks`：跳表命名的、CFG 从未构建的块起点，升序；非空时 `warnings` 含
+  `jump-table blocks`。两者分开，调用方拿 `blocks` 与 `build_function_cfg` 对照时不会
+  因为并入而自动成立。
 - `text`：C 风格，带地址注释；命名用 `sub_<rva>` / `field_<n>` / `arg_<n>`。
 - `unhandled`：`(rva, mnemonic)` 元组，数量与 `text` 里 `// unhandled:` 行数一致。
 - `complete=False`：CFG 有未解析边或被截断；`warnings` 说明原因。
@@ -156,7 +160,8 @@ EFLAGS 作为伪寄存器：写指令声明写全 6 个标志，`jcc` 声明读�
 ### 7.5 验收
 
 1. 五类控制流各有 golden 测试：`if/else`、`while`、`do-while`、嵌套 `for` + `break/continue`、4 分支 `switch`。
-2. 输出引用的 RVA 集合 == CFG 全部块的指令集合（不静默丢）。
+2. 输出引用的 RVA 集合 ==（CFG 块的指令集合 ∪ `extra_blocks` 的指令集合），且
+   CFG 块的指令集合 ⊆ 输出；不静默丢，switch 也按此等式验收（不排除）。
 3. `// unhandled:` 行数 == IR 里 `Opaque` 语句数。
 4. 不可约函数输出 `label`/`goto`，仍满足第 2 条。
 5. 500 条指令的函数反编译 < 100 ms（复用 `InstructionDecoder` 缓存，不重复解码）。

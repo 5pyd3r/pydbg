@@ -140,6 +140,23 @@ class TestBlockExpressions(unittest.TestCase):
         self.assertNotIn("// dead:", result.text)
 
 
+class TestBlockSet(unittest.TestCase):
+    """`blocks` is the CFG's own block set, not the renderer's block set."""
+
+    def test_blocks_are_the_cfg_starts_and_extra_blocks_is_empty(self):
+        """Without a jump table there is nothing the CFG did not build."""
+        from pydbg.analysis import build_function_cfg, decompile_function
+        code = bytes.fromhex("85c07704" "83c001" "c3" "55" "c3")
+        result = analyze(code)
+        cfg = build_function_cfg(result.decoder, result.image,
+                                 result.functions, TEXT_RVA)
+
+        decompiled = decompile_function(result, TEXT_RVA)
+
+        self.assertEqual(decompiled.blocks, tuple(sorted(cfg.blocks)))
+        self.assertEqual(decompiled.extra_blocks, ())
+
+
 class TestUnhandled(unittest.TestCase):
     """Instructions outside the model stay visible and are counted once."""
 
