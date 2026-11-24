@@ -642,7 +642,79 @@ OepCandidate(rva, sources, evidence)     # sources ⊆ {"tls", "pdata-gap", "wat
 一键自动脱壳、导入表合成 / 延迟 thunk 解析、全进程快照（按页）、minidump **写**（Phase 6）、
 重定位重写、资源 / TLS / 导出表重建、签名与校验和、页级 guard 监控、WOW64 栈回溯。
 
-## 12. 明确不做
+## 12. Phase 3c：BBL 级插桩（D6）
+
+目标：在**基本块入口**放 detour，命中时由目标侧写一条 `BLOCK` 事件到目标内缓冲，Python 在停止点读回。
+不依赖单步，也不依赖 LLVM。
+
+### 12.1 边界与前提
+
+- LLVM 在本机不可用（唯一产物是 cp314 的 `_llvm_backend.pyd`，本机只有 Python 3.13、也没有 LLVM 工具链），
+  所以 payload 用 **keystone 自研机器码 stub**。`keystone-engine` 是 `patch` extra；缺失时整族按
+  `optional dependency: keystone-engine` 跳过。
+- `instrument/` 自 v0.2 冻结（#87）：本阶段新增 `src/pydbg/instrument/bbl.py`，**不修改**
+  `instrumenter.py` / `templates.py` / `llvm_backend`。旧 trampoline「原样复制被覆盖指令」的问题记进
+  `KNOWN_ISSUES`，本阶段不修。
+- x64 only；32 位与 WOW64 不做。
+- 事件沿用 trace v1 的 36 字节记录与 `TraceEvent`；`tid` 与 `ts` 在 stub 内不可得，都记 0，文档写明。
+
+### 12.2 API
+
+```python
+pydbg.instrument.bbl.BblInstrumenter(dbg, module=..., *, result=None, blocks=None,
+                                     max_blocks=4096, max_events=100_000)
+    .plan() -> tuple[BlockPlan, ...]
+    .install() -> InstallReport
+    .events() -> tuple[TraceEvent, ...]
+    .uninstall() -> tuple[str, ...]
+
+BlockPlan(rva, span, instruction_rvas, prefix_size, relocatable)
+InstallReport(installed, refused, warnings)      # refused: tuple[(rva, reason)]
+UnsupportedInstruction(PydbgError)
+```
+
+- `plan()`：块起点与 `BblTracer.plan()` **同源**（同一份 CFG），额外保留块范围、块内指令 RVA、前缀长度与
+  可重定位性；`blocks=` 显式列表覆盖；`max_blocks` 截断。
+- `install()`：逐块 `挂起其余线程 → 检查 RIP → 写 5 字节 → 恢复线程`；冲突或挂起失败 → 该块进 `refused`，
+  成功的进 `installed`；每个失败都带原因。
+- `events()`：读环形缓冲、解析成 `TraceEvent(kind=BLOCK, tid=0, ts=0, rva=块起点, a=块内指令数, b=0)` 并清空读指针。
+- `uninstall()`：先读回并校验原始字节，再写回；不匹配记 `"bytes changed under us"` 警告，不静默覆盖。
+
+### 12.3 重定位与 stub
+
+- 被覆盖的 5 字节是原指令前缀（一条长指令或几条短指令），由 capstone 解码给出。
+- RIP-relative 内存操作数：原目标 `target = insn.address + insn.size + disp`；搬到 stub 后
+  `disp' = target - (stub 内该指令末地址)`，其余位不变。
+- 被搬走的前缀里出现任何分支/返回（`call`/`jmp`/`jcc`/`ret`/`loop*`）→ `UnsupportedInstruction`（带 mnemonic 与 RVA）。
+- 块不足 5 字节可覆盖 → 拒绝。
+- stub 形状：保存会用到的寄存器与 flags → `lock xadd [head], 1` 取槽 → 写 36 字节记录 → 恢复寄存器 → 执行
+  重定位后的原始指令 → 跳回 `block + 5`。
+- 缓冲布局：32 字节头（magic 8、version u32、slot_size u32、capacity u32、head u32）+ `capacity` 个槽；
+  槽数取 2 的幂，索引用 `count & (capacity-1)`。
+
+### 12.4 线程语义
+
+改写 `[block, block+5)` 前：挂起其余线程 → 逐个 `get_context` 检查 RIP 是否落在窗口内 → 有冲突就恢复字节、
+恢复线程、以 `"target busy"` 拒绝该块（**不单步、不猜**）；挂起失败同样拒绝。任何路径下 `finally` 都要恢复线程。
+`uninstall` 走同样的窗口检查，只撤自己装的块。
+
+### 12.5 验收
+
+1. `instrument_target`：`plan() > 0` → `install()` → 跑一次 → **事件块集合 == 实际执行块集合**（与 `BblTracer`
+   对账）、未插桩块无事件、`uninstall()` 后目标字节逐字节恢复（装前/卸后快照相等）、目标正常退出；
+   开销记录块/秒，不设硬阈值。
+2. 冲突：构造「RIP 在窗口内」的 fake 线程上下文 → 该块 `refused` 且原因是 `target busy`，目标字节未改。
+3. 重定位：RIP-relative 指令重写后，用 capstone 解码 stub 字节确认 `disp'` 指回原目标；分支/返回指令与
+   <5 字节的块分别 `UnsupportedInstruction` / 拒绝。
+4. `uninstall` 手工改一个字节 → 警告 `"bytes changed under us"`，且不静默覆盖。
+5. keystone 缺失 → 全族 `optional dependency: keystone-engine` 跳过；`pyproject.toml` 不变。
+
+### 12.6 不做
+
+函数级 detour / 返回值回传、rel8/rel32 重写、32 位与 WOW64、跨线程聚合、与旧 `instrument/` 路径互通、
+每次命中回到调试器、超出 `max_blocks` 的全模块插桩。
+
+## 13. 明确不做
 
 GUI、正式 CLI、插件机制、AArch64、.NET/CLR 分析、内核/ETW、自建 DBI 引擎、BinDiff、
 一键自动脱壳、商业类型库与签名库本体。
