@@ -108,6 +108,12 @@ class TestDumpRegion(unittest.TestCase):
         self.assertEqual(dumped.load_delta, 0)
         self.assertEqual(dumped.module_name, 'scratch')
 
+    def test_a_negative_size_is_a_bad_argument_not_a_dump_failure(self):
+        dbg = FakeDebugger(image=b'', base=0x20000)
+
+        with self.assertRaises(ValueError):
+            dump_region(dbg, 0x20000, -1)
+
     def test_a_free_region_in_the_middle_is_zero_filled_and_named(self):
         base, size = 0x10000, 0x3000
         image = _pattern(size)
@@ -199,6 +205,26 @@ class TestDumpModule(unittest.TestCase):
 
         with self.assertRaisesRegex(DumpError, 'no loaded module'):
             dump_module(dbg)
+
+    def test_a_max_addr_below_the_module_end_is_a_bad_argument(self):
+        image = self._builder().build().ljust(0x8000, b'\x00')
+        base = 0x140000000
+        dbg = FakeDebugger(image=image, base=base)
+
+        with self.assertRaises(ValueError):
+            dump_module(dbg, (base, 0x8000), max_addr=base + 0x1000)
+
+    def test_an_unsupported_module_argument_is_a_bad_argument(self):
+        dbg = FakeDebugger(image=b'', base=0x140000000)
+
+        with self.assertRaises(ValueError):
+            dump_module(dbg, object())
+
+    def test_a_module_without_a_base_is_a_bad_argument(self):
+        dbg = FakeDebugger(image=b'', base=0x140000000)
+
+        with self.assertRaises(ValueError):
+            dump_module(dbg, {'base_address': 0, 'size': 0x1000})
 
 
 class TestDumpModuleLive(unittest.TestCase):

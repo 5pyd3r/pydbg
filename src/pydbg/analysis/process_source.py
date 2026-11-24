@@ -9,7 +9,7 @@ an uncommitted page, a guard page, a packed image's stub — and analysis is
 expected to degrade to the parts it can read.
 """
 
-from ..exceptions import PydbgError
+from ..exceptions import MemError
 from ..pe.source import Source
 
 
@@ -35,10 +35,11 @@ class ProcessSource(Source):
 
         An unavailable range is reported as ValueError, the Source contract:
         pe.Source.try_read then answers None and a directory walk stops where
-        the data stops instead of aborting the parse. MemoryManager.read raises
-        MemError (a PydbgError) for a page that is not committed, so it is
-        translated here — in a live module a hole means "no data at this
-        address", not "the analysis failed".
+        the data stops instead of aborting the parse. Only `MemError` — the
+        "this page could not be read" signal — is translated. Every other
+        `PydbgError` (a dead debug session, a bad handle) is a real failure and
+        keeps bubbling: "no data at this address" and "the analysis cannot
+        continue" are not the same answer.
 
         OSError is left alone: try_read already handles it, and it stays a
         distinct signal when a caller bypasses try_read.
@@ -48,7 +49,7 @@ class ProcessSource(Source):
                 f"Read past the end of the module: offset={offset:#x}")
         try:
             return self._reader(self.base_address + offset, size)
-        except PydbgError as exc:
+        except MemError as exc:
             raise ValueError(str(exc)) from exc
 
     def __repr__(self):

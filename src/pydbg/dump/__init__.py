@@ -1,8 +1,8 @@
 from .memory import DumpError, DumpedImage, Gap, dump_module, dump_region
 from .minidump import MinidumpReader
 from .oep import (
-    OepCandidate, executable_ranges_outside_functions, oep_candidates,
-    tls_callbacks, watch_writes,
+    OepCandidate, WatchResult, executable_ranges_outside_functions,
+    oep_candidates, tls_callbacks, watch_writes, watched_facts,
 )
 from .rebuild import (
     RebuildError, RebuildReport, RebuiltImage, rebuild_pe,
@@ -19,6 +19,7 @@ __all__ = [
     'RebuildReport',
     'RebuiltImage',
     'StackWalker',
+    'WatchResult',
     'dump_module',
     'dump_region',
     'executable_ranges_outside_functions',
@@ -26,4 +27,5 @@ __all__ = [
     'rebuild_pe',
     'tls_callbacks',
     'watch_writes',
+    'watched_facts',
 ]

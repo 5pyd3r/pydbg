@@ -15,12 +15,23 @@ import shutil
 import struct
 import tempfile
 import unittest
+from unittest import mock
 
+import pydbg.dump.rebuild as rebuild_module
 from pydbg.dump import (
-    DumpedImage, Gap, RebuildError, RebuildReport, RebuiltImage, rebuild_pe,
+    DumpedImage, Gap, RebuildError, RebuildReport, RebuiltImage, dump_module,
+    rebuild_pe,
 )
 from pydbg.pe import BytesSource, LoadedView, PE
+from tests import TEST_TARGET_PATH
 from tests.pe_builder import build_loaded_image_with_one_import
+
+try:
+    from pydbg import _pydbg  # noqa: F401
+
+    _has_cython = True
+except ImportError:
+    _has_cython = False
 
 IMAGE_BASE = 0x140000000
 TEXT_RVA = 0x1000
@@ -234,6 +245,84 @@ class TestEntryPointAndLoadDelta(unittest.TestCase):
         # preferred base, and the delta is only a fact in the report.
         self.assertEqual(rebuilt.report.load_delta, 0x5000)
         self.assertEqual(PE(rebuilt.data).optional_header.image_base, IMAGE_BASE)
+
+
+class TestValidate(unittest.TestCase):
+    """The read-back is the second half of validation; both answers are honest.
+
+    A written image that does not parse back cannot be produced from these
+    fixtures by construction, so the read-back itself is made to fail: the
+    branch under test is "the output is unreadable", and the test supplies that
+    failure at the one seam that can.
+    """
+
+    def _fail_read_back(self):
+        return mock.patch.object(
+            rebuild_module, '_parse_file',
+            return_value=(None, ValueError('simulated corrupt output')))
+
+    def test_a_failed_read_back_is_a_rebuild_error_with_the_reason(self):
+        data, _ = loaded_image()
+
+        with self._fail_read_back():
+            with self.assertRaisesRegex(
+                    RebuildError,
+                    r'rebuilt image does not parse back: '
+                    r'.*simulated corrupt output'):
+                rebuild_pe(dumped_image(data))
+
+    def test_validate_false_reports_the_written_size_of_image(self):
+        data, _ = loaded_image()
+
+        with self._fail_read_back():
+            rebuilt = rebuild_pe(dumped_image(data), validate=False)
+
+        self.assertIn('rebuilt image does not parse back',
+                      rebuilt.report.warnings)
+        # The report must describe the file that was written (0x3000), not the
+        # dump's stale header value (0x8000). PE(data) is the independent
+        # oracle for what the header actually says.
+        self.assertEqual(rebuilt.report.size_of_image,
+                         PE(rebuilt.data).optional_header.size_of_image)
+        self.assertEqual(rebuilt.report.size_of_image, REBUILT_SIZE_OF_IMAGE)
+
+
+class TestLiveSimpleTarget(unittest.TestCase):
+    """§11.6(4): a real live module, not a synthetic loaded-layout fixture.
+
+    The synthetic rebuild tests start from `pe_builder` images designed to be
+    rebuildable. This one starts from whatever the toolchain produced for
+    `simple_target.exe`, dumps it out of a running process exactly as a caller
+    would, and checks the rebuilt file against the exe on disk: the source of
+    truth is the PE file, never the dump under test.
+    """
+
+    @unittest.skipUnless(_has_cython, 'optional dependency: Cython extension')
+    def test_the_live_main_module_rebuilds_with_the_same_sections_and_entry(self):
+        if not os.path.isfile(TEST_TARGET_PATH):
+            self.skipTest(
+                f"target not built: {TEST_TARGET_PATH} missing (from "
+                f"TEST_TARGET_PATH); run: meson compile -C build simple_target")
+        from tests.helpers import create_debugger, teardown
+
+        source = PE.from_file(TEST_TARGET_PATH)
+        dbg, _pid, _tid = create_debugger(TEST_TARGET_PATH)
+        try:
+            dumped = dump_module(dbg)
+            rebuilt = rebuild_pe(dumped)
+        finally:
+            teardown(dbg)
+
+        parsed = PE(rebuilt.data)
+        self.assertEqual(len(parsed.sections), len(source.sections))
+        self.assertEqual([section.name for section in parsed.sections],
+                         [section.name for section in source.sections])
+        self.assertEqual(parsed.optional_header.entry_point_rva,
+                         source.optional_header.entry_point_rva)
+        self.assertEqual(dumped.entry_point_rva,
+                         source.optional_header.entry_point_rva)
+        self.assertEqual(rebuilt.report.entry_point,
+                         source.optional_header.entry_point_rva)
 
 
 class TestLoadable(unittest.TestCase):

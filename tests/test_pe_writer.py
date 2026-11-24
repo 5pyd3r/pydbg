@@ -151,6 +151,32 @@ class TestWritePEHeaderPatching(unittest.TestCase):
                          [('.text', 0x60000020), ('.rdata', 0x60000020)])
 
 
+class TestFileLayout(unittest.TestCase):
+    """The shared layout calculation that write_pe and rebuild_pe both use."""
+
+    def test_the_layout_matches_the_written_header_and_section_table(self):
+        from pydbg.pe import PE, file_layout, write_pe
+
+        data, _ = loaded_layout_image()
+        loaded = parse_loaded(data)
+
+        layout = file_layout(loaded)
+        written = PE(write_pe(loaded, data))
+
+        self.assertEqual(layout.size_of_image,
+                         written.optional_header.size_of_image)
+        self.assertEqual(layout.size_of_headers,
+                         written.optional_header.size_of_headers)
+        self.assertEqual(
+            [(section.raw_pointer, section.raw_size)
+             for section in layout.sections],
+            [(section.pointer_to_raw_data, section.size_of_raw_data)
+             for section in written.sections])
+        # The fixture hard-codes SizeOfImage = 0x8000; the layout has the
+        # recomputed truth.
+        self.assertEqual(layout.size_of_image, 0x3000)
+
+
 class TestWritePELayout(unittest.TestCase):
     """Section data lands at aligned, increasing, non-overlapping offsets."""
 

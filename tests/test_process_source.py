@@ -18,7 +18,7 @@ from types import SimpleNamespace
 from unittest import mock
 
 from pydbg.analysis.process_source import ProcessSource
-from pydbg.exceptions import MemError
+from pydbg.exceptions import MemError, ProcessError
 from pydbg.pe import PE
 from pydbg.pe.view import LoadedView
 from tests.pe_builder import PEBuilder, build_loaded_image_with_one_import
@@ -122,6 +122,21 @@ class TestUnreadablePageIsNotAFailure(unittest.TestCase):
         with self.assertRaises(OSError):
             source.read(0, 2)
         self.assertIsNone(source.try_read(0, 2))
+
+    def test_a_broken_debug_session_is_not_a_missing_page(self):
+        """"Cannot read this page" and "the session is dead" are different."""
+        def broken(addr, size):
+            raise ProcessError("the debug session is gone")
+
+        source = ProcessSource(SimpleNamespace(pid=4242), BASE,
+                               size=len(self.image), reader=broken)
+
+        # A ReadProcessMemory failure is the only thing that degrades to
+        # "absent data"; anything else is a real failure and must bubble.
+        with self.assertRaises(ProcessError):
+            source.read(0, 2)
+        with self.assertRaises(ProcessError):
+            source.try_read(0, 2)
 
 
 class TestParsingAHoleyModule(unittest.TestCase):

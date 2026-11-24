@@ -10,6 +10,12 @@ where the reason actually lives.
 
 `DumpedImage.data` is indexed from the module base (`data[i]` is `base + i`),
 and every gap RVA uses the same origin.
+
+Errors are split by cause: a bad argument (a negative size, an address ceiling
+that would truncate the module, an unsupported module record) raises
+`ValueError`, because the caller asked for something impossible; `DumpError` is
+reserved for runtime failures — no module to dump, no memory access, bytes that
+are not a PE image.
 """
 
 from dataclasses import dataclass
@@ -73,6 +79,10 @@ def dump_region(dbg, base, size, *, name=None):
 
     No header is read and no size is guessed: the caller's range is the range.
     rva_base/image_base are 'base', entry_point_rva/load_delta are 0.
+
+    Raises:
+        ValueError: 'size' is negative — an impossible request, not a failed
+            dump.
     """
     base = int(base)
     size = int(size)
@@ -105,6 +115,12 @@ def dump_module(dbg, module=None, *, max_addr=None):
     what a 32-bit target needs (0x100000000). It defaults to the module's own
     end. A ceiling below that end would silently truncate the image, so it is
     refused rather than quietly obeyed.
+
+    Raises:
+        ValueError: the module argument is unusable, or 'max_addr' would
+            truncate the module (a bad request).
+        DumpError: nothing could be dumped — no module to dump, the memory
+            could not be read, or the bytes at the base are not a PE image.
     """
     base, size_hint, name = _resolve_module(dbg, module)
     pe = _parse_loaded_pe(dbg, base, size_hint)
@@ -114,7 +130,7 @@ def dump_module(dbg, module=None, *, max_addr=None):
             f"not a PE image at 0x{base:X}: SizeOfImage is {size_of_image}")
     end = base + size_of_image
     if max_addr is not None and end > max_addr:
-        raise DumpError(
+        raise ValueError(
             f"module at 0x{base:X} ends at 0x{end:X}, past max_addr "
             f"0x{max_addr:X}")
 
@@ -135,7 +151,13 @@ def dump_module(dbg, module=None, *, max_addr=None):
 
 
 def _resolve_module(dbg, module):
-    """(base, size hint, name) for a module argument, or DumpError."""
+    """(base, size hint, name) for a module argument.
+
+    Raises:
+        ValueError: the argument is not a module record the dump accepts (not
+            a dict, not a (base, size) pair, or a record with no base address).
+        DumpError: there is no module to dump or they cannot be enumerated.
+    """
     if module is None:
         try:
             modules = dbg.enum_modules()
@@ -152,9 +174,9 @@ def _resolve_module(dbg, module):
         base, size_hint = int(module[0]), int(module[1])
         name = None
     else:
-        raise DumpError(f"unsupported module argument: {module!r}")
+        raise ValueError(f"unsupported module argument: {module!r}")
     if base <= 0:
-        raise DumpError(f"module has no base address: {module!r}")
+        raise ValueError(f"module has no base address: {module!r}")
     return base, max(size_hint, 0), name
 
 
