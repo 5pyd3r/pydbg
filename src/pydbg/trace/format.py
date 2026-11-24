@@ -44,6 +44,17 @@ _U64_MAX = 0xFFFFFFFFFFFFFFFF
 HEADER_SIZE = _HEADER.size
 RECORD_SIZE = _RECORD.size
 
+# The record layout is public because target-side writers reproduce it by
+# instruction, not by pack(): the BBL stub writes each field with a `mov` to
+# `[rcx + offset]`, and the event ring's slots are the record byte for byte.
+# Both derive from the one struct above, and the offsets are computed from it
+# so a format change moves them instead of leaving stale constants behind.
+RECORD_STRUCT = _RECORD
+RECORD_RVA_OFFSET = struct.calcsize("<B3xI")     # 8
+RECORD_TS_OFFSET = struct.calcsize("<B3xII")     # 12
+RECORD_A_OFFSET = RECORD_TS_OFFSET + 8           # 20
+RECORD_B_OFFSET = RECORD_A_OFFSET + 8            # 28
+
 
 def _check_uint(name, value, limit):
     """Require an int in [0, limit]; ValueError names the offending field."""

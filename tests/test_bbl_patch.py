@@ -6,6 +6,10 @@ it writes. A fake debugger stands in for the extension: it owns a memory image
 and a handful of threads, and every thread action is recorded so a test can ask
 whether a refusal still resumed what it suspended.
 
+The installed patch is a value (`InstalledPatch`), not state hidden on the
+debugger: the test that destroys the installing debugger and uninstalls through
+a second one is the point of that shape.
+
 The live test at the bottom patches one byte of `instrument_target`'s
 `add_numbers` with an INT3 placeholder (and does not execute it), reads it back,
 and restores the original bytes. It needs the Cython extension and a built
@@ -16,7 +20,12 @@ import os
 import unittest
 
 from pydbg.exceptions import PydbgError
-from pydbg.instrument.bbl import TargetBusy, install_patch, uninstall_patch
+from pydbg.instrument.bbl import (
+    InstalledPatch,
+    TargetBusy,
+    install_patch,
+    uninstall_patch,
+)
 
 # The page protections the code under test moves the page through.
 PAGE_EXECUTE_READ = 0x20
@@ -166,11 +175,11 @@ class TestInstallPatchRefuses(unittest.TestCase):
 
     def test_a_thread_inside_the_window_refuses_the_patch(self):
         with self.assertRaises(TargetBusy) as caught:
-            install_patch(self.dbg, BLOCK, PATCH)
+            install_patch(self.dbg, BLOCK, PATCH, original=ORIGINAL)
 
         error = caught.exception
         self.assertIsInstance(error, PydbgError)
-        self.assertEqual(error.rva, BLOCK)
+        self.assertEqual(error.address, BLOCK)
         self.assertEqual(error.tid, self.busy.tid)
         self.assertIn("target busy", str(error))
         self.assertEqual(self.dbg.writes, [],
@@ -191,11 +200,32 @@ class TestInstallPatchRefuses(unittest.TestCase):
         self.idle.resume_error = OSError(6, "invalid handle")
 
         with self.assertRaises(TargetBusy) as caught:
-            install_patch(self.dbg, BLOCK, PATCH)
+            install_patch(self.dbg, BLOCK, PATCH, original=ORIGINAL)
 
         self.assertEqual(len(caught.exception.warnings), 1)
         self.assertTrue(caught.exception.warnings[0].startswith(
             f"thread {self.idle.tid}:"), caught.exception.warnings)
+
+    def test_a_changed_pre_image_refuses_instead_of_overwriting_it(self):
+        """Another owner's INT3 is not ours to replace."""
+        other = b"\xCC" + ORIGINAL[1:]
+        self.dbg.put(BLOCK, other)
+        self.busy.rip = 0x7FF000001000      # no thread in the window; bytes refuse
+
+        with self.assertRaises(TargetBusy) as caught:
+            install_patch(self.dbg, BLOCK, PATCH, original=ORIGINAL)
+
+        error = caught.exception
+        self.assertEqual(error.address, BLOCK)
+        self.assertIn("bytes changed under us", str(error))
+        self.assertEqual(self.dbg.writes, [])
+        self.assertEqual(self.dbg.bytes_at(BLOCK, len(ORIGINAL)), other)
+        # The refusal happens inside the suspended window, so every thread it
+        # suspended is resumed again.
+        self.assertEqual([thread.suspend_count
+                          for thread in (self.busy, self.idle)], [0, 0])
+        self.assertEqual(sorted(self.dbg.resume_calls),
+                         sorted([self.busy.tid, self.idle.tid]))
 
 
 class TestInstallPatchWrites(unittest.TestCase):
@@ -208,9 +238,9 @@ class TestInstallPatchWrites(unittest.TestCase):
         self.dbg.put(BLOCK, ORIGINAL)
 
     def test_the_patch_is_written_once_and_every_thread_resumes(self):
-        warnings = install_patch(self.dbg, BLOCK, PATCH)
+        installed = install_patch(self.dbg, BLOCK, PATCH, original=ORIGINAL)
 
-        self.assertEqual(warnings, ())
+        self.assertEqual(installed.warnings, ())
         self.assertEqual(self.dbg.writes, [(BLOCK, PATCH)])
         self.assertEqual(len(self.dbg.writes[0][1]), len(PATCH))
         self.assertEqual(self.dbg.bytes_at(BLOCK, len(PATCH)), PATCH)
@@ -219,8 +249,16 @@ class TestInstallPatchWrites(unittest.TestCase):
         self.assertEqual([thread.suspend_count
                           for thread in (self.first, self.second)], [0, 0])
 
+    def test_the_record_names_the_address_the_patch_and_the_original(self):
+        installed = install_patch(self.dbg, BLOCK, PATCH, original=ORIGINAL)
+
+        self.assertEqual(installed, InstalledPatch(BLOCK, PATCH, ORIGINAL))
+        self.assertEqual(installed.address, BLOCK)
+        self.assertEqual(installed.patch, PATCH)
+        self.assertEqual(installed.original, ORIGINAL)
+
     def test_the_page_is_made_writable_and_then_restored(self):
-        install_patch(self.dbg, BLOCK, PATCH)
+        install_patch(self.dbg, BLOCK, PATCH, original=ORIGINAL)
 
         self.assertEqual(self.dbg.protect_calls, [
             (BLOCK, len(PATCH), PAGE_EXECUTE_READWRITE),
@@ -238,19 +276,30 @@ class TestInstallPatchWrites(unittest.TestCase):
 
                 if refused:
                     with self.assertRaises(TargetBusy):
-                        install_patch(dbg, BLOCK, PATCH)
+                        install_patch(dbg, BLOCK, PATCH, original=ORIGINAL)
                     self.assertEqual(dbg.writes, [])
                 else:
-                    self.assertEqual(install_patch(dbg, BLOCK, PATCH), ())
+                    installed = install_patch(
+                        dbg, BLOCK, PATCH, original=ORIGINAL)
+                    self.assertEqual(installed.warnings, ())
                     self.assertEqual(dbg.writes, [(BLOCK, PATCH)])
 
     def test_an_empty_patch_is_refused(self):
         with self.assertRaises(PydbgError):
-            install_patch(self.dbg, BLOCK, b"")
+            install_patch(self.dbg, BLOCK, b"", original=ORIGINAL)
 
         self.assertEqual(self.dbg.writes, [])
         self.assertEqual(self.dbg.suspend_calls, [],
                          "nothing needs suspending for a refused empty patch")
+
+    def test_a_patch_longer_than_its_pre_image_is_refused(self):
+        with self.assertRaises(PydbgError):
+            install_patch(self.dbg, BLOCK, ORIGINAL + b"\x90",
+                          original=ORIGINAL)
+
+        self.assertEqual(self.dbg.writes, [])
+        self.assertEqual(self.dbg.suspend_calls, [],
+                         "the record cannot cover a restore, so refuse first")
 
 
 class TestInstallPatchFailures(unittest.TestCase):
@@ -267,7 +316,7 @@ class TestInstallPatchFailures(unittest.TestCase):
         self.blocked.suspend_error = OSError(5, "access denied")
 
         with self.assertRaises(TargetBusy) as caught:
-            install_patch(self.dbg, BLOCK, PATCH)
+            install_patch(self.dbg, BLOCK, PATCH, original=ORIGINAL)
 
         self.assertEqual(caught.exception.tid, self.blocked.tid)
         self.assertIn("cannot suspend", str(caught.exception))
@@ -285,7 +334,7 @@ class TestInstallPatchFailures(unittest.TestCase):
         self.blocked.open_error = OSError(6, "invalid handle")
 
         with self.assertRaises(TargetBusy) as caught:
-            install_patch(self.dbg, BLOCK, PATCH)
+            install_patch(self.dbg, BLOCK, PATCH, original=ORIGINAL)
 
         self.assertEqual(caught.exception.tid, self.blocked.tid)
         self.assertEqual(self.dbg.writes, [])
@@ -297,7 +346,7 @@ class TestInstallPatchFailures(unittest.TestCase):
         self.blocked.context_error = OSError(6, "invalid handle")
 
         with self.assertRaises(TargetBusy) as caught:
-            install_patch(self.dbg, BLOCK, PATCH)
+            install_patch(self.dbg, BLOCK, PATCH, original=ORIGINAL)
 
         self.assertEqual(caught.exception.tid, self.blocked.tid)
         self.assertIn("context", str(caught.exception))
@@ -311,11 +360,11 @@ class TestInstallPatchFailures(unittest.TestCase):
     def test_a_failed_resume_is_reported_not_raised(self):
         self.first.resume_error = OSError(6, "invalid handle")
 
-        warnings = install_patch(self.dbg, BLOCK, PATCH)
+        installed = install_patch(self.dbg, BLOCK, PATCH, original=ORIGINAL)
 
-        self.assertEqual(len(warnings), 1)
-        self.assertTrue(warnings[0].startswith(f"thread {self.first.tid}:"),
-                        warnings)
+        self.assertEqual(len(installed.warnings), 1)
+        self.assertTrue(installed.warnings[0].startswith(
+            f"thread {self.first.tid}:"), installed.warnings)
         self.assertEqual(self.dbg.writes, [(BLOCK, PATCH)],
                          "a resume failure must not undo a completed write")
         self.assertEqual(self.blocked.suspend_count, 0)
@@ -325,10 +374,11 @@ class TestInstallPatchFailures(unittest.TestCase):
     def test_a_page_that_cannot_be_made_read_only_again_is_reported(self):
         self.dbg.restore_error = OSError(5, "access denied")
 
-        warnings = install_patch(self.dbg, BLOCK, PATCH)
+        installed = install_patch(self.dbg, BLOCK, PATCH, original=ORIGINAL)
 
-        self.assertEqual(len(warnings), 1)
-        self.assertTrue(warnings[0].startswith("page protection at"), warnings)
+        self.assertEqual(len(installed.warnings), 1)
+        self.assertTrue(installed.warnings[0].startswith("page protection at"),
+                        installed.warnings)
         self.assertEqual(self.dbg.writes, [(BLOCK, PATCH)])
 
 
@@ -340,14 +390,14 @@ class TestUninstallPatch(unittest.TestCase):
         self.second = FakeThread(202)
         self.dbg = FakeDebugger([self.first, self.second])
         self.dbg.put(BLOCK, ORIGINAL)
-        # A real uninstall follows a real install: that is where the record of
-        # "the bytes we wrote" comes from, because the API hands uninstall only
-        # the bytes to restore.
-        self.assertEqual(install_patch(self.dbg, BLOCK, PATCH), ())
+        # A real uninstall follows a real install: the record is the only thing
+        # that says which patch the bytes should still hold.
+        self.installed = install_patch(
+            self.dbg, BLOCK, PATCH, original=ORIGINAL)
         self.dbg.reset_calls()
 
     def test_matching_bytes_are_restored_once(self):
-        warnings = uninstall_patch(self.dbg, BLOCK, ORIGINAL)
+        warnings = uninstall_patch(self.dbg, self.installed)
 
         self.assertEqual(warnings, ())
         self.assertEqual(self.dbg.read_calls, [(BLOCK, len(ORIGINAL))],
@@ -367,7 +417,7 @@ class TestUninstallPatch(unittest.TestCase):
                          PATCH[4]])
         self.dbg.put(BLOCK, changed)
 
-        warnings = uninstall_patch(self.dbg, BLOCK, ORIGINAL)
+        warnings = uninstall_patch(self.dbg, self.installed)
 
         self.assertEqual(len(warnings), 1)
         self.assertTrue(warnings[0].startswith("bytes changed under us"),
@@ -382,25 +432,26 @@ class TestUninstallPatch(unittest.TestCase):
         self.second.rip = BLOCK + len(ORIGINAL) - 1
 
         with self.assertRaises(TargetBusy) as caught:
-            uninstall_patch(self.dbg, BLOCK, ORIGINAL)
+            uninstall_patch(self.dbg, self.installed)
 
         self.assertEqual(caught.exception.tid, self.second.tid)
+        self.assertEqual(caught.exception.address, BLOCK)
         self.assertEqual(self.dbg.writes, [])
         self.assertEqual(self.dbg.bytes_at(BLOCK, len(ORIGINAL)), PATCH)
         self.assertEqual([thread.suspend_count
                           for thread in (self.first, self.second)], [0, 0])
 
-    def test_an_empty_original_is_refused(self):
+    def test_an_empty_record_is_refused(self):
         with self.assertRaises(PydbgError):
-            uninstall_patch(self.dbg, BLOCK, b"")
+            uninstall_patch(self.dbg, InstalledPatch(BLOCK, b"", ORIGINAL))
 
         self.assertEqual(self.dbg.writes, [])
 
     def test_a_second_uninstall_writes_nothing(self):
-        self.assertEqual(uninstall_patch(self.dbg, BLOCK, ORIGINAL), ())
+        self.assertEqual(uninstall_patch(self.dbg, self.installed), ())
         self.dbg.reset_calls()
 
-        self.assertEqual(uninstall_patch(self.dbg, BLOCK, ORIGINAL), ())
+        self.assertEqual(uninstall_patch(self.dbg, self.installed), ())
         self.assertEqual(self.dbg.writes, [])
         self.assertEqual(self.dbg.suspend_calls, [],
                          "a no-op uninstall must not touch the threads")
@@ -409,27 +460,40 @@ class TestUninstallPatch(unittest.TestCase):
         """A 1-byte placeholder over 5 original bytes restores all five."""
         dbg = FakeDebugger([FakeThread(1)])
         dbg.put(BLOCK, ORIGINAL)
-        self.assertEqual(install_patch(dbg, BLOCK, b"\xCC"), ())
+        installed = install_patch(dbg, BLOCK, b"\xCC", original=ORIGINAL)
+        self.assertEqual(installed.warnings, ())
         dbg.reset_calls()
 
-        self.assertEqual(uninstall_patch(dbg, BLOCK, ORIGINAL), ())
+        self.assertEqual(uninstall_patch(dbg, installed), ())
         self.assertEqual(dbg.writes, [(BLOCK, ORIGINAL)])
         self.assertEqual(dbg.bytes_at(BLOCK, len(ORIGINAL)), ORIGINAL)
 
-    def test_without_an_install_record_only_the_no_op_is_provable(self):
-        fresh = FakeDebugger([FakeThread(1)])
-        fresh.put(BLOCK, ORIGINAL)
+    def test_the_bytes_are_already_original_so_nothing_is_written(self):
+        self.dbg.put(BLOCK, ORIGINAL)
 
-        self.assertEqual(uninstall_patch(fresh, BLOCK, ORIGINAL), ())
-        self.assertEqual(fresh.writes, [])
+        self.assertEqual(uninstall_patch(self.dbg, self.installed), ())
+        self.assertEqual(self.dbg.writes, [])
+        self.assertEqual(self.dbg.suspend_calls, [])
 
-        fresh.put(BLOCK, PATCH)
-        warnings = uninstall_patch(fresh, BLOCK, ORIGINAL)
+    def test_the_record_alone_is_enough_on_a_fresh_debugger(self):
+        """Uninstall does not depend on the debugger that installed the patch."""
+        other = FakeDebugger([FakeThread(7)])
+        other.put(BLOCK, self.dbg.bytes_at(BLOCK, len(PATCH)))
+
+        self.assertEqual(uninstall_patch(other, self.installed), ())
+        self.assertEqual(other.writes, [(BLOCK, ORIGINAL)])
+        self.assertEqual(other.bytes_at(BLOCK, len(ORIGINAL)), ORIGINAL)
+
+    def test_a_record_whose_patch_was_never_there_is_not_restored(self):
+        forged = InstalledPatch(BLOCK, b"\xE9\xAA\xAA\xAA\xAA", ORIGINAL)
+        self.dbg.put(BLOCK, PATCH)
+
+        warnings = uninstall_patch(self.dbg, forged)
 
         self.assertEqual(len(warnings), 1)
         self.assertTrue(warnings[0].startswith("bytes changed under us"),
                         warnings)
-        self.assertEqual(fresh.writes, [])
+        self.assertEqual(self.dbg.writes, [])
 
 
 @unittest.skipUnless(_has_cython, "optional dependency: Cython extension")
@@ -446,12 +510,12 @@ class TestLivePatch(unittest.TestCase):
             target = export_address(dbg, _TARGET, "add_numbers")
             original = dbg.read_memory(target, len(PATCH))
 
-            warnings = install_patch(dbg, target, b"\xCC")
-            self.assertEqual(warnings, ())
+            installed = install_patch(dbg, target, b"\xCC", original=original)
+            self.assertEqual(installed.warnings, ())
             self.assertEqual(dbg.read_memory(target, 1), b"\xCC",
                              "the placeholder is not in the target")
 
-            warnings = uninstall_patch(dbg, target, original)
+            warnings = uninstall_patch(dbg, installed)
             self.assertEqual(warnings, ())
             self.assertEqual(dbg.read_memory(target, len(original)), original,
                              "the original bytes were not restored")

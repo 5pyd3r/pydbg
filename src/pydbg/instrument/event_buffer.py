@@ -31,17 +31,17 @@ read, and no lock in this Python object can prevent that.
 import struct
 
 from ..exceptions import PydbgError
-from ..trace.format import RECORD_SIZE, TraceEvent
+from ..trace.format import RECORD_SIZE, RECORD_STRUCT, TraceEvent
 
 # Buffer identity, independent of the trace file's own MAGIC: a v1 trace file
 # and a target-side ring are different containers with different headers.
 MAGIC = b"PDBGBBL\0"
 VERSION = 1
 
-# The slot is the trace v1 record, byte for byte; a record the writer side packs
-# with trace.format's `<B3xIIQQQ` must be what read() unpacks here.
+# The slot is the trace v1 record, byte for byte: the same struct the writer
+# side packs, not a copy that can drift from it.
 SLOT_SIZE = RECORD_SIZE
-SLOT_STRUCT = struct.Struct("<B3xIIQQQ")
+SLOT_STRUCT = RECORD_STRUCT
 
 # Header fields plus the reserved tail that makes the header the documented 32
 # bytes. HEAD_OFFSET is where the u32 slot counter lives; the stub bumps it.

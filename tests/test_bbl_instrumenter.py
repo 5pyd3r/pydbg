@@ -354,11 +354,35 @@ class TestInstall(unittest.TestCase):
     def test_the_original_bytes_are_read_before_the_detour_is_written(self):
         self.instrumenter().install()
 
-        self.assertEqual(self.dbg.read_calls,
-                         [(BASE + 0x1000, 5), (BASE + 0x1100, 6)])
+        # Once for the record install keeps, once more as the pre-image check
+        # inside the suspended window.
+        self.assertEqual(self.dbg.read_calls, [
+            (BASE + 0x1000, 5), (BASE + 0x1000, 5),
+            (BASE + 0x1100, 6), (BASE + 0x1100, 6),
+        ])
         addresses = [address for address, _ in self.dbg.writes]
         self.assertLess(addresses.index(BASE + 0x1000),
                         addresses.index(BASE + 0x1100))
+
+    def test_a_va_addressed_decoder_reports_refusals_as_rvas(self):
+        """`UnsupportedInstruction.rva` and `BlockPlan.rva` are one domain."""
+        rva = 0x1020
+        # A live decoder addresses by VA; the plan and the refusal by RVA.
+        branch = insn(BASE + rva, 5, "jmp", raw=b"\xE9\x00\x00\x00\x00",
+                      is_jmp=True)
+        result = make_result([branch], [rva])
+        result.decoder = SimpleNamespace(
+            decode_one=lambda address: branch if address == rva else None)
+
+        report = bbl.BblInstrumenter(
+            self.dbg, module=MODULE, result=result).install()
+
+        self.assertEqual(report.installed, ())
+        (refused_rva, reason), = report.refused
+        self.assertEqual(refused_rva, rva)
+        self.assertIn("unsupported jmp at rva 0x1020", reason)
+        self.assertNotIn(f"0x{BASE + rva:X}", reason,
+                         "the refusal leaked the decoder's VA")
 
     def test_a_block_that_cannot_host_a_detour_is_refused_with_its_reason(self):
         self.dbg.put(BASE + 0x1020, b"\xE9\x00\x00\x00\x00")
@@ -699,7 +723,7 @@ class TestUninstall(unittest.TestCase):
         self.assertEqual(self.dbg.memory.freed, [ring, STUB_REGION])
         self.assertEqual(self.instrumenter.events(), ())
 
-    def test_a_byte_changed_under_us_is_reported_and_left_alone(self):
+    def test_a_byte_changed_under_us_is_reported_and_keeps_the_memory(self):
         self.dbg.put(BASE + 0x1000, b"\xCC")
 
         warnings = self.instrumenter.uninstall()
@@ -711,6 +735,26 @@ class TestUninstall(unittest.TestCase):
         self.assertEqual(self.dbg.bytes_at(BASE + 0x1100, 6),
                          self.originals[BASE + 0x1100],
                          "the other block is still restored")
+        # A changed byte may still be our E9 with a rewritten tail: its stub
+        # and ring are reachable, so neither is released and the record stays
+        # for a later retry -- exactly the target-busy path.
+        self.assertEqual(self.dbg.memory.freed, [],
+                         "the ring and stub region still have a live detour")
+        self.assertIn("kept", warnings[-1])
+        self.assertIn(BASE + 0x1000, self.instrumenter._originals)
+
+    def test_a_changed_block_is_retried_by_a_later_uninstall(self):
+        self.dbg.put(BASE + 0x1000, b"\xCC")
+        self.instrumenter.uninstall()
+        self.dbg.writes.clear()
+
+        warnings = self.instrumenter.uninstall()
+
+        self.assertTrue(any("bytes changed under us" in warning
+                            for warning in warnings), warnings)
+        self.assertEqual(self.dbg.bytes_at(BASE + 0x1000, 1), b"\xCC")
+        self.assertEqual(self.dbg.memory.freed, [],
+                         "one refused record still pins both allocations")
 
     def test_a_second_uninstall_is_a_no_op(self):
         self.instrumenter.uninstall()
@@ -746,42 +790,106 @@ class TestUninstall(unittest.TestCase):
         self.assertEqual(self.dbg.bytes_at(BASE + 0x1000, 1), b"\xE9")
 
 
-class TestStubHint(unittest.TestCase):
-    """The pure half of the near allocator: where inside a free region to ask."""
+@needs_keystone
+class TestLifecycle(unittest.TestCase):
+    """ADR-0004: the instrumenter is a manager -- teardown and discard."""
 
-    def test_the_window_is_the_frozen_plus_or_minus_2gb(self):
+    def setUp(self):
+        _install_fixture(self)
+        self.instrumenter = bbl.BblInstrumenter(
+            self.dbg, module=MODULE, result=self.result)
+        self.originals = {
+            BASE + 0x1000: self.dbg.bytes_at(BASE + 0x1000, 5),
+            BASE + 0x1100: self.dbg.bytes_at(BASE + 0x1100, 6),
+        }
+
+    def test_teardown_undoes_every_detour_and_reports_nothing(self):
+        self.instrumenter.install()
+        ring = self.dbg.memory.allocations[0]
+        self.dbg.writes.clear()
+
+        problems = self.instrumenter.teardown()
+
+        self.assertEqual(problems, [])
+        self.assertEqual(self.dbg.bytes_at(BASE + 0x1000, 5),
+                         self.originals[BASE + 0x1000])
+        self.assertEqual(self.dbg.bytes_at(BASE + 0x1100, 6),
+                         self.originals[BASE + 0x1100])
+        self.assertEqual(self.dbg.memory.freed, [ring, STUB_REGION])
+
+    def test_teardown_reports_what_it_could_not_undo_as_a_pair(self):
+        self.instrumenter.install()
+        self.thread.rip = BASE + 0x1000 + 2
+
+        problems = self.instrumenter.teardown()
+
+        self.assertTrue(problems)
+        for where, why in problems:
+            self.assertEqual(where, "bbl instrumentation")
+            self.assertTrue(why)
+        self.assertTrue(any("target busy" in why for _, why in problems),
+                        problems)
+        self.assertEqual(self.dbg.memory.freed, [],
+                         "a detour that is still installed pins the memory")
+        self.assertEqual(self.dbg.bytes_at(BASE + 0x1100, 6),
+                         self.originals[BASE + 0x1100],
+                         "the other block was still restored")
+
+    def test_discard_forgets_without_touching_the_target(self):
+        self.instrumenter.install()
+        self.dbg.writes.clear()
+
+        self.instrumenter.discard()
+
+        self.assertEqual(self.dbg.writes, [],
+                         "a killed target has no bytes to put back")
+        self.assertEqual(self.dbg.memory.freed, [],
+                         "a killed target has no allocation to release")
+        self.assertEqual(self.instrumenter.events(), ())
+        self.assertEqual(self.instrumenter.uninstall(), ())
+        self.assertEqual(self.instrumenter._originals, {})
+
+
+class TestManagerRegistration(unittest.TestCase):
+    """A target-writing object belongs in the debugger's teardown chain."""
+
+    @unittest.skipUnless(_has_cython, "optional dependency: Cython extension")
+    def test_the_debugger_registers_it_for_teardown(self):
+        from pydbg import Debugger
+
+        self.assertIn("bbl_instrumenter", Debugger._TEARDOWN_ORDER)
+        dbg = Debugger()
+        try:
+            self.assertIsInstance(dbg.bbl_instrumenter, bbl.BblInstrumenter)
+        finally:
+            dbg.close()
+
+
+class TestModuleSplit(unittest.TestCase):
+    """One concern per module, with `bbl` keeping the historical import path."""
+
+    def test_bbl_reexports_each_split_half(self):
+        from pydbg.instrument import patch, relocate, stub
+
+        self.assertIs(bbl.UnsupportedInstruction, relocate.UnsupportedInstruction)
+        self.assertIs(bbl.take_prefix, relocate.take_prefix)
+        self.assertIs(bbl.prefix_is_relocatable, relocate.prefix_is_relocatable)
+        self.assertIs(bbl.relocate_prefix, relocate.relocate_prefix)
+        self.assertIs(bbl.build_stub, stub.build_stub)
+        self.assertIs(bbl.STUB_PROLOGUE_SIZE, stub.STUB_PROLOGUE_SIZE)
+        self.assertIs(bbl.TargetBusy, patch.TargetBusy)
+        self.assertIs(bbl.InstalledPatch, patch.InstalledPatch)
+        self.assertIs(bbl.install_patch, patch.install_patch)
+        self.assertIs(bbl.uninstall_patch, patch.uninstall_patch)
+        self.assertEqual(bbl.RECORD_SIZE, 36)
+
+
+class TestNearAllocPolicy(unittest.TestCase):
+    """The one number BBL still owns: how far the stub may land."""
+
+    def test_the_bbl_window_stays_inside_the_e9_reach(self):
         self.assertEqual(bbl._RELOC_WINDOW, _RELOC_WINDOW)
-
-    def test_an_aligned_free_region_is_used_as_is(self):
-        region = {"base_address": BASE + 0x100000, "region_size": 0x10000}
-
-        self.assertEqual(bbl._stub_hint(region, BASE, 0x1000),
-                         BASE + 0x100000)
-
-    def test_a_misaligned_region_base_is_rounded_up(self):
-        region = {"base_address": BASE + 0x100123, "region_size": 0x20000}
-
-        self.assertEqual(bbl._stub_hint(region, BASE, 0x1000),
-                         BASE + 0x110000)
-
-    def test_a_region_smaller_than_the_request_is_rejected(self):
-        region = {"base_address": BASE + 0x100000, "region_size": 0x800}
-
-        self.assertIsNone(bbl._stub_hint(region, BASE, 0x1000))
-
-    def test_a_hint_that_would_leave_the_window_is_clamped(self):
-        high = BASE + _RELOC_WINDOW
-        region = {"base_address": high - 0x8000, "region_size": 0x10000}
-
-        hint = bbl._stub_hint(region, BASE, 0x1000)
-
-        self.assertEqual(hint, high - 0x1000)
-
-    def test_a_clamp_that_falls_before_the_region_is_rejected(self):
-        high = BASE + _RELOC_WINDOW
-        region = {"base_address": high - 0x100, "region_size": 0x20000}
-
-        self.assertIsNone(bbl._stub_hint(region, BASE, 0x8000))
+        self.assertLess(bbl._RELOC_WINDOW, 0x80000000)
 
 
 class TestRingCapacity(unittest.TestCase):
@@ -806,6 +914,13 @@ class TestPublicName(unittest.TestCase):
         self.assertIn("BblInstrumenter", instrument.__all__)
         self.assertIn("BblInstrumenter", dir(instrument))
         self.assertIs(instrument.BblInstrumenter, bbl.BblInstrumenter)
+
+    def test_the_top_level_package_exposes_it_lazily_too(self):
+        import pydbg
+
+        self.assertIn("BblInstrumenter", pydbg.__all__)
+        self.assertIn("BblInstrumenter", dir(pydbg))
+        self.assertIs(pydbg.BblInstrumenter, bbl.BblInstrumenter)
 
 
 @needs_keystone

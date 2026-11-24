@@ -667,18 +667,28 @@ pydbg.instrument.bbl.BblInstrumenter(dbg, module=..., *, result=None, blocks=Non
     .install() -> InstallReport
     .events() -> tuple[TraceEvent, ...]
     .uninstall() -> tuple[str, ...]
+    .teardown() -> list[(what, why)]                 # ADR-0004：uninstall 的失败清单
+    .discard()                                        # 目标已死：只忘记记录
 
 BlockPlan(rva, span, instruction_rvas, prefix_size, relocatable)
 InstallReport(installed, refused, warnings)      # refused: tuple[(rva, reason)]
-UnsupportedInstruction(PydbgError)
+UnsupportedInstruction(PydbgError)               # rva 与 BlockPlan.rva 同域
+InstalledPatch(address, patch, original)         # 装过什么；install_patch 的返回值
 ```
+
+- 地址域：**计划（`BlockPlan`、`UnsupportedInstruction`）是 RVA，安装（`install_patch`、
+  `TargetBusy.address`）是 VA**；`install()` 在边界上做一次 `base + rva` 换算。
+- `teardown()`/`discard()` 是 ADR-0004 的管理器契约；`Debugger.close()` 按
+  `_TEARDOWN_ORDER` 调用前者，`terminate_process()` 调用后者。
 
 - `plan()`：块起点与 `BblTracer.plan()` **同源**（同一份 CFG），额外保留块范围、块内指令 RVA、前缀长度与
   可重定位性；`blocks=` 显式列表覆盖；`max_blocks` 截断。
 - `install()`：逐块 `挂起其余线程 → 检查 RIP → 写 E9 rel32 并用 NOP 填满被覆盖的整段前缀 → 恢复线程`；冲突或挂起失败 → 该块进 `refused`，
   成功的进 `installed`；每个失败都带原因。
 - `events()`：读环形缓冲、解析成 `TraceEvent(kind=BLOCK, tid=0, ts=0, rva=块起点, a=块内指令数, b=0)` 并清空读指针。
-- `uninstall()`：先读回并校验原始字节，再写回；不匹配记 `"bytes changed under us"` 警告，不静默覆盖。
+- `uninstall()`：先读回并校验原始字节，再写回；不匹配记 `"bytes changed under us"` 警告，
+  不静默覆盖。该块**仍按装着处理**（保留记录，环与 stub 区不释放——残留 E9 可能仍指向它们），
+  与 target busy 路径一致，留给下一次 uninstall 或 `discard()`。
 
 ### 12.3 重定位与 stub
 
