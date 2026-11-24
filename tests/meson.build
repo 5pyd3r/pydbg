@@ -78,6 +78,25 @@ child_target = executable(
   'target/child_target.c',
 )
 
+# Phase 4 dump acceptance targets (spec §11.6(4)). The repository had no DLL of
+# its own, so "the rebuilt image can be loaded" had no real sample to load: the
+# synthetic fixtures exercise the writer, not a module the Windows loader has
+# already mapped. The host loads the DLL and sleeps; the e2e test dumps the DLL
+# out of the live process, rebuilds it, and asks the loader to map the copy.
+# link_with is for build order and because the host is meant to be the DLL's
+# companion; the load itself is an explicit LoadLibraryW so nothing resolves it
+# implicitly.
+dump_target = shared_library(
+  'dump_target',
+  'target/dump_target.c',
+)
+
+dump_host = executable(
+  'dump_host',
+  'target/dump_host.c',
+  link_with: dump_target,
+)
+
 # Common environment: PYTHONPATH includes project root (for tests).
 # The editable install (pip install -e .) handles pydbg package discovery,
 # including the compiled Cython extension at the correct import path.
@@ -111,6 +130,10 @@ test_env.set('TEST_CHILD_TARGET',
 test_env.set('TEST_CHILD_TARGET_X64', child_target.full_path())
 test_env.set('TEST_SPAWN_CHILD',
   meson.project_source_root() / 'tests' / 'target' / 'spawn_child.exe')
+# Phase 4 e2e: the host exe and the DLL it loads, built together so the host
+# finds the DLL in its own directory.
+test_env.set('TEST_DUMP_DLL_PATH', dump_target.full_path())
+test_env.set('TEST_DUMP_HOST_PATH', dump_host.full_path())
 
 # One meson test for the whole suite. pytest discovers tests/test_*.py by name,
 # so a new test file is picked up without being registered here. The previous
