@@ -10,10 +10,12 @@ meaning at their new address:
   spec refuses rel8/rel32 rewriting outright — so a prefix containing one is
   refused rather than copied wrong (§12.6).
 
-Everything in this module is a pure function of decoded instructions and
-addresses: no process memory, no threads, no debugger. `build_stub` assembles
-its prologue with keystone (an optional extra); the relocation half is pure
-Python plus capstone-produced `Instruction` objects.
+The relocation half is a pure function of decoded instructions and addresses:
+no process memory, no threads, no debugger. `build_stub` assembles its prologue
+with keystone (an optional extra). The install half (`install_patch`,
+`uninstall_patch`) does touch a live target, but only through the debugger
+facade it is handed — this module never imports `_pydbg`, so importing it stays
+extension-free (ADR-0001).
 """
 
 import struct
@@ -331,3 +333,311 @@ def build_stub(sink, block_rva, count, relocated, resume_rva):
             f"the {STUB_PROLOGUE_SIZE} the relocated prefix was addressed for")
     return prologue + bytes(relocated) + _ABSOLUTE_JUMP + struct.pack(
         "<Q", resume_rva)
+
+
+# ── thread-safe install / uninstall ─────────────────────────────
+#
+# The target is live: between "the block plan says this block is ours" and "the
+# five bytes are written", another thread can be executing inside those same
+# bytes, and a torn instruction is not recoverable. The protocol is the one
+# spec §12.4 names: suspend every target thread, check each RIP, then write --
+# and resume every thread that was suspended on every path, refusal included.
+
+# The protection a code page is made writable with for the length of a write.
+_PAGE_EXECUTE_READWRITE = 0x40
+
+# What each install wrote, kept on the debugger it wrote through:
+# `uninstall_patch` is handed only the bytes to restore, so without this it
+# could not tell "still our detour" from "someone rewrote the bytes under us".
+# The ticket's signature is kept; the record lives on the caller's debugger and
+# goes away with it. The name is private to this module.
+_RECORDS_ATTR = '_bbl_installed_patches'
+
+
+def _records_for(dbg):
+    """The `{address: patch bytes}` record for `dbg`, created on first use.
+
+    Returns None for a debugger-shaped object that refuses attributes: install
+    still works, and uninstall falls back to only the provable no-op case.
+    """
+    records = getattr(dbg, _RECORDS_ATTR, None)
+    if records is None:
+        records = {}
+        try:
+            setattr(dbg, _RECORDS_ATTR, records)
+        except (AttributeError, TypeError):
+            return None
+    return records
+
+
+def _installed_at(dbg, rva):
+    """What install recorded for `rva`, or None when there is no record."""
+    records = getattr(dbg, _RECORDS_ATTR, None)
+    return None if records is None else records.get(rva)
+
+
+class TargetBusy(PydbgError):
+    """The patch window is not safe to rewrite right now.
+
+    Refusing is the point: a thread whose RIP is inside the bytes about to
+    change would execute a torn instruction, and stepping it out of the way is
+    guesswork the spec refuses. The same answer covers a thread that cannot be
+    suspended or whose context cannot be read -- without its RIP there is no
+    way to prove the window is clear.
+
+    Attributes:
+        rva: the patch address the caller asked for (named per the ticket; it
+            is an absolute target address, because that is what RIP is).
+        tid: the thread responsible, when one is known.
+        warnings: cleanup failures collected while unwinding, so a caller that
+            catches this still gets an honest report of unresolved resumes.
+    """
+
+    def __init__(self, message, rva=None, tid=None):
+        self.rva = rva
+        self.tid = tid
+        self.warnings = ()
+        super().__init__(message)
+
+
+def _thread_ids(dbg):
+    """The target's current thread ids.
+
+    Enumeration failure propagates: an empty list would silently turn the
+    window check off, which is the one thing this protocol must not do.
+    """
+    return [thread['tid'] for thread in dbg.enumerate_threads()]
+
+
+def _open_thread(dbg, tid, rva):
+    """Open a thread for suspension, or refuse with `TargetBusy`."""
+    try:
+        return dbg.open_thread(tid)
+    except (PydbgError, OSError) as exc:
+        raise TargetBusy(
+            f"target busy: cannot open tid={tid}: {exc}", rva=rva, tid=tid)
+
+
+def _close_thread(dbg, handle):
+    """Close a thread handle, ignoring a failed close of a dead thread."""
+    try:
+        dbg.close_handle(handle)
+    except (PydbgError, OSError):
+        pass
+
+
+def _suspend_all(dbg, rva, suspended):
+    """Suspend every target thread, appending `(tid, handle)` to `suspended`.
+
+    A suspend that fails refuses the patch: continuing with fewer suspended
+    threads would check a window that other threads can still walk into. The
+    handle opened for the failing thread is closed here; every earlier
+    suspension is in `suspended` and is resumed by the caller's `finally`.
+    """
+    for tid in _thread_ids(dbg):
+        handle = _open_thread(dbg, tid, rva)
+        try:
+            dbg.suspend_thread(handle)
+        except (PydbgError, OSError) as exc:
+            _close_thread(dbg, handle)
+            raise TargetBusy(
+                f"target busy: cannot suspend tid={tid}: {exc}",
+                rva=rva, tid=tid)
+        suspended.append((tid, handle))
+
+
+def _check_window(dbg, rva, size, suspended):
+    """Refuse when a suspended thread's RIP is inside `[rva, rva + size)`.
+
+    Every thread is suspended before any context is read, so a thread cannot
+    move into the window between its own check and the write.
+    """
+    end = rva + size
+    for tid, handle in suspended:
+        try:
+            context = dbg.get_registers(handle)
+        except (PydbgError, OSError) as exc:
+            raise TargetBusy(
+                f"target busy: cannot read the context of tid={tid}: {exc}",
+                rva=rva, tid=tid)
+        rip = context.get('rip')
+        if rip is None:
+            # x64 only (§12.1): a context without RIP cannot be proved clear.
+            raise TargetBusy(
+                f"target busy: tid={tid} has no RIP to check", rva=rva, tid=tid)
+        if rva <= rip < end:
+            raise TargetBusy(
+                f"target busy: thread {tid} is at 0x{rip:X}, inside "
+                f"[0x{rva:X}, 0x{end:X})", rva=rva, tid=tid)
+
+
+def _write_protected(dbg, rva, data):
+    """Write `data` at `rva`, restoring the page protection whatever happens.
+
+    Same pattern as `breakpoint/software.py:_write_protected`: the restore is
+    attempted on the write's failure path too, so a failed write cannot leave
+    the page writable, and a restore that fails after a successful write is
+    returned as a warning rather than raised -- the bytes are in, and the
+    caller should know the page is still writable without losing that fact.
+
+    Returns:
+        str | None: a warning when the write landed but the protection did not
+        come back; None when both succeeded.
+
+    Raises:
+        PydbgError: the write itself failed.
+    """
+    old_protect = dbg.protect_memory(rva, len(data), _PAGE_EXECUTE_READWRITE)
+    try:
+        dbg.write_memory(rva, data)
+    except BaseException:
+        try:
+            dbg.protect_memory(rva, len(data), old_protect)
+        except (PydbgError, OSError):
+            pass
+        raise
+    try:
+        dbg.protect_memory(rva, len(data), old_protect)
+    except (PydbgError, OSError) as exc:
+        return f"page protection at 0x{rva:X}: {exc}"
+    return None
+
+
+def _resume_all(dbg, suspended, warnings):
+    """Resume, in reverse, every thread this call suspended.
+
+    A failed resume is not swallowed: the thread stays suspended, and a target
+    with a frozen thread is not "patched successfully". It becomes a warning
+    because the other threads still resume and the write already succeeded.
+    """
+    for tid, handle in reversed(suspended):
+        try:
+            dbg.resume_thread(handle)
+        except (PydbgError, OSError) as exc:
+            warnings.append(f"thread {tid}: {exc}")
+        finally:
+            _close_thread(dbg, handle)
+
+
+def _run_suspended(dbg, rva, size, action):
+    """Suspend all threads, check the window, run `action`, resume all.
+
+    The resume sits in a `finally` *inside* the outer `except`, so it runs on
+    every path; the outer handler then attaches the cleanup warnings to a
+    `TargetBusy` before re-raising it with its original traceback.
+    """
+    warnings = []
+    suspended = []
+    try:
+        try:
+            _suspend_all(dbg, rva, suspended)
+            _check_window(dbg, rva, size, suspended)
+            warning = action()
+            if warning is not None:
+                warnings.append(warning)
+        finally:
+            _resume_all(dbg, suspended, warnings)
+    except TargetBusy as exc:
+        exc.warnings = tuple(warnings)
+        raise
+    return tuple(warnings)
+
+
+def install_patch(dbg, rva, patch):
+    """Write `patch` at `rva`, with every other thread provably out of the way.
+
+    `rva` is the block's absolute address in the target (module base plus the
+    block RVA): the RIP window it opens is absolute, so the caller derives it
+    from the plan's RVA rather than passing the module-relative value.
+
+    What was written is recorded on `dbg` under a private attribute, keyed by
+    address. `uninstall_patch` uses that record to prove the bytes it finds are
+    still this detour before restoring the originals; the record is dropped by
+    a successful uninstall.
+
+    Returns:
+        tuple[str, ...]: cleanup warnings, empty on a clean install. A failed
+        resume is reported as `"thread <tid>: <reason>"` rather than raised,
+        because the write may already have succeeded and the other threads
+        were resumed.
+
+    Raises:
+        TargetBusy: a thread is inside `[rva, rva + len(patch))`, or the
+            threads could not be enumerated/suspended/read. Its `tid` names
+            the blocker, and its `warnings` holds any cleanup failures.
+        PydbgError: the write (or the protection change around it) failed.
+    """
+    patch = bytes(patch)
+    if not patch:
+        raise PydbgError("cannot install an empty patch")
+    records = _records_for(dbg)
+
+    def write():
+        warning = _write_protected(dbg, rva, patch)
+        if records is not None:
+            records[rva] = patch
+        return warning
+
+    return _run_suspended(dbg, rva, len(patch), write)
+
+
+def uninstall_patch(dbg, rva, original):
+    """Restore `original` at `rva`, but only when the bytes are still ours.
+
+    The bytes are read back and compared *before* anything is suspended or
+    written. "Ours" means the patch `install_patch` recorded for this address:
+    the caller passes the bytes to restore (`original`), not the patch, so the
+    installed bytes come from that record. A mismatch -- another owner, or the
+    target itself, wrote over the detour -- is reported as a warning beginning
+    `"bytes changed under us"` and nothing is written, because restoring
+    blindly would erase that change.
+
+    Without a record (a direct call, or a new debugger) the only provable
+    state is "the bytes already are `original`": that returns no warnings and
+    writes nothing. Anything else is reported as "bytes changed under us"
+    rather than overwritten.
+
+    When the bytes still match, the restore runs through the same
+    suspend-all/check-RIP/write/resume protocol as `install_patch`, because a
+    thread can be executing inside the bytes about to be restored.
+
+    Returns:
+        tuple[str, ...]: cleanup warnings, empty on a clean restore. A changed
+        byte returns one `"bytes changed under us ..."` warning and writes
+        nothing; thread resume and protection failures are reported as on
+        install.
+
+    Raises:
+        TargetBusy: a thread is inside `[rva, rva + len(original))`, or the
+            threads could not be suspended or read. `warnings` holds cleanup
+            failures.
+        PydbgError: the read-back or the write failed.
+    """
+    original = bytes(original)
+    if not original:
+        raise PydbgError("cannot uninstall an empty patch")
+    current = bytes(dbg.read_memory(rva, len(original)))
+    expected = _installed_at(dbg, rva)
+    if expected is None:
+        expected = original
+    # The install may have written fewer bytes than `original` covers (a
+    # one-byte placeholder over five original bytes): the installed prefix
+    # must still be there, and the untouched tail must still be `original`'s.
+    if len(original) < len(expected):
+        return (f"bytes changed under us at 0x{rva:X}: the recorded patch is "
+                f"{len(expected)} bytes but only {len(original)} could be read",)
+    expected_run = expected + original[len(expected):]
+    if current != expected_run:
+        return (f"bytes changed under us at 0x{rva:X}: expected "
+                f"{expected_run.hex()}, found {current.hex()}",)
+    if current == original:
+        return ()                 # already restored; nothing to write
+    records = getattr(dbg, _RECORDS_ATTR, None)
+
+    def restore():
+        warning = _write_protected(dbg, rva, original)
+        if records is not None:
+            records.pop(rva, None)
+        return warning
+
+    return _run_suspended(dbg, rva, len(original), restore)
