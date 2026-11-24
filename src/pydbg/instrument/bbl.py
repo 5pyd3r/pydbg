@@ -138,6 +138,24 @@ def prefix_is_relocatable(insns):
                for insn in insns)
 
 
+def decoded_block_address(rva, instruction_rvas, instructions):
+    """The decoder's address for a block whose plan is keyed by an RVA.
+
+    `InstructionDecoder.decode_one()` decodes at the instruction's virtual
+    address — that is what makes a branch target and `address + size + disp`
+    meaningful — while a `BlockPlan` and the CFG speak RVAs. `take_prefix()`
+    compares instruction addresses against the block entry, so a planner that
+    passes the RVA directly sees "the first instruction is not at the block
+    entry" for every block on a real image and silently plans them all as
+    unrelocatable. The offset is a property of the decoder, recovered from the
+    first instruction it returned for the block's first RVA; a caller with no
+    decoded run keeps the RVA and lets `take_prefix()` refuse it.
+    """
+    if not instructions or not instruction_rvas:
+        return rva
+    return rva + (instructions[0].address - instruction_rvas[0])
+
+
 def _disp32_offset(insn, disp):
     """Index of the RIP-relative disp32 inside `insn.raw_bytes`.
 
@@ -982,18 +1000,22 @@ class BblInstrumenter:
     def _make_plan(rva, instruction_rvas, instructions):
         """One BlockPlan from the decoded run at `rva`."""
         span = 0
-        if instructions:
-            last = instructions[-1]
-            span = last.address + last.size - rva
         prefix_size = 0
         relocatable = False
-        try:
-            prefix = take_prefix(instructions, rva)
-        except UnsupportedInstruction:
-            pass                      # no prefix: planned, refused at install
-        else:
-            prefix_size = sum(instruction.size for instruction in prefix)
-            relocatable = prefix_is_relocatable(prefix)
+        if instructions and instruction_rvas:
+            # The decoder addresses instructions by VA while the plan is in
+            # RVAs; take_prefix compares addresses, so lift the RVA first.
+            block_address = decoded_block_address(
+                rva, instruction_rvas, instructions)
+            last = instructions[-1]
+            span = last.address + last.size - block_address
+            try:
+                prefix = take_prefix(instructions, block_address)
+            except UnsupportedInstruction:
+                pass                      # no prefix: planned, refused at install
+            else:
+                prefix_size = sum(instruction.size for instruction in prefix)
+                relocatable = prefix_is_relocatable(prefix)
         return BlockPlan(rva=rva, span=span,
                          instruction_rvas=tuple(instruction_rvas),
                          prefix_size=prefix_size, relocatable=relocatable)
@@ -1089,7 +1111,9 @@ class BblInstrumenter:
             try:
                 instructions = self._decode_rvas(
                     self._analysis, plan.instruction_rvas)
-                prefix = take_prefix(instructions, plan.rva)
+                block_address = decoded_block_address(
+                    plan.rva, plan.instruction_rvas, instructions)
+                prefix = take_prefix(instructions, block_address)
                 if not plan.relocatable:
                     # Let relocate_prefix name the branch and its RVA; its
                     # first check is the branch/return refusal. A plan that
