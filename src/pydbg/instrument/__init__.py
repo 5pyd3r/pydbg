@@ -21,9 +21,11 @@ _LAZY = {
     'Instrumenter': '.instrumenter',
     'InstrumentInfo': '.instrumenter',
     'InstrumentTemplates': '.templates',
+    'BblInstrumenter': '.bbl',
 }
 
-__all__ = ['Instrumenter', 'InstrumentInfo', 'InstrumentTemplates']
+__all__ = ['Instrumenter', 'InstrumentInfo', 'InstrumentTemplates',
+           'BblInstrumenter']
 
 
 def __getattr__(name):
