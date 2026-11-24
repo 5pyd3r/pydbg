@@ -74,6 +74,7 @@ _LAZY = {
     "Instrumenter": ".instrument",
     "InstrumentInfo": ".instrument",
     "InstrumentTemplates": ".instrument",
+    "BblInstrumenter": ".instrument",
 }
 
 
@@ -142,4 +143,5 @@ __all__ = [
     "Instrumenter",
     "InstrumentInfo",
     "InstrumentTemplates",
+    "BblInstrumenter",
 ]

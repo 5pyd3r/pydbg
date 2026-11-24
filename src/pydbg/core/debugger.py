@@ -21,6 +21,7 @@ from ..exceptions import (
     ThreadError,
     TimeoutError,
 )
+from ..instrument.bbl import BblInstrumenter
 from ..instrument.instrumenter import Instrumenter
 from ..memory.manager import MemoryManager
 from ..module.resolver import ModuleResolver
@@ -85,6 +86,10 @@ class Debugger:
         self.hook_iat = IATHook(self._session)
         self.hook_inline = InlineHook(self._session)
         self.instrumenter = Instrumenter(self._session)
+        # Unlike the session-backed managers, the BBL instrumenter is handed
+        # the facade: it reads and stages changes through the same public
+        # methods a caller would use.
+        self.bbl_instrumenter = BblInstrumenter(self)
         self.stack_walker = StackWalker(self._session)
 
     # The masks live on ProcessManager; these aliases are what the call sites
@@ -201,7 +206,7 @@ class Debugger:
     # INT3s go after the debug registers, because a single-step that still has
     # a stale DR slot fires inside the code that was just restored.
     _TEARDOWN_ORDER = (
-        "hook_iat", "hook_inline", "instrumenter",
+        "hook_iat", "hook_inline", "instrumenter", "bbl_instrumenter",
         "brk_hw", "brk_sw", "symbols",
     )
 

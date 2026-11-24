@@ -1,667 +1,68 @@
-"""Basic-block detours: the 5 bytes that get displaced, and the stub that runs them.
+"""BBL detours: plan blocks, install stubs, drain events, undo.
 
-A detour at a block entry overwrites five bytes with an `E9 rel32`. Those five
-bytes are one long instruction or a few short ones, and they have to keep their
-meaning at their new address:
+One detour per planned block: an `E9 rel32` over the block's displaced prefix,
+and a target-side stub that appends one v1 BLOCK record per hit before running
+the relocated prefix (spec §12.2, §12.5).
 
-- a RIP-relative operand's `disp32` is relative to the end of *that*
-  instruction, so it must be rewritten for the stub (spec §12.3);
-- a relative branch cannot be moved without rewriting its displacement, and the
-  spec refuses rel8/rel32 rewriting outright — so a prefix containing one is
-  refused rather than copied wrong (§12.6).
+The three halves live in their own modules and are re-exported here, so callers
+(and the existing tests) keep importing them from `pydbg.instrument.bbl`:
 
-The relocation half is a pure function of decoded instructions and addresses:
-no process memory, no threads, no debugger. `build_stub` assembles its prologue
-with keystone (an optional extra). The install half (`install_patch`,
-`uninstall_patch`) does touch a live target, but only through the debugger
-facade it is handed — this module never imports `_pydbg`, so importing it stays
-extension-free (ADR-0001).
+- `relocate.py` — `UnsupportedInstruction`, `take_prefix`,
+  `prefix_is_relocatable`, `relocate_prefix`: the displaced instructions;
+- `stub.py` — `build_stub`, `STUB_PROLOGUE_SIZE`, the record layout: the
+  target-side writer;
+- `patch.py` — `TargetBusy`, `InstalledPatch`, `install_patch`,
+  `uninstall_patch`: the thread-checked writes.
+
+What is left here is the orchestration: `BlockPlan`, `InstallReport`,
+`BblInstrumenter`, and the near-allocation policy for the stub region. A plan
+is a record in RVAs; `install()` converts once, at the boundary where the RIP
+window, the E9 and the stub addresses are absolute.
+
+This module never imports `_pydbg`: the near allocation goes through
+`MemoryManager.alloc_near`, and the extension is only reached by a caller with
+a live target. Importing `pydbg.instrument.bbl` therefore stays extension-free
+(ADR-0001).
 """
 
 import struct
 from dataclasses import dataclass
 
 from ..exceptions import PydbgError
-from ..patch.assembler import Assembler
 from ..patch.encoding import build_abs_jmp
 
-# keystone is a `patch` extra; the relocation half does not need it, and the
-# stub builder says so rather than failing somewhere inside the assembler.
-try:
-    import keystone
-except ImportError:                      # pragma: no cover - environment
-    keystone = None
-
-# Bytes a detour overwrites: one near JMP (E9 rel32).
-DETOUR_SIZE = 5
-
-# The v1 record the stub appends (trace/format.py `_RECORD`). The struct is
-# spelled out here because this module must not import `pydbg.trace`, whose
-# package __init__ needs the extension.
-_RECORD = struct.Struct("<B3xIIQQQ")
-RECORD_SIZE = _RECORD.size
-# Field offsets, taken from the format itself. `'<'` means standard sizes with
-# no alignment padding, so ts follows rva at 12 rather than at the next 8-byte
-# boundary; assuming 16 would put a at 24 and run b off the end of the slot.
-_RVA_OFFSET = struct.calcsize("<B3xI")        # 8
-_TS_OFFSET = struct.calcsize("<B3xII")        # 12
-_COUNT_OFFSET = _TS_OFFSET + 8                # 20
-_B_OFFSET = _COUNT_OFFSET + 8                 # 28
-
-# Where the relocated prefix starts inside a stub: build_stub emits its fixed
-# prologue first and asserts it is exactly this long, so a keystone encoding
-# change cannot silently shift the bytes this offset was computed for.
-STUB_PROLOGUE_SIZE = 112
-
-_DISP32 = 4
-# Encoded widths a trailing immediate can have after a RIP-relative disp32:
-# imm8, imm16, imm32. There is no `mov m64, imm64`, so 8 never occurs.
-_IMMEDIATE_WIDTHS = (0, 1, 2, 4)
-# ModRM for RIP-relative addressing: mod=00 (no second displacement) and
-# rm=101 (RIP). The reg field is free, hence the mask.
-_MODRM_RIP = 0x05
-_MODRM_MASK = 0xC7
-
-
-class UnsupportedInstruction(PydbgError):
-    """A refusal: this block cannot host a detour, and here is which instruction.
-
-    Both halves matter. The address is what the caller needs to refuse one block
-    and keep installing the rest; the mnemonic is what makes a log line
-    actionable without re-decoding the image. `mnemonic` is '' when the refusal
-    is about the block rather than one instruction (a block shorter than the
-    detour, say).
-    """
-
-    def __init__(self, rva, mnemonic='', reason=''):
-        self.rva = rva
-        self.mnemonic = mnemonic
-        self.reason = reason
-        who = f"{mnemonic} " if mnemonic else ""
-        super().__init__(f"unsupported {who}at rva 0x{rva:X}: {reason}")
-
-
-def take_prefix(insns, block_rva, need=DETOUR_SIZE):
-    """The shortest run of whole instructions at `block_rva` covering `need` bytes.
-
-    A detour may only overwrite whole instructions: splitting one would leave
-    half of it to be executed twice or not at all. So the prefix is accumulated
-    instruction by instruction and stops at the first instruction that reaches
-    the byte budget.
-
-    Raises:
-        UnsupportedInstruction: the instructions do not start at `block_rva`,
-            are not contiguous, or do not reach `need` bytes at all.
-    """
-    insns = tuple(insns)
-    if not insns:
-        raise UnsupportedInstruction(block_rva, '', 'no decoded instructions')
-
-    first = insns[0]
-    if first.address != block_rva:
-        raise UnsupportedInstruction(
-            block_rva, first.mnemonic,
-            f'the first instruction is at 0x{first.address:X}, '
-            f'not the block entry')
-
-    taken = []
-    covered = 0
-    for insn in insns:
-        if taken:
-            previous = taken[-1]
-            expected = previous.address + previous.size
-            if insn.address != expected:
-                raise UnsupportedInstruction(
-                    insn.address, insn.mnemonic,
-                    f'instruction does not follow 0x{previous.address:X} '
-                    f'({previous.size} bytes)')
-        taken.append(insn)
-        covered += insn.size
-        if covered >= need:
-            return tuple(taken)
-
-    raise UnsupportedInstruction(
-        block_rva, '',
-        f'block is {covered} bytes, need {need} to cover a detour')
-
-
-def prefix_is_relocatable(insns):
-    """Whether the whole prefix can be executed from the stub unchanged.
-
-    Any branch or return is refused: its displacement is relative to where it
-    sits, and rewriting rel8/rel32 is explicitly out of scope (§12.6). The
-    engine already folds `call`/`jmp`/`jcc` into `is_call`/`is_jmp` and the loop
-    family into `is_jmp`, so this is a property lookup, not a mnemonic list that
-    can drift from capstone's classification.
-    """
-    return all(not (insn.is_call or insn.is_jmp or insn.is_ret)
-               for insn in insns)
-
-
-def decoded_block_address(rva, instruction_rvas, instructions):
-    """The decoder's address for a block whose plan is keyed by an RVA.
-
-    `InstructionDecoder.decode_one()` decodes at the instruction's virtual
-    address — that is what makes a branch target and `address + size + disp`
-    meaningful — while a `BlockPlan` and the CFG speak RVAs. `take_prefix()`
-    compares instruction addresses against the block entry, so a planner that
-    passes the RVA directly sees "the first instruction is not at the block
-    entry" for every block on a real image and silently plans them all as
-    unrelocatable. The offset is a property of the decoder, recovered from the
-    first instruction it returned for the block's first RVA; a caller with no
-    decoded run keeps the RVA and lets `take_prefix()` refuse it.
-    """
-    if not instructions or not instruction_rvas:
-        return rva
-    return rva + (instructions[0].address - instruction_rvas[0])
-
-
-def _disp32_offset(insn, disp):
-    """Index of the RIP-relative disp32 inside `insn.raw_bytes`.
-
-    The displacement is followed only by the instruction's immediate, if there
-    is one, and the operand's `size` is not the encoded width: `add qword ptr
-    [rip+x], 1` reports an 8-byte immediate but encodes it as one byte. So the
-    width is searched (0, 1, 2, 4), and a candidate must satisfy two
-    independent facts:
-
-    - the four bytes equal the displacement capstone decoded, and
-    - the byte before them is the ModRM byte for RIP+disp32 (`mod=00 rm=101`).
-
-    A hand-built `Instruction` whose bytes and operands disagree has no
-    candidate, and `len(matches) != 1` makes this refuse rather than guess —
-    guessing here writes four wrong bytes into the target.
-    """
-    raw = insn.raw_bytes
-    wanted = disp & 0xFFFFFFFF
-    matches = []
-    for width in _IMMEDIATE_WIDTHS:
-        pos = len(raw) - _DISP32 - width
-        if pos < 1 or pos + _DISP32 > len(raw):
-            continue
-        if int.from_bytes(raw[pos:pos + _DISP32], 'little') != wanted:
-            continue
-        if (raw[pos - 1] & _MODRM_MASK) != _MODRM_RIP:
-            continue
-        matches.append(pos)
-    if len(matches) != 1:
-        raise UnsupportedInstruction(
-            insn.address, insn.mnemonic,
-            f'the RIP-relative displacement was found in {len(matches)} places '
-            f'in {raw.hex()}, not one')
-    return matches[0]
-
-
-def relocate_prefix(insns, stub_address):
-    """The prefix's bytes, rewritten to run at `stub_address + STUB_PROLOGUE_SIZE`.
-
-    A RIP-relative operand keeps addressing the same memory: the original
-    target is `insn.address + insn.size + disp`, and the new displacement is
-    that target minus the end of the instruction in the stub. Everything else
-    is copied byte for byte.
-
-    `stub_address` is the start of the stub `build_stub` will emit, not the
-    start of the relocated bytes — the caller has one address (where it will
-    write the stub) and the prologue sits in front.
-
-    Raises:
-        UnsupportedInstruction: a branch or return is in the prefix, a
-            displacement would not fit int32, or the decoded bytes disagree
-            with the operands.
-    """
-    insns = tuple(insns)
-    for insn in insns:
-        if not prefix_is_relocatable((insn,)):
-            raise UnsupportedInstruction(
-                insn.address, insn.mnemonic,
-                'a relative branch cannot be moved without rewriting rel8/rel32')
-
-    relocated = bytearray()
-    for insn in insns:
-        raw = insn.raw_bytes
-        if len(raw) != insn.size:
-            raise UnsupportedInstruction(
-                insn.address, insn.mnemonic,
-                f'decoded {len(raw)} bytes but the instruction is '
-                f'{insn.size} bytes long')
-        raw = bytearray(raw)
-        rip_relative = [op for op in insn.operands if op.is_rip_relative]
-        if len(rip_relative) > 1:
-            raise UnsupportedInstruction(
-                insn.address, insn.mnemonic,
-                'more than one RIP-relative operand')
-        if rip_relative:
-            operand = rip_relative[0]
-            target = insn.address + insn.size + operand.mem_disp
-            moved_to = stub_address + STUB_PROLOGUE_SIZE + len(relocated)
-            disp = target - (moved_to + insn.size)
-            if not -(1 << 31) <= disp < (1 << 31):
-                raise UnsupportedInstruction(
-                    insn.address, insn.mnemonic,
-                    f'RIP-relative target 0x{target:X} is out of ±2GB range '
-                    f'of the stub at 0x{moved_to:X}')
-            pos = _disp32_offset(insn, operand.mem_disp)
-            raw[pos:pos + _DISP32] = (disp & 0xFFFFFFFF).to_bytes(_DISP32, 'little')
-        relocated += raw
-    return bytes(relocated)
-
-
-# `jmp qword ptr [rip+0]`: the address follows the instruction, so the stub is
-# position-independent and build_stub never needs to know where it will live.
-_ABSOLUTE_JUMP = b"\xff\x25\x00\x00\x00\x00"
-
-
-def _assemble(code):
-    """Assemble x64 Intel syntax, or say which optional dependency is missing."""
-    if keystone is None:
-        raise PydbgError("keystone-engine not installed")
-    return Assembler("x64").assemble(code)
-
-
-def _prologue_source(sink, block_rva, count):
-    """The fixed prologue, as keystone source.
-
-    Every statement is written in a form whose length does not depend on its
-    value -- `movabs` for absolute addresses, `mov r32, imm32` for the ring
-    parameters -- because the relocated prefix was addressed for
-    `STUB_PROLOGUE_SIZE` and build_stub checks the assembled length against it.
-    """
-    return "; ".join([
-        # Everything the stub clobbers, and the flags `lock xadd` would change.
-        "pushfq",
-        "push rax", "push rcx", "push rdx",
-        "push r8", "push r9", "push r10", "push r11",
-        # count = the slot counter's old value, atomically.
-        "mov eax, 1",
-        f"movabs r8, 0x{sink.head_address:X}",
-        "lock xadd dword ptr [r8], eax",
-        # slot = slot_area + (count & (capacity - 1)) * slot_size
-        "mov ecx, eax",
-        f"mov edx, 0x{sink.capacity - 1:X}",
-        "and ecx, edx",
-        f"mov edx, 0x{sink.slot_size:X}",
-        "imul ecx, edx",
-        f"movabs rdx, 0x{sink.address:X}",
-        "add rcx, rdx",
-        # One v1 BLOCK record: kind, tid, rva, ts, a, b. tid and ts are not
-        # available in the target, so both are zero (spec §12.1).
-        "mov qword ptr [rcx], 1",
-        f"mov dword ptr [rcx + {_RVA_OFFSET}], 0x{block_rva:X}",
-        f"mov qword ptr [rcx + {_TS_OFFSET}], 0",
-        f"mov qword ptr [rcx + {_COUNT_OFFSET}], 0x{count:X}",
-        f"mov qword ptr [rcx + {_B_OFFSET}], 0",
-        "pop r11", "pop r10", "pop r9", "pop r8",
-        "pop rdx", "pop rcx", "pop rax",
-        "popfq",
-    ])
-
-
-def _check_stub_arguments(sink, block_rva, count, resume_rva):
-    """Refuse arguments whose stub would be wrong, before assembling anything."""
-    if not 0 <= block_rva <= 0xFFFFFFFF:
-        raise PydbgError(
-            f"block rva {block_rva!r} does not fit the record's u32 field")
-    # `mov qword ptr [rcx + a], imm32` sign-extends, so a count above 2^31-1
-    # would be written as a negative u64.
-    if not 0 <= count < (1 << 31):
-        raise PydbgError(f"instruction count {count!r} does not fit imm32")
-    if not 0 <= resume_rva <= 0xFFFFFFFFFFFFFFFF:
-        raise PydbgError(f"resume address {resume_rva!r} is not a u64")
-    if not 0 <= sink.head_address <= 0xFFFFFFFFFFFFFFFF:
-        raise PydbgError(f"head address {sink.head_address!r} is not a u64")
-    if not 0 <= sink.address <= 0xFFFFFFFFFFFFFFFF:
-        raise PydbgError(f"slot area {sink.address!r} is not a u64")
-    if sink.capacity < 1 or sink.capacity & (sink.capacity - 1):
-        raise PydbgError(
-            f"ring capacity must be a power of two, got {sink.capacity!r}")
-    if sink.slot_size < RECORD_SIZE:
-        raise PydbgError(
-            f"slot size {sink.slot_size!r} cannot hold a {RECORD_SIZE}-byte "
-            f"record")
-
-
-def build_stub(sink, block_rva, count, relocated, resume_rva):
-    """A target-side detour stub that appends one BLOCK event per hit.
-
-    Layout: save rax/rcx/rdx/r8-r11 and the flags -> `lock xadd` the slot
-    counter -> write a 36-byte v1 record -> restore -> run `relocated` -> jump
-    to `resume_rva`.
-
-    Args:
-        sink: the event buffer layout -- `address` (slot area), `head_address`
-            (u32 counter), `capacity` (power of two) and `slot_size` (>= the
-            record). EventBuffer (P31) is the real one.
-        block_rva: the block start, written to the record's `rva` field as an
-            RVA, not an address.
-        count: the block's instruction count, written to `a`.
-        relocated: the 5-byte prefix run from `relocate_prefix`, already
-            rewritten for `STUB_PROLOGUE_SIZE` bytes into this stub.
-        resume_rva: the address to jump back to -- module base + block_rva + 5.
-            It is named for what the caller derives it from, but the stub needs
-            the absolute address: it was built without knowing where it lives,
-            and the jump-back is `jmp qword ptr [rip+0]` with the value inlined.
-
-    Raises:
-        PydbgError: keystone is missing, or the arguments cannot be encoded
-            into the stub without changing its shape.
-    """
-    _check_stub_arguments(sink, block_rva, count, resume_rva)
-    prologue = _assemble(_prologue_source(sink, block_rva, count))
-    if len(prologue) != STUB_PROLOGUE_SIZE:
-        raise PydbgError(
-            f"keystone encoded the stub prologue in {len(prologue)} bytes, not "
-            f"the {STUB_PROLOGUE_SIZE} the relocated prefix was addressed for")
-    return prologue + bytes(relocated) + _ABSOLUTE_JUMP + struct.pack(
-        "<Q", resume_rva)
-
-
-# ── thread-safe install / uninstall ─────────────────────────────
-#
-# The target is live: between "the block plan says this block is ours" and "the
-# five bytes are written", another thread can be executing inside those same
-# bytes, and a torn instruction is not recoverable. The protocol is the one
-# spec §12.4 names: suspend every target thread, check each RIP, then write --
-# and resume every thread that was suspended on every path, refusal included.
-
-# The protection a code page is made writable with for the length of a write.
-_PAGE_EXECUTE_READWRITE = 0x40
-
-# What each install wrote, kept on the debugger it wrote through:
-# `uninstall_patch` is handed only the bytes to restore, so without this it
-# could not tell "still our detour" from "someone rewrote the bytes under us".
-# The ticket's signature is kept; the record lives on the caller's debugger and
-# goes away with it. The name is private to this module.
-_RECORDS_ATTR = '_bbl_installed_patches'
-
-
-def _records_for(dbg):
-    """The `{address: patch bytes}` record for `dbg`, created on first use.
-
-    Returns None for a debugger-shaped object that refuses attributes: install
-    still works, and uninstall falls back to only the provable no-op case.
-    """
-    records = getattr(dbg, _RECORDS_ATTR, None)
-    if records is None:
-        records = {}
-        try:
-            setattr(dbg, _RECORDS_ATTR, records)
-        except (AttributeError, TypeError):
-            return None
-    return records
-
-
-def _installed_at(dbg, rva):
-    """What install recorded for `rva`, or None when there is no record."""
-    records = getattr(dbg, _RECORDS_ATTR, None)
-    return None if records is None else records.get(rva)
-
-
-class TargetBusy(PydbgError):
-    """The patch window is not safe to rewrite right now.
-
-    Refusing is the point: a thread whose RIP is inside the bytes about to
-    change would execute a torn instruction, and stepping it out of the way is
-    guesswork the spec refuses. The same answer covers a thread that cannot be
-    suspended or whose context cannot be read -- without its RIP there is no
-    way to prove the window is clear.
-
-    Attributes:
-        rva: the patch address the caller asked for (named per the ticket; it
-            is an absolute target address, because that is what RIP is).
-        tid: the thread responsible, when one is known.
-        warnings: cleanup failures collected while unwinding, so a caller that
-            catches this still gets an honest report of unresolved resumes.
-    """
-
-    def __init__(self, message, rva=None, tid=None):
-        self.rva = rva
-        self.tid = tid
-        self.warnings = ()
-        super().__init__(message)
-
-
-def _thread_ids(dbg):
-    """The target's current thread ids.
-
-    Enumeration failure propagates: an empty list would silently turn the
-    window check off, which is the one thing this protocol must not do.
-    """
-    return [thread['tid'] for thread in dbg.enumerate_threads()]
-
-
-def _open_thread(dbg, tid, rva):
-    """Open a thread for suspension, or refuse with `TargetBusy`."""
-    try:
-        return dbg.open_thread(tid)
-    except (PydbgError, OSError) as exc:
-        raise TargetBusy(
-            f"target busy: cannot open tid={tid}: {exc}", rva=rva, tid=tid)
-
-
-def _close_thread(dbg, handle):
-    """Close a thread handle, ignoring a failed close of a dead thread."""
-    try:
-        dbg.close_handle(handle)
-    except (PydbgError, OSError):
-        pass
-
-
-def _suspend_all(dbg, rva, suspended):
-    """Suspend every target thread, appending `(tid, handle)` to `suspended`.
-
-    A suspend that fails refuses the patch: continuing with fewer suspended
-    threads would check a window that other threads can still walk into. The
-    handle opened for the failing thread is closed here; every earlier
-    suspension is in `suspended` and is resumed by the caller's `finally`.
-    """
-    for tid in _thread_ids(dbg):
-        handle = _open_thread(dbg, tid, rva)
-        try:
-            dbg.suspend_thread(handle)
-        except (PydbgError, OSError) as exc:
-            _close_thread(dbg, handle)
-            raise TargetBusy(
-                f"target busy: cannot suspend tid={tid}: {exc}",
-                rva=rva, tid=tid)
-        suspended.append((tid, handle))
-
-
-def _check_window(dbg, rva, size, suspended):
-    """Refuse when a suspended thread's RIP is inside `[rva, rva + size)`.
-
-    Every thread is suspended before any context is read, so a thread cannot
-    move into the window between its own check and the write.
-    """
-    end = rva + size
-    for tid, handle in suspended:
-        try:
-            context = dbg.get_registers(handle)
-        except (PydbgError, OSError) as exc:
-            raise TargetBusy(
-                f"target busy: cannot read the context of tid={tid}: {exc}",
-                rva=rva, tid=tid)
-        rip = context.get('rip')
-        if rip is None:
-            # x64 only (§12.1): a context without RIP cannot be proved clear.
-            raise TargetBusy(
-                f"target busy: tid={tid} has no RIP to check", rva=rva, tid=tid)
-        if rva <= rip < end:
-            raise TargetBusy(
-                f"target busy: thread {tid} is at 0x{rip:X}, inside "
-                f"[0x{rva:X}, 0x{end:X})", rva=rva, tid=tid)
-
-
-def _write_protected(dbg, rva, data):
-    """Write `data` at `rva`, restoring the page protection whatever happens.
-
-    Same pattern as `breakpoint/software.py:_write_protected`: the restore is
-    attempted on the write's failure path too, so a failed write cannot leave
-    the page writable, and a restore that fails after a successful write is
-    returned as a warning rather than raised -- the bytes are in, and the
-    caller should know the page is still writable without losing that fact.
-
-    Returns:
-        str | None: a warning when the write landed but the protection did not
-        come back; None when both succeeded.
-
-    Raises:
-        PydbgError: the write itself failed.
-    """
-    old_protect = dbg.protect_memory(rva, len(data), _PAGE_EXECUTE_READWRITE)
-    try:
-        dbg.write_memory(rva, data)
-    except BaseException:
-        try:
-            dbg.protect_memory(rva, len(data), old_protect)
-        except (PydbgError, OSError):
-            pass
-        raise
-    try:
-        dbg.protect_memory(rva, len(data), old_protect)
-    except (PydbgError, OSError) as exc:
-        return f"page protection at 0x{rva:X}: {exc}"
-    return None
-
-
-def _resume_all(dbg, suspended, warnings):
-    """Resume, in reverse, every thread this call suspended.
-
-    A failed resume is not swallowed: the thread stays suspended, and a target
-    with a frozen thread is not "patched successfully". It becomes a warning
-    because the other threads still resume and the write already succeeded.
-    """
-    for tid, handle in reversed(suspended):
-        try:
-            dbg.resume_thread(handle)
-        except (PydbgError, OSError) as exc:
-            warnings.append(f"thread {tid}: {exc}")
-        finally:
-            _close_thread(dbg, handle)
-
-
-def _run_suspended(dbg, rva, size, action):
-    """Suspend all threads, check the window, run `action`, resume all.
-
-    The resume sits in a `finally` *inside* the outer `except`, so it runs on
-    every path; the outer handler then attaches the cleanup warnings to a
-    `TargetBusy` before re-raising it with its original traceback.
-    """
-    warnings = []
-    suspended = []
-    try:
-        try:
-            _suspend_all(dbg, rva, suspended)
-            _check_window(dbg, rva, size, suspended)
-            warning = action()
-            if warning is not None:
-                warnings.append(warning)
-        finally:
-            _resume_all(dbg, suspended, warnings)
-    except TargetBusy as exc:
-        exc.warnings = tuple(warnings)
-        raise
-    return tuple(warnings)
-
-
-def install_patch(dbg, rva, patch):
-    """Write `patch` at `rva`, with every other thread provably out of the way.
-
-    `rva` is the block's absolute address in the target (module base plus the
-    block RVA): the RIP window it opens is absolute, so the caller derives it
-    from the plan's RVA rather than passing the module-relative value.
-
-    What was written is recorded on `dbg` under a private attribute, keyed by
-    address. `uninstall_patch` uses that record to prove the bytes it finds are
-    still this detour before restoring the originals; the record is dropped by
-    a successful uninstall.
-
-    Returns:
-        tuple[str, ...]: cleanup warnings, empty on a clean install. A failed
-        resume is reported as `"thread <tid>: <reason>"` rather than raised,
-        because the write may already have succeeded and the other threads
-        were resumed.
-
-    Raises:
-        TargetBusy: a thread is inside `[rva, rva + len(patch))`, or the
-            threads could not be enumerated/suspended/read. Its `tid` names
-            the blocker, and its `warnings` holds any cleanup failures.
-        PydbgError: the write (or the protection change around it) failed.
-    """
-    patch = bytes(patch)
-    if not patch:
-        raise PydbgError("cannot install an empty patch")
-    records = _records_for(dbg)
-
-    def write():
-        warning = _write_protected(dbg, rva, patch)
-        if records is not None:
-            records[rva] = patch
-        return warning
-
-    return _run_suspended(dbg, rva, len(patch), write)
-
-
-def uninstall_patch(dbg, rva, original):
-    """Restore `original` at `rva`, but only when the bytes are still ours.
-
-    The bytes are read back and compared *before* anything is suspended or
-    written. "Ours" means the patch `install_patch` recorded for this address:
-    the caller passes the bytes to restore (`original`), not the patch, so the
-    installed bytes come from that record. A mismatch -- another owner, or the
-    target itself, wrote over the detour -- is reported as a warning beginning
-    `"bytes changed under us"` and nothing is written, because restoring
-    blindly would erase that change.
-
-    Without a record (a direct call, or a new debugger) the only provable
-    state is "the bytes already are `original`": that returns no warnings and
-    writes nothing. Anything else is reported as "bytes changed under us"
-    rather than overwritten.
-
-    When the bytes still match, the restore runs through the same
-    suspend-all/check-RIP/write/resume protocol as `install_patch`, because a
-    thread can be executing inside the bytes about to be restored.
-
-    Returns:
-        tuple[str, ...]: cleanup warnings, empty on a clean restore. A changed
-        byte returns one `"bytes changed under us ..."` warning and writes
-        nothing; thread resume and protection failures are reported as on
-        install.
-
-    Raises:
-        TargetBusy: a thread is inside `[rva, rva + len(original))`, or the
-            threads could not be suspended or read. `warnings` holds cleanup
-            failures.
-        PydbgError: the read-back or the write failed.
-    """
-    original = bytes(original)
-    if not original:
-        raise PydbgError("cannot uninstall an empty patch")
-    current = bytes(dbg.read_memory(rva, len(original)))
-    expected = _installed_at(dbg, rva)
-    if expected is None:
-        expected = original
-    # The install may have written fewer bytes than `original` covers (a
-    # one-byte placeholder over five original bytes): the installed prefix
-    # must still be there, and the untouched tail must still be `original`'s.
-    if len(original) < len(expected):
-        return (f"bytes changed under us at 0x{rva:X}: the recorded patch is "
-                f"{len(expected)} bytes but only {len(original)} could be read",)
-    expected_run = expected + original[len(expected):]
-    if current != expected_run:
-        return (f"bytes changed under us at 0x{rva:X}: expected "
-                f"{expected_run.hex()}, found {current.hex()}",)
-    if current == original:
-        return ()                 # already restored; nothing to write
-    records = getattr(dbg, _RECORDS_ATTR, None)
-
-    def restore():
-        warning = _write_protected(dbg, rva, original)
-        if records is not None:
-            records.pop(rva, None)
-        return warning
-
-    return _run_suspended(dbg, rva, len(original), restore)
-
+from .patch import (
+    BYTES_CHANGED,
+    InstalledPatch,
+    TargetBusy,
+    install_patch,
+    uninstall_patch,
+)
+from .relocate import (
+    DETOUR_SIZE,
+    UnsupportedInstruction,
+    decoder_address_base,
+    prefix_is_relocatable,
+    relocate_prefix,
+    take_prefix,
+)
+from .stub import (
+    RECORD_SIZE,
+    STUB_JUMP_SIZE,
+    STUB_PROLOGUE_SIZE,
+    build_stub,
+    keystone,
+)
+
+# Re-exported so the module split does not change an import that already works;
+# `__all__` is what tells a linter these are re-exports, not dead imports.
+__all__ = [
+    'BblInstrumenter', 'BlockPlan', 'DETOUR_SIZE', 'InstallReport',
+    'InstalledPatch', 'RECORD_SIZE', 'STUB_PROLOGUE_SIZE', 'TargetBusy',
+    'UnsupportedInstruction', 'alloc_near', 'build_stub', 'install_patch',
+    'keystone', 'prefix_is_relocatable', 'relocate_prefix', 'take_prefix',
+    'uninstall_patch',
+]
 
 # ── orchestration ───────────────────────────────────────────────
 #
@@ -678,87 +79,29 @@ def uninstall_patch(dbg, rva, original):
 _MAX_BLOCK_INSTRUCTIONS = 4096
 
 # How far from the module a stub may land. A 5-byte E9 is a rel32 jump, so the
-# stub has to be within ±2GB; the scan window is the frozen instrumenter's.
+# stub has to be within ±2GB; the window stays below the hard 2^31 limit
+# because the E9 itself takes five of those bytes.
 _RELOC_WINDOW = 0x7F000000
-# VirtualAllocEx rounds a hint down to the allocation granularity, so a hint
-# inside an occupied page fails with ERROR_INVALID_ADDRESS; round up instead.
-_ALLOC_GRANULARITY = 0x10000
-_MEM_FREE = 0x10000
-_MEM_COMMIT_RESERVE = 0x3000
-
-
-def _stub_hint(region, near, size):
-    """The allocation hint inside `region` for `size` bytes, or None.
-
-    Kept separate from the Win32 call so the placement rule -- aligned to the
-    allocation granularity, inside the free region, inside ±2GB of the module
-    -- can be tested without a target. `region` is a `regions_handle` dict.
-    """
-    base = region.get('base_address', 0)
-    span = region.get('region_size', 0)
-    if span < size:
-        return None
-    hint = (base + _ALLOC_GRANULARITY - 1) & ~(_ALLOC_GRANULARITY - 1)
-    high = near + _RELOC_WINDOW
-    if hint + size > high:
-        # The window is the hard limit: pull the hint back, even if that
-        # makes it unaligned (VirtualAllocEx rounds the hint down itself).
-        hint = high - size
-        if hint < base:
-            return None
-    if hint + size > base + span:
-        return None
-    return hint
 
 
 def alloc_near(dbg, near, size):
-    """Allocate `size` RWX bytes within ±2GB of `near`; return the address.
+    """Allocate `size` RWX bytes within the E9's reach of `near`; return it.
 
-    Reimplemented here rather than reusing the frozen
-    `Instrumenter._alloc_near` (§12.1): the frozen one allocates for the LLVM
-    trampoline and must not be modified. The scan is the same idea — walk the
-    target's regions, take the first MEM_FREE one large enough, and ask for a
-    64KB-aligned hint inside it — because that is the placement rule the E9
-    detour requires.
+    The scan and the VirtualAllocEx call belong to `MemoryManager.alloc_near`
+    (the manager owns remote allocation as of P35); this keeps the BBL policy
+    on top: the conservative `_RELOC_WINDOW` so even the far edge of a module
+    is inside a rel32, and the target handle the manager already holds. Kept
+    as the module-level seam the install path and its tests pick, instead of
+    reaching into `dbg.memory` in two places.
 
-    `_pydbg` is imported lazily so importing this module stays extension-free
-    (ADR-0001); only a caller with a live target reaches this function.
+    `_pydbg` is not imported here: the manager already owns the extension
+    (ADR-0001), so importing this module stays extension-free.
 
     Raises:
-        PydbgError: the region walk failed, or no free region inside the
-            window could satisfy the allocation.
+        PydbgError: the manager's near allocation failed; its message names
+            every candidate it could not use.
     """
-    from .. import _pydbg
-
-    handle = dbg._session.process_handle
-    low = (near - _RELOC_WINDOW) & ~(_ALLOC_GRANULARITY - 1)
-    if low < _ALLOC_GRANULARITY:
-        low = _ALLOC_GRANULARITY
-    high = near + _RELOC_WINDOW
-    try:
-        regions = dbg.memory.regions_handle(handle, low, high)
-    except (PydbgError, OSError) as exc:
-        raise PydbgError(
-            f"cannot scan for stub memory near 0x{near:X}: {exc}") from exc
-
-    for region in regions:
-        if region.get('state') != _MEM_FREE:
-            continue
-        hint = _stub_hint(region, near, size)
-        if hint is None:
-            continue
-        try:
-            result = _pydbg.virtual_alloc_ex(
-                handle, hint, size, _MEM_COMMIT_RESERVE,
-                _PAGE_EXECUTE_READWRITE)
-        except OSError:
-            continue
-        address = result.get('base_address', 0)
-        if address:
-            return address
-
-    raise PydbgError(
-        f"no free region within ±2GB of 0x{near:X} for {size} bytes")
+    return dbg.memory.alloc_near(size, near, limit=_RELOC_WINDOW)
 
 
 def _ring_capacity(max_events):
@@ -872,9 +215,11 @@ class BblInstrumenter:
         self._buffer = None
         self._stub_region = None
         self._report = None
-        # absolute address -> the original bytes install displaced, in install
-        # order. uninstall_patch needs those bytes; it restores only when the
-        # detour is still what it finds.
+        # absolute address -> the InstalledPatch record, in install order. This
+        # mapping *is* the "still installed" set: a record leaves it only when
+        # its restore landed (or the bytes were already original), so a block
+        # whose restore was refused or whose bytes changed under us keeps both
+        # its record and the stub memory the record may still point into.
         self._originals = {}
 
     # ── planning ───────────────────────────────────────────────
@@ -1004,13 +349,14 @@ class BblInstrumenter:
         relocatable = False
         if instructions and instruction_rvas:
             # The decoder addresses instructions by VA while the plan is in
-            # RVAs; take_prefix compares addresses, so lift the RVA first.
-            block_address = decoded_block_address(
-                rva, instruction_rvas, instructions)
+            # RVAs. `address_base` bridges the two: relocation still uses the
+            # decoder's addresses, every refusal names an RVA.
+            address_base = decoder_address_base(instruction_rvas, instructions)
             last = instructions[-1]
-            span = last.address + last.size - block_address
+            span = last.address + last.size - (rva + address_base)
             try:
-                prefix = take_prefix(instructions, block_address)
+                prefix = take_prefix(
+                    instructions, rva, address_base=address_base)
             except UnsupportedInstruction:
                 pass                      # no prefix: planned, refused at install
             else:
@@ -1031,19 +377,26 @@ class BblInstrumenter:
 
         Each block is installed independently. A refused block -- a thread
         parked inside its window, a branch in its prefix, a block shorter than
-        the detour, a thread enumeration that fails -- goes into
-        `InstallReport.refused` with the exception's message, and the remaining
-        blocks are still attempted. `len(installed) + len(refused)` is exactly
-        the plan size. Failures of a shared resource (the ring, the stub
-        region, a missing keystone) become one reason per block for the same
-        reason: no planned block may be silently skipped.
+        the detour, a pre-image that is no longer what the plan read, a thread
+        enumeration that fails -- goes into `InstallReport.refused` with the
+        exception's message, and the remaining blocks are still attempted.
+        `len(installed) + len(refused)` is exactly the plan size. Failures of a
+        shared resource (the ring, the stub region, a missing keystone) become
+        one reason per block for the same reason: no planned block may be
+        silently skipped.
+
+        The plan speaks RVAs; the install is in VAs (`base + plan.rva`), because
+        the RIP window, the E9 destination and the stub it points at are all
+        absolute.
 
         For each block, the displaced prefix is first copied out of the target
         (`read_memory`) and then overwritten with `E9 rel32` plus NOP padding
-        up to the prefix length. The NOP padding matters: the stub resumes at
-        `block + 5` (the record's shape), so the pad bytes are what carry
-        execution across whatever remains of a multi-byte displaced instruction
-        to `block + prefix_size`.
+        up to the prefix length. `install_patch` re-reads those bytes under the
+        suspended window and refuses to write when they are no longer the
+        pre-image, so another owner's detour is never overwritten. The NOP
+        padding matters: the stub resumes at `block + 5` (the record's shape),
+        so the pad bytes are what carry execution across whatever remains of a
+        multi-byte displaced instruction to `block + prefix_size`.
 
         Calling it twice returns the first report and writes nothing; call
         `uninstall()` between installs.
@@ -1090,7 +443,7 @@ class BblInstrumenter:
                     return self._finish_report(plans, (), (), refusals)
 
                 stub_size = sum(STUB_PROLOGUE_SIZE + plan.prefix_size
-                                + len(_ABSOLUTE_JUMP) + 8
+                                + STUB_JUMP_SIZE
                                 for plan in candidates)
                 try:
                     region = alloc_near(self.dbg, base, stub_size)
@@ -1111,33 +464,39 @@ class BblInstrumenter:
             try:
                 instructions = self._decode_rvas(
                     self._analysis, plan.instruction_rvas)
-                block_address = decoded_block_address(
-                    plan.rva, plan.instruction_rvas, instructions)
-                prefix = take_prefix(instructions, block_address)
+                address_base = decoder_address_base(
+                    plan.instruction_rvas, instructions)
+                prefix = take_prefix(
+                    instructions, plan.rva, address_base=address_base)
                 if not plan.relocatable:
                     # Let relocate_prefix name the branch and its RVA; its
                     # first check is the branch/return refusal. A plan that
                     # says "not relocatable" for another reason still refuses.
-                    relocate_prefix(prefix, base)
+                    relocate_prefix(prefix, base, address_base=address_base)
                     raise UnsupportedInstruction(
                         plan.rva, '', 'the planned prefix cannot be relocated')
                 if sink is None or cursor is None:
                     raise PydbgError(
                         'the event buffer or stub region was not allocated')
                 stub_address = cursor
-                relocated = relocate_prefix(prefix, stub_address)
+                relocated = relocate_prefix(
+                    prefix, stub_address, address_base=address_base)
                 stub = build_stub(
                     sink, plan.rva, len(plan.instruction_rvas), relocated,
                     base + plan.rva + DETOUR_SIZE)
                 self.dbg.write_memory(stub_address, stub)
+                # The plan is in RVAs, the install in VAs: the window, the
+                # E9 and the record all speak absolute addresses.
                 absolute = base + plan.rva
                 original = bytes(self.dbg.read_memory(
                     absolute, len(relocated)))
                 patch = build_abs_jmp(absolute, stub_address) + (
                     b"\x90" * (len(relocated) - DETOUR_SIZE))
-                warnings.extend(install_patch(self.dbg, absolute, patch))
+                record = install_patch(
+                    self.dbg, absolute, patch, original=original)
+                warnings.extend(record.warnings)
                 installed.append(plan.rva)
-                originals[absolute] = original
+                originals[absolute] = record
                 cursor += len(stub)
             except (PydbgError, OSError) as exc:
                 refusals[plan.rva] = str(exc) or exc.__class__.__name__
@@ -1226,12 +585,15 @@ class BblInstrumenter:
 
         Blocks are restored in install order. A block whose restore is refused
         (a thread inside its window, an unreadable thread context) keeps its
-        detour and its original bytes, so a later call retries it; the stub
-        region and the event ring are then NOT released, because every
-        remaining detour still points into them. That warning is the last one,
-        and it says the memory was kept.
+        record, so a later call retries it. A block whose bytes changed under
+        us is treated the same way: the bytes may still be our E9 (a changed
+        NOP tail, say), so the stub it points at must not be freed and the
+        record must not be forgotten -- an overwritten detour is the caller's
+        to see, not ours to guess about. In both cases the stub region and the
+        event ring are NOT released, and the last warning says the memory was
+        kept.
 
-        When every detour is gone the ring is freed and then the stub region.
+        When every record is gone the ring is freed and then the stub region.
         A failed release is reported as a warning and retried by a later call,
         never silently forgotten: the instrumenter still holds the address.
 
@@ -1248,12 +610,15 @@ class BblInstrumenter:
         for absolute in list(self._originals):
             try:
                 block_warnings = uninstall_patch(
-                    self.dbg, absolute, self._originals[absolute])
+                    self.dbg, self._originals[absolute])
             except (PydbgError, OSError) as exc:
                 warnings.append(f"0x{absolute:X}: {exc}")
                 warnings.extend(getattr(exc, 'warnings', ()))
                 continue
             warnings.extend(block_warnings)
+            if any(warning.startswith(BYTES_CHANGED)
+                   for warning in block_warnings):
+                continue              # still (possibly) ours: keep the record
             del self._originals[absolute]
 
         if self._originals:
@@ -1266,3 +631,28 @@ class BblInstrumenter:
             # A later install() starts a fresh lifecycle.
             self._report = None
         return tuple(warnings)
+
+    def teardown(self):
+        """Undo every detour and release the shared allocations (ADR-0004).
+
+        The same work as `uninstall()`, shaped as the managers' teardown
+        contract: a list of `(what, why)` failures, never raising, so
+        `Debugger.close()` can walk the rest of the chain and report everything
+        together. A block that stays installed keeps the stub region and the
+        ring, exactly as `uninstall()` reports it.
+        """
+        return [("bbl instrumentation", warning)
+                for warning in self.uninstall()]
+
+    def discard(self):
+        """Forget every detour and allocation without touching the target.
+
+        For the terminate path: the bytes are gone with the process, so there
+        is nothing to restore, but the records must not outlive it and pretend
+        the detours are still armed. The plans stay cached; a later install()
+        on that dead target fails instead of writing.
+        """
+        self._originals.clear()
+        self._buffer = None
+        self._stub_region = None
+        self._report = None

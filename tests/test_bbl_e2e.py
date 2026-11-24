@@ -76,6 +76,9 @@ needs_target = unittest.skipUnless(
 
 _BREAKPOINT_CODES = frozenset((EXCEPTION_BREAKPOINT, STATUS_WX86_BREAKPOINT))
 
+# GetExitCodeProcess answers this while the process is still running.
+_STILL_ACTIVE = 259
+
 
 class _DictDecoder:
     """The decoder's one method `_decode_block` asks for.
@@ -378,13 +381,19 @@ class TestBblAcceptance(unittest.TestCase):
                              "a breakpoint was overwritten by the detours")
 
             # run_until leaves the stop's single-step pending; release it so
-            # the target is not left half-stopped, then terminate it. The
-            # process handle outlives the kill, so the exit code stays readable
-            # and is a fact rather than an assumption (§12.5(1)).
+            # the target is not left half-stopped, then terminate it.
             dbg.continue_event(pid, tid)
             dbg.terminate_process(0)
 
-            self.assertEqual(dbg.get_exit_code(), 0)
+            # The process handle outlives the kill, so GetExitCodeProcess is
+            # the fact that says the target is gone: STILL_ACTIVE would mean it
+            # is still running. Deliberately not compared with the value passed
+            # to terminate_process() above -- that would assert an echo of our
+            # own argument, not that the process ended (§12.5(1)).
+            # terminate_process() drains the EXIT_PROCESS event itself, so the
+            # exit code is the observable that remains.
+            self.assertNotEqual(dbg.get_exit_code(), _STILL_ACTIVE,
+                                "the target did not actually terminate")
             self.assertEqual(dbg.verify_breakpoints(), [],
                              "teardown left a software breakpoint behind")
         finally:

@@ -20,7 +20,7 @@ try:
 except ImportError:                      # pragma: no cover - env decides
     keystone = None
 
-import pydbg.instrument.bbl as bbl
+from pydbg.instrument import stub as stub_module
 from pydbg.disasm.engine import (
     OP_IMM,
     OP_MEM,
@@ -313,13 +313,73 @@ class TestRelocatePrefix(unittest.TestCase):
         self.assertEqual(caught.exception.rva, BLOCK)
 
 
+class TestRvaDomain(unittest.TestCase):
+    """Refusals name RVAs even when the decoder addresses instructions by VA.
+
+    A live `InstructionDecoder` returns instructions addressed at
+    `module_base + rva`; `BlockPlan.rva` and the stub's record are RVAs. The
+    `address_base` each function takes is how the two spaces stay separated:
+    relocation math keeps using the decoder's addresses, the refusal reports
+    what the caller planned.
+    """
+
+    ADDRESS_BASE = 0x7FF700000000
+    RVA = 0x1024
+
+    def va(self, rva=0):
+        return self.ADDRESS_BASE + self.RVA + rva
+
+    def test_a_short_block_reports_its_rva(self):
+        insns = decode(bytes.fromhex("55c3"), self.va())   # push rbp; ret
+
+        with self.assertRaises(UnsupportedInstruction) as caught:
+            take_prefix(insns, self.RVA, address_base=self.ADDRESS_BASE)
+
+        self.assertEqual(caught.exception.rva, self.RVA)
+        self.assertNotIn(f"0x{self.va():X}", str(caught.exception),
+                         "the refusal leaked the decoder's VA")
+
+    def test_a_prefix_that_starts_elsewhere_reports_the_block_rva(self):
+        # The instruction starts at rva 0x1024, but the block was entered at
+        # 0x1020: the refusal is about the planned entry, not the instruction.
+        insns = decode(bytes.fromhex("488b0534120000"), self.va())
+
+        with self.assertRaises(UnsupportedInstruction) as caught:
+            take_prefix(insns, self.RVA - 4, address_base=self.ADDRESS_BASE)
+
+        self.assertEqual(caught.exception.rva, self.RVA - 4)
+        self.assertIn("0x1024", str(caught.exception))
+
+    def test_a_gap_reports_the_instruction_rva(self):
+        first = decode(bytes.fromhex("55"), self.va())
+        second = decode(bytes.fromhex("4883ec20"), self.va(5))
+
+        with self.assertRaises(UnsupportedInstruction) as caught:
+            take_prefix(first + second, self.RVA,
+                        address_base=self.ADDRESS_BASE)
+
+        self.assertEqual(caught.exception.rva, self.RVA + 5)
+
+    def test_a_branch_refusal_reports_the_instruction_rva(self):
+        insns = decode(bytes.fromhex("e800000000"), self.va())
+
+        with self.assertRaises(UnsupportedInstruction) as caught:
+            relocate_prefix(insns, STUB, address_base=self.ADDRESS_BASE)
+
+        self.assertEqual(caught.exception.rva, self.RVA)
+        self.assertEqual(caught.exception.mnemonic, "call")
+        self.assertIn("rva 0x1024", str(caught.exception))
+        self.assertNotIn(f"0x{self.va():X}", str(caught.exception))
+
+
 class TestBuildStubRefusals(unittest.TestCase):
     """What the builder refuses before it assembles anything (keystone-free)."""
 
     def test_without_keystone_it_says_which_dependency_is_missing(self):
-        saved = bbl.keystone
-        bbl.keystone = None
-        self.addCleanup(setattr, bbl, "keystone", saved)
+        # The check lives in the module that assembles; `bbl` only re-exports.
+        saved = stub_module.keystone
+        stub_module.keystone = None
+        self.addCleanup(setattr, stub_module, "keystone", saved)
 
         with self.assertRaises(PydbgError) as caught:
             build_stub(SINK, BLOCK_RVA, COUNT, b"\x90" * 5, RESUME)
