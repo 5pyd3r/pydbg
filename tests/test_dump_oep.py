@@ -10,12 +10,12 @@ import unittest
 from types import SimpleNamespace
 from unittest import mock
 
-import pydbg.dump.oep as oep_module
 from pydbg.dump import (
-    OepCandidate, executable_ranges_outside_functions, oep_candidates,
-    tls_callbacks, watch_writes,
+    OepCandidate, WatchResult, executable_ranges_outside_functions,
+    oep_candidates, tls_callbacks, watch_writes, watched_facts,
 )
 from pydbg.pe import PE
+from pydbg.trace import TraceSummary
 from tests.pe_builder import PEBuilder
 
 RVA_TEXT = 0x1000
@@ -88,14 +88,25 @@ class TestTlsCallbacks(unittest.TestCase):
         self.assertIn("runtime base", message)
 
 
-def fake_result(entries=(), starts=()):
+def fake_result(entries=(), starts=(), exec_ranges=((0x1000, 0x4000),)):
     """An AnalysisResult-shaped object: only the two queries' inputs."""
     exception_entries = [
         SimpleNamespace(begin_rva=begin, end_rva=end)
         for begin, end in entries
     ]
     pe = SimpleNamespace(exception_entries=exception_entries)
-    image = SimpleNamespace(pe=pe)
+    image = SimpleNamespace(pe=pe, exec_ranges=tuple(exec_ranges))
+    return SimpleNamespace(image=image,
+                           functions=SimpleNamespace(starts=set(starts)))
+
+
+def result_for(pe, starts=()):
+    """An AnalysisResult shape over a real PE, with its executable sections."""
+    image = SimpleNamespace(
+        pe=pe,
+        exec_ranges=tuple((section.virtual_address,
+                           section.virtual_address + section.span)
+                          for section in pe.sections if section.is_executable))
     return SimpleNamespace(image=image,
                            functions=SimpleNamespace(starts=set(starts)))
 
@@ -131,27 +142,61 @@ class TestExecutableRangesOutsideFunctions(unittest.TestCase):
 
         self.assertEqual(executable_ranges_outside_functions(result), ())
 
+    def test_a_record_outside_every_executable_range_is_not_returned(self):
+        result = fake_result(
+            entries=((0x2000, 0x2100), (0x5000, 0x5100)),
+            exec_ranges=((0x1000, 0x4000),))
+
+        self.assertEqual(executable_ranges_outside_functions(result),
+                         ((0x2000, 0x2100),))
+
+    def test_a_range_is_clipped_to_the_executable_part(self):
+        result = fake_result(entries=((0x3F00, 0x4200),),
+                             exec_ranges=((0x1000, 0x4000),))
+
+        self.assertEqual(executable_ranges_outside_functions(result),
+                         ((0x3F00, 0x4000),))
+
+    def test_a_pdata_record_in_a_non_executable_section_is_dropped(self):
+        pe = PE(build_pdata_image(((0x2200, 0x2280),)))
+
+        self.assertEqual(
+            executable_ranges_outside_functions(result_for(pe)), ())
+
 
 class TestWatchWrites(unittest.TestCase):
-    """The wrapper owns arming and disarming; the summary passes through."""
+    """The wrapper owns arming and disarming; summary and cleanup pass through."""
 
     def test_returns_the_summary_and_disarms(self):
         summary = object()
         dbg = object()
-        with mock.patch.object(oep_module, 'MemoryWatch') as watch_cls:
+        with mock.patch('pydbg.trace.watch.MemoryWatch') as watch_cls:
             watch = watch_cls.return_value
             watch.run.return_value = summary
+            watch.disarm.return_value = ()
 
             found = watch_writes(dbg, 0x1000, 8, tid=7)
 
-        self.assertIs(found, summary)
+        self.assertIsInstance(found, WatchResult)
+        self.assertIs(found.summary, summary)
+        self.assertEqual(found.warnings, ())
         watch_cls.assert_called_once_with(dbg, 0x1000, 8, tid=7)
         watch.arm.assert_called_once_with()
         watch.run.assert_called_once_with()
         watch.disarm.assert_called_once_with()
 
+    def test_the_disarm_warnings_are_returned_not_dropped(self):
+        with mock.patch('pydbg.trace.watch.MemoryWatch') as watch_cls:
+            watch = watch_cls.return_value
+            watch.run.return_value = object()
+            watch.disarm.return_value = ('breakpoint left',)
+
+            found = watch_writes(object(), 0x1000)
+
+        self.assertEqual(found.warnings, ('breakpoint left',))
+
     def test_disarms_when_the_run_raises(self):
-        with mock.patch.object(oep_module, 'MemoryWatch') as watch_cls:
+        with mock.patch('pydbg.trace.watch.MemoryWatch') as watch_cls:
             watch = watch_cls.return_value
             watch.run.side_effect = RuntimeError("boom")
 
@@ -161,27 +206,73 @@ class TestWatchWrites(unittest.TestCase):
         watch.disarm.assert_called_once_with()
 
 
+def watch_summary(*writes):
+    """A TraceSummary shaped like the one MemoryWatch.run returns."""
+    return TraceSummary(
+        events=sum(count for _, count in writes), blocks=0, reason=None,
+        elapsed_ns=0, mem_writes=tuple(writes))
+
+
+class TestWatchedFacts(unittest.TestCase):
+    """The write facts §11.5 promised: which address was hit, and how often."""
+
+    def test_a_write_hit_becomes_an_rva_and_a_count_fact(self):
+        summary = watch_summary((IMAGE_BASE + 0x1010, 3))
+
+        self.assertEqual(watched_facts(summary, module_base=IMAGE_BASE),
+                         ((0x1010, "write@0x140001010x3"),))
+
+    def test_no_recorded_writes_is_an_empty_tuple(self):
+        summary = TraceSummary(
+            events=0, blocks=0, reason=None, elapsed_ns=0)
+
+        self.assertEqual(
+            watched_facts(summary, module_base=IMAGE_BASE), ())
+
+    def test_the_facts_feed_oep_candidates(self):
+        summary = watch_summary((IMAGE_BASE + 0x1000, 2))
+
+        candidates = oep_candidates(
+            PE(build_plain_image()),
+            watched=watched_facts(summary, module_base=IMAGE_BASE))
+
+        self.assertEqual([candidate.rva for candidate in candidates], [0x1000])
+        self.assertEqual(candidates[0].sources, ("watched",))
+        self.assertIn("write@0x140001000x2", candidates[0].evidence)
+
+
 class TestOepCandidateRecord(unittest.TestCase):
 
     def test_fields_are_only_facts(self):
         names = {field.name for field in dataclasses.fields(OepCandidate)}
 
-        self.assertEqual(names, {"rva", "source", "evidence"})
+        self.assertEqual(names, {"rva", "sources", "evidence"})
         for name in names:
             for word in ("score", "probab", "likely", "rank"):
                 self.assertNotIn(word, name.lower())
 
-    def test_a_string_evidence_is_wrapped_as_one_fact(self):
-        candidate = OepCandidate(0x1000, "tls", "callback at 0x1000")
-
-        self.assertEqual(candidate.evidence, ("callback at 0x1000",))
-        self.assertEqual(candidate.sources, ("tls",))
-
-    def test_merged_sources_are_kept_in_order(self):
+    def test_source_is_the_first_of_the_sources(self):
         candidate = OepCandidate(0x1000, ("watched", "tls"), ("a", "b"))
 
-        self.assertEqual(candidate.source, "watched+tls")
         self.assertEqual(candidate.sources, ("watched", "tls"))
+        self.assertEqual(candidate.source, "watched")
+
+    def test_source_is_read_only(self):
+        candidate = OepCandidate(0x1000, ("tls",))
+
+        with self.assertRaises(dataclasses.FrozenInstanceError):
+            candidate.source = "watched"
+
+    def test_a_string_source_is_one_source(self):
+        candidate = OepCandidate(0x1000, "tls", "callback at 0x1000")
+
+        self.assertEqual(candidate.sources, ("tls",))
+        self.assertEqual(candidate.source, "tls")
+        self.assertEqual(candidate.evidence, ("callback at 0x1000",))
+
+    def test_empty_sources_are_refused(self):
+        with self.assertRaises(ValueError):
+            OepCandidate(0x1000, (), ())
 
 
 class TestOepCandidates(unittest.TestCase):
@@ -201,7 +292,7 @@ class TestOepCandidates(unittest.TestCase):
         self.assertEqual(len(found), 1)
         candidate = found[0]
         self.assertEqual(candidate.sources, ("tls", "watched"))
-        self.assertEqual(candidate.source, "tls+watched")
+        self.assertEqual(candidate.source, "tls")
         self.assertTrue(any(f"0x{rva:X}" in fact
                             for fact in candidate.evidence))
         self.assertTrue(any("3 writes" in fact
@@ -228,17 +319,15 @@ class TestOepCandidates(unittest.TestCase):
                          [0x1000, 0x3000])
 
     def test_a_pdata_gap_becomes_a_candidate_at_the_range_begin(self):
-        pe = PE(build_pdata_image(((0x1000, 0x1100), (0x2000, 0x2100))))
-        result = SimpleNamespace(
-            image=SimpleNamespace(pe=pe),
-            functions=SimpleNamespace(starts={0x1000}))
+        pe = PE(build_pdata_image(((0x1000, 0x1100), (0x1040, 0x1080))))
+        result = result_for(pe, starts={0x1000})
 
         candidates = oep_candidates(result)
 
         self.assertEqual([candidate.rva for candidate in candidates],
-                         [0x2000])
+                         [0x1040])
         self.assertEqual(candidates[0].sources, ("pdata-gap",))
-        self.assertTrue(any("0x2000" in fact
+        self.assertTrue(any("0x1040" in fact
                             for fact in candidates[0].evidence))
         self.assertTrue(any(".pdata" in fact
                             for fact in candidates[0].evidence))

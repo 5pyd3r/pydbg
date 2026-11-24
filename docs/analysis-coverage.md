@@ -559,6 +559,7 @@ RebuildReport(sections_rebuilt, size_of_image, entry_point, load_delta,
               imports, unresolved_imports, gaps, warnings)
 
 pydbg.pe.writer.write_pe(pe, image_bytes, *, entry_point=None) -> bytes
+pydbg.pe.writer.file_layout(pe) -> FileLayout(size_of_image, size_of_headers, sections, sections_offset)
 ```
 
 - `dump_module`：模块来自 `enum_modules()` 或 `None`（主模块）；先按 `LoadedView` 解析确认是 PE，
@@ -579,10 +580,13 @@ pydbg.pe.writer.write_pe(pe, image_bytes, *, entry_point=None) -> bytes
 3. 节：`raw_size = align(virtual_size, FileAlignment)`（dump 里 `virtual_size` 比 `size_of_raw_data` 可信）；
    `raw_ptr` 从 `align(SizeOfHeaders, FileAlignment)` 起逐节递增；数据取
    `data[va : va + virtual_size]`，不足零填充；更新节表 `PointerToRawData`/`SizeOfRawData`。
+   文件布局（`SizeOfImage`、`SizeOfHeaders`、每节文件偏移）由 `pe.writer.file_layout(pe)`
+   一次算出，`write_pe` 与 `rebuild_pe` 共用；`validate=False` 时报告用它的值，
+   不复制 dump 头里的旧 `SizeOfImage`。
 4. 导入：描述符 / ILT / 名字随节复制，**IAT 槽不动**（加载器会重填）；不合成导入表。
    描述符里 `name`/`ordinal` 都缺的槽进 `unresolved_imports`；导入目录落在 gap 上 → `imports_unreadable`。
 5. `load_delta = 运行时模块基址 − 头里的 ImageBase`；非 0 只记录、不重写地址。
-6. `validate=True` 时用 `PE(data)` 回读；失败 → `RebuildError`（带原因），不返回半成品。
+6. `validate=True` 时用 `PE(data)` 回读；失败 → `RebuildError`（消息带解析器给出的原因），不返回半成品。
 
 ### 11.4 gaps 与失败语义
 
@@ -596,15 +600,25 @@ pydbg.pe.writer.write_pe(pe, image_bytes, *, entry_point=None) -> bytes
 ```python
 pydbg.dump.tls_callbacks(pe) -> tuple[int, ...]
 pydbg.dump.executable_ranges_outside_functions(result) -> tuple[tuple[int, int], ...]
-pydbg.dump.watch_writes(dbg, addr, length=4, *, tid=None) -> TraceSummary
+pydbg.dump.watch_writes(dbg, addr, length=4, *, tid=None) -> WatchResult
+pydbg.dump.watched_facts(summary, *, module_base) -> tuple[tuple[int, str], ...]
 pydbg.dump.oep_candidates(pe_or_result, watched=()) -> tuple[OepCandidate, ...]
-OepCandidate(rva, source, evidence)     # source: "tls" | "pdata-gap" | "watched"
+WatchResult(summary, warnings)
+OepCandidate(rva, sources, evidence)     # sources ⊆ {"tls", "pdata-gap", "watched"}
 ```
 
 - 聚合器**只排序、不评分、不判定**；`evidence` 是事实（TLS 回调 RVA、该范围在 `.pdata` 内但不在任何
-  已知函数起点、写观察命中的地址 + 命中次数），绝不输出「最可能」。
-- `watch_writes` 是 `MemoryWatch` 的组合薄封装；已知限制写进 docstring：只观察**写**、4 个调试寄存器槽共享、
-  必须在正常停止点 arm。
+  已知函数起点、写观察命中的地址 + 命中次数 `write@0x<addr>x<count>`），绝不输出「最可能」。
+- `executable_ranges_outside_functions` 与 `AnalyzedImage.exec_ranges` 取交集，所以**每个返回的
+  范围都可执行**；`.pdata` 里落在不可执行节的记录不是可进入的入口，不返回。
+- `watch_writes` 是 `MemoryWatch` 的组合薄封装，返回 `WatchResult(summary, warnings)`：`summary` 是
+  `MemoryWatch.run()` 的 `TraceSummary`，`warnings` 是 `disarm()` 的清理警告（ADR-0004：teardown
+  失败交回调用方）。`run()` 抛错时异常照常传播，此时没有返回值承载清理警告。已知限制写进
+  docstring：只观察**写**、4 个调试寄存器槽共享、必须在正常停止点 arm。
+- `watched_facts` 把 `TraceSummary.mem_writes` 的 `(地址, 命中次数)` 整理成
+  `(addr - module_base, "write@0x...xN")`，直接喂 `oep_candidates(..., watched=watched_facts(...))`。
+- `OepCandidate.sources` 是显式元组（规范顺序 tls → pdata-gap → watched，不可为空）；
+  `source` 是只读属性，返回 `sources[0]`。候选按 RVA 排序、同一 RVA 合并。
 - 已知不可用也要写进 docstring：`StackWalker` 是 x64-only（WOW64 没有栈回溯），没有页级 guard 监控。
 
 ### 11.6 验收
@@ -617,7 +631,8 @@ OepCandidate(rva, source, evidence)     # source: "tls" | "pdata-gap" | "watched
 3. 可加载：把重建字节写成临时文件，`LoadLibraryExW(path, 0, DONT_RESOLVE_DLL_REFERENCES)` 成功
    （ctypes；失败按 `environment:` 跳过）。
 4. live 冒烟（`optional dependency: Cython extension`）：dump `simple_target` 主模块 → `rebuild_pe` →
-   `PE(data)` 解析通过，节数与入口点与源模块一致。
+   `PE(data)` 解析通过，节数与入口点与源模块一致（`tests/test_dump_rebuild.py`；目标缺失按
+   `target not built:` 跳过）。
 5. OEP：`tls_callbacks` 与 `PE.tls.callbacks` 一致（同一个 `va_base`）；`executable_ranges_outside_functions`
    在目标上给出范围且每个范围都可执行；`oep_candidates` 的 `tls` 条目证据含 RVA；空输入返回 `()`。
 6. Phase 4 整体：新测试全绿、`flake8 --max-line-length=120` 干净、`pyproject.toml` 无改动、现有测试全绿。

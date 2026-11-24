@@ -94,6 +94,12 @@ class TraceSummary:
     'single_step_pending' is True when the debugger still holds a pending
     single-step for a thread: the caller owns that uncontinued debug event and
     must continue it before running the target again.
+
+    'mem_writes' is (address, recorded hit count) pairs for memory writes this
+    run observed. Only `MemoryWatch` fills it: its summary otherwise has just a
+    total, and the watched address is a fact the caller of `dump.watch_writes`
+    needs to name an OEP candidate. A tracer that does not watch memory leaves
+    it ().
     """
 
     events: int
@@ -103,6 +109,7 @@ class TraceSummary:
     instructions: int = 0
     warnings: tuple[str, ...] = ()
     single_step_pending: bool = False
+    mem_writes: tuple[tuple[int, int], ...] = ()
 
     @property
     def truncated(self):

@@ -30,7 +30,6 @@ would be a claim the analysis never made.
 from dataclasses import dataclass
 
 from ..pe import PE
-from ..trace.watch import MemoryWatch
 
 # The sources in canonical order. Merged candidates name their sources in this
 # order, so the same set always reads the same way.
@@ -100,20 +99,35 @@ def executable_ranges_outside_functions(result):
     whole — the question here is "was this entry accepted", not "does any byte
     in it belong to some function".
 
-    Pure set arithmetic: executability is not tested here (the caller judges
-    it, and a `.pdata` record in a non-executable section is worth seeing).
-    Ranges are returned ascending by begin, with overlapping and touching
-    ranges merged; a degenerate record with ``end <= begin`` is dropped. A
-    PE32 image has no exception directory in this parser, so it returns ().
+    The range is intersected with `AnalyzedImage.exec_ranges`, the single
+    source of truth for what is executable, so every returned range is
+    executable. A ``.pdata`` record that sits in a non-executable section
+    names a stub the table describes but no CPU can enter, and is dropped
+    rather than offered as an entry-point candidate (spec §11.6(5)). Ranges are
+    returned ascending by begin, with overlapping and touching ranges merged; a
+    degenerate record with ``end <= begin`` is dropped. A PE32 image has no
+    exception directory in this parser, so it returns ().
     """
     starts = result.functions.starts
+    exec_ranges = tuple(result.image.exec_ranges)
     ranges = []
     for entry in result.image.pe.exception_entries:
         begin, end = entry.begin_rva, entry.end_rva
         if end <= begin or begin in starts:
             continue
-        ranges.append((begin, end))
+        ranges.extend(_intersect((begin, end), exec_ranges))
     return _merge_ranges(ranges)
+
+
+def _intersect(span, exec_ranges):
+    """The executable parts of [begin, end), in ascending order."""
+    begin, end = span
+    parts = []
+    for low, high in exec_ranges:
+        start, stop = max(begin, low), min(end, high)
+        if start < stop:
+            parts.append((start, stop))
+    return parts
 
 
 def _merge_ranges(ranges):
@@ -128,15 +142,34 @@ def _merge_ranges(ranges):
     return tuple(merged)
 
 
+@dataclass(frozen=True)
+class WatchResult:
+    """One `watch_writes` run: the trace summary plus cleanup warnings.
+
+    'summary' is `MemoryWatch.run()`'s own TraceSummary; `watched_facts` turns
+    its ``mem_writes`` into the ``(rva, evidence)`` pairs `oep_candidates`
+    accepts. 'warnings' is what ``disarm()`` reported — a target that exited
+    during cleanup leaves "target exited during cleanup" here instead of it
+    being dropped (ADR-0004: teardown failures go back to the caller).
+    """
+
+    summary: object
+    warnings: tuple[str, ...] = ()
+
+
 def watch_writes(dbg, addr, length=4, *, tid=None):
-    """Watch one address range for writes, then disarm and return the summary.
+    """Watch one address range for writes, then disarm and return the result.
 
     The combination the caller would otherwise spell out: construct a
     `MemoryWatch`, ``arm()`` it, ``run()`` it, and ``disarm()`` it in a
-    ``finally`` so a failed run cannot leave a hardware breakpoint behind. The
-    returned `TraceSummary` is `MemoryWatch.run()`'s own; ``events`` counts
-    writes recorded at ``addr`` (this is one address, so it is also the number
-    of distinct hits), while ``blocks`` stays 0.
+    ``finally`` so a failed run cannot leave a hardware breakpoint behind.
+
+    Returns:
+        WatchResult: ``summary`` is `MemoryWatch.run()`'s own; ``events``
+        counts writes recorded at ``addr`` (this is one address, so it is also
+        the number of distinct hits), while ``blocks`` stays 0. ``warnings``
+        carries ``disarm()``'s cleanup warnings, so a target that exited
+        during cleanup is reported rather than swallowed.
 
     Known limits, all of them inherited from `MemoryWatch`:
 
@@ -156,51 +189,88 @@ def watch_writes(dbg, addr, length=4, *, tid=None):
       the caller must continue that debug event before resuming the target.
       ``disarm()`` does not consume it.
 
-    A target that exits during ``disarm()`` produces cleanup warnings, which
-    this wrapper drops: there is no slot in the frozen summary for them.
+    If ``run()`` raises, its exception propagates after the watch is disarmed;
+    the cleanup warnings have no return value to ride on in that case.
     """
+    # Imported here on purpose: `import pydbg.dump` is a cheap, extension-free
+    # import today, and dragging the trace package in for a function nobody may
+    # call would undo that.
+    from ..trace.watch import MemoryWatch
+
     watch = MemoryWatch(dbg, addr, length, tid=tid)
     watch.arm()
     try:
-        return watch.run()
+        summary = watch.run()
     finally:
-        watch.disarm()
+        warnings = watch.disarm()
+    return WatchResult(summary=summary, warnings=warnings)
 
 
-@dataclass(frozen=True, slots=True)
+def watched_facts(summary, *, module_base):
+    """Turn a memory watch summary into ``(rva, evidence)`` write facts.
+
+    ``summary.mem_writes`` is `MemoryWatch.run()`'s (address, hit count) table;
+    each entry becomes ``(address - module_base, "write@0x<address>x<count>")``,
+    which is the "which address was written, and how often" fact §11.5
+    promises. The caller supplies ``module_base`` because the summary records
+    absolute addresses, exactly like the watch that produced them; the result
+    feeds ``oep_candidates(..., watched=watched_facts(...))``.
+
+    A summary with no recorded writes — a tracer that does not observe memory,
+    or a watch that never fired — yields (). The output is ordered by
+    ascending RVA, and duplicate addresses (which a single watch cannot
+    produce) are summed rather than listed twice.
+    """
+    counts = {}
+    for addr, count in getattr(summary, 'mem_writes', ()):
+        rva = int(addr) - int(module_base)
+        counts[rva] = counts.get(rva, 0) + int(count)
+    return tuple(
+        (rva, f"write@0x{rva + int(module_base):X}x{count}")
+        for rva, count in sorted(counts.items()) if count)
+
+
+@dataclass(frozen=True)
 class OepCandidate:
     """One RVA that at least one OEP-hint query named.
 
-    'source' names where the facts came from: ``"tls"``, ``"pdata-gap"`` or
-    ``"watched"``. When several queries name the same RVA, their facts are
-    merged into one candidate and 'source' joins the names with ``+`` —
-    `oep_candidates` uses canonical order (tls, pdata-gap, watched); `sources`
-    gives the parts back as a tuple.
+    'sources' names where the facts came from: ``"tls"``, ``"pdata-gap"`` or
+    ``"watched"``, in canonical order (tls, pdata-gap, watched). It is never
+    empty. 'source' is a read-only property returning the first (canonical)
+    source, for a caller that only wants one name.
 
     'evidence' is the facts themselves, as readable strings: a TLS callback's
     VA and RVA, the ``.pdata`` range whose begin was not recovered as a start,
-    or whatever the caller recorded from `watch_writes`. There is deliberately
-    no score, no probability and no "most likely" field — the aggregator is not
+    or the write observation `watched_facts` produces. There is deliberately no
+    score, no probability and no "most likely" field — the aggregator is not
     allowed to have an opinion (spec §11.5).
+
+    Raises:
+        ValueError: 'sources' is empty.
     """
 
     rva: int
-    source: str
+    sources: tuple[str, ...]
     evidence: tuple[str, ...] = ()
 
     def __post_init__(self):
-        if not isinstance(self.source, str):
-            object.__setattr__(
-                self, 'source', '+'.join(str(part) for part in self.source))
+        if isinstance(self.sources, str):
+            sources = (self.sources,)
+        else:
+            sources = tuple(self.sources)
+        if not sources:
+            raise ValueError("OepCandidate needs at least one source")
+        object.__setattr__(self, 'sources',
+                           tuple(str(source) for source in sources))
         if isinstance(self.evidence, str):
             object.__setattr__(self, 'evidence', (self.evidence,))
         else:
             object.__setattr__(self, 'evidence', tuple(self.evidence))
 
     @property
-    def sources(self):
-        """Every source that named this RVA, in the order ``source`` lists."""
-        return tuple(self.source.split('+'))
+    def source(self):
+        """The first (canonical) source that named this RVA."""
+        return self.sources[0]
 
 
 def oep_candidates(pe_or_result, watched=()):
@@ -215,14 +285,15 @@ def oep_candidates(pe_or_result, watched=()):
       `AnalysisResult` (or an object shaped like one) can supply these; a bare
       `PE` has no recovered starts.
     * Caller-supplied write observations, as ``"watched"``. ``watched`` is a
-      sequence of ``(rva, evidence)`` pairs, normally assembled by the caller
-      from a `watch_writes` summary; the evidence is kept as a fact string.
+      sequence of ``(rva, evidence)`` pairs, normally assembled by
+      `watched_facts` from a `watch_writes` result's summary; the evidence is
+      kept as a fact string.
 
     Candidates come back sorted by RVA and deduplicated: every fact about one
-    RVA lands on one `OepCandidate`, with ``source`` joined and ``evidence`` in
-    source order. Nothing beyond the RVA is ordered, scored or guessed — the
-    caller decides what the facts mean. Empty input (no TLS callbacks, no
-    ``.pdata`` gap, no watched writes) returns ().
+    RVA lands on one `OepCandidate`, with ``sources`` in canonical order and
+    ``evidence`` in source order. Nothing beyond the RVA is ordered, scored or
+    guessed — the caller decides what the facts mean. Empty input (no TLS
+    callbacks, no ``.pdata`` gap, no watched writes) returns ().
 
     Args:
         pe_or_result: A `PE`, or an `AnalysisResult`-shaped object with
@@ -294,5 +365,5 @@ def _candidates(facts):
         sources = [source for source in _SOURCE_ORDER if source in by_source]
         evidence = tuple(dict.fromkeys(
             fact for source in sources for fact in by_source[source]))
-        candidates.append(OepCandidate(rva, '+'.join(sources), evidence))
+        candidates.append(OepCandidate(rva, tuple(sources), evidence))
     return tuple(candidates)

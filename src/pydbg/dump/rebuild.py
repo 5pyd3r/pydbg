@@ -22,10 +22,10 @@ from dataclasses import dataclass
 
 from ..exceptions import PydbgError
 from ..pe import BytesSource, LoadedView, PE, write_pe
+from ..pe.parser import DIR_IMPORT
+from ..pe.writer import file_layout
 
-# Data directory 1 and the size of one IMAGE_IMPORT_DESCRIPTOR; the read model
-# has no named constant for either.
-_IMPORT_DIRECTORY = 1
+# The size of one IMAGE_IMPORT_DESCRIPTOR, for the directory-size fallback.
 _IMPORT_DESCRIPTOR_SIZE = 20
 
 
@@ -82,8 +82,10 @@ def rebuild_pe(dumped, *, entry_point=None, validate=True):
     AddressOfEntryPoint when given (an OEP candidate, typically).
 
     'validate=True' re-parses the result with `PE(data)` and turns a failure
-    into `RebuildError`; with validate=False the bytes are returned even when
-    the read-back fails, and the report says so.
+    into `RebuildError`, whose message carries the parser's reason; with
+    validate=False the bytes are returned even when the read-back fails, the
+    report says so in its warnings, and its `size_of_image` still describes the
+    file that was written (the shared `file_layout`), not the dump's header.
     """
     try:
         pe = PE.from_source(BytesSource(dumped.data), LoadedView(),
@@ -109,26 +111,25 @@ def rebuild_pe(dumped, *, entry_point=None, validate=True):
         warnings.append('imports_unreadable')
 
     try:
+        layout = file_layout(pe)
         data = write_pe(pe, dumped.data, entry_point=entry_point)
     except ValueError as e:
         raise RebuildError(f"cannot lay out the image: {e}") from e
 
-    rebuilt = _parse_file(data)
+    rebuilt, parse_error = _parse_file(data)
     if rebuilt is None:
         if validate:
-            raise RebuildError('rebuilt image does not parse back')
+            raise RebuildError(
+                f"rebuilt image does not parse back: {parse_error}")
         warnings.append('rebuilt image does not parse back')
-        size_of_image = dumped.size_of_image
-        entry_point_rva = (pe.optional_header.entry_point_rva
-                           if entry_point is None else int(entry_point))
-    else:
-        size_of_image = rebuilt.optional_header.size_of_image
-        entry_point_rva = rebuilt.optional_header.entry_point_rva
 
     report = RebuildReport(
         sections_rebuilt=len(pe.sections),
-        size_of_image=size_of_image,
-        entry_point=entry_point_rva,
+        # What was written, from the same calculation the writer used — never
+        # the dump's stale header value, which describes the loaded image.
+        size_of_image=layout.size_of_image,
+        entry_point=(pe.optional_header.entry_point_rva
+                     if entry_point is None else int(entry_point)),
         # Already computed against the runtime base by dump_module (P25).
         load_delta=dumped.load_delta,
         imports=len(imports),
@@ -142,11 +143,15 @@ def rebuild_pe(dumped, *, entry_point=None, validate=True):
 
 
 def _parse_file(data):
-    """Parse 'data' as a file-layout PE, or None when it does not parse."""
+    """Parse 'data' as a file-layout PE.
+
+    Returns (PE, None) on success and (None, exception) otherwise, so the
+    reason the read-back failed can be reported instead of being discarded.
+    """
     try:
-        return PE(data)
-    except (ValueError, OSError):
-        return None
+        return PE(data), None
+    except (ValueError, OSError) as exc:
+        return None, exc
 
 
 def _overlaps(gap, start, end):
@@ -161,7 +166,7 @@ def _import_directory_range(pe):
     still names one descriptor slot, which is the smallest range worth
     checking.
     """
-    directory = pe.optional_header.data_directories.get(_IMPORT_DIRECTORY)
+    directory = pe.optional_header.data_directories.get(DIR_IMPORT)
     if directory is None or directory.virtual_address == 0:
         return None
     start = directory.virtual_address
