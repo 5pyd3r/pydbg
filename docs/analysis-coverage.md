@@ -526,7 +526,123 @@ FieldReport(offset, name, type_name, size, reads, writes, called, present_in)
 行号 / 源映射、FLIRT / YARA、符号服务器、Go / Rust 名字恢复、32 位 PDB、PDB-only（无镜像）分析、
 自研 TPI/Publics 解析器、反编译的类型渲染。
 
-## 11. 明确不做
+## 11. Phase 4：dump 与 PE 重建（D8）
+
+目标：把「活进程里一段已加载的内存」变成**能被本仓库解析、也能被 Windows 加载**的 PE 文件，
+并给调用方一组 **OEP 候选查询**。只做原语，不做一键自动脱壳。
+
+### 11.1 前提与边界
+
+- 活模块解析的现状是 `PE.from_source(ProcessSource(session, base), LoadedView(), va_base=base)`
+  （`analysis/image.py`）；**没有** `PE.from_loaded_image`。
+- `pe/` 没有写出能力，且 `OptionalHeader`/`FileHeader`/`SectionHeader` 丢了写 PE 需要的字段
+  （`DllCharacteristics`、栈/堆、`SizeOfOptionalHeader`、`NumberOfRelocations`）——所以 writer
+  **以原始头字节为底稿 patch**，不从 dataclass 重序列化。
+- 纯 Python 一侧（`pe/`）不 import `memory`/`dump`（ADR-0001 延伸）；读内存与编排在 `dump/`，
+  需要扩展。`pyproject.toml` 不加依赖。
+- 已知 bug 的修正单独一张 ticket：`ProcessSource.read` 抛的 `MemError(PydbgError)` 不被
+  `Source.try_read` 接住，活体分析遇到不可读页会抛而不是按「读不到」降级。
+
+### 11.2 API
+
+```python
+pydbg.dump.dump_module(dbg, module=None, *, max_addr=None) -> DumpedImage
+pydbg.dump.dump_region(dbg, base, size, *, name=None) -> DumpedImage
+
+DumpedImage(rva_base, data, gaps, module_name, image_base, size_of_image,
+            entry_point_rva, load_delta)
+Gap(rva, size, reason)        # reason: "free" | "reserved" | "unreadable:protect=0x.."
+
+pydbg.dump.rebuild_pe(dumped, *, entry_point=None, validate=True) -> RebuiltImage
+RebuiltImage(data, report)
+RebuildReport(sections_rebuilt, size_of_image, entry_point, load_delta,
+              imports, unresolved_imports, gaps, warnings)
+
+pydbg.pe.writer.write_pe(pe, image_bytes, *, entry_point=None) -> bytes
+pydbg.pe.writer.file_layout(pe) -> FileLayout(size_of_image, size_of_headers, sections, sections_offset)
+```
+
+- `dump_module`：模块来自 `enum_modules()` 或 `None`（主模块）；先按 `LoadedView` 解析确认是 PE，
+  再 dump `[0, size_of_image)`。`dump_region` 不要求 PE，`rva_base=base`。
+- `DumpedImage.data` **以模块基址为 0 索引**（`data[i]` 对应 `base + i`）；`gaps` 的 rva 同基准。
+- `write_pe` 接收一个用 `LoadedView` 解析出来的 `pe` 与同一份 RVA 索引字节，返回**文件布局**的字节。
+  `rebuild_pe` 负责把 `DumpedImage` 变成这两样东西并组装报告。
+- `RebuiltImage` 不落盘，调用方拿 `bytes` 自己写。
+
+### 11.3 重建规则
+
+1. 解析：`PE.from_source(BytesSource(dumped.data), LoadedView(), va_base=dumped.image_base)`；
+   失败 → `RebuildError("not a PE image")`。
+2. 头：复制 `[0, size_of_headers)` 原始字节为底稿，只 patch
+   `SizeOfImage = align(max(section.va + span), SectionAlignment)`、`SizeOfHeaders`、
+   `AddressOfEntryPoint`（可被 `entry_point` 覆盖）、`CheckSum = 0`；
+   `FileAlignment`/`SectionAlignment` 保持原值。
+3. 节：`raw_size = align(virtual_size, FileAlignment)`（dump 里 `virtual_size` 比 `size_of_raw_data` 可信）；
+   `raw_ptr` 从 `align(SizeOfHeaders, FileAlignment)` 起逐节递增；数据取
+   `data[va : va + virtual_size]`，不足零填充；更新节表 `PointerToRawData`/`SizeOfRawData`。
+   文件布局（`SizeOfImage`、`SizeOfHeaders`、每节文件偏移）由 `pe.writer.file_layout(pe)`
+   一次算出，`write_pe` 与 `rebuild_pe` 共用；`validate=False` 时报告用它的值，
+   不复制 dump 头里的旧 `SizeOfImage`。
+4. 导入：描述符 / ILT / 名字随节复制，**IAT 槽不动**（加载器会重填）；不合成导入表。
+   描述符里 `name`/`ordinal` 都缺的槽进 `unresolved_imports`；导入目录落在 gap 上 → `imports_unreadable`。
+5. `load_delta = 运行时模块基址 − 头里的 ImageBase`；非 0 只记录、不重写地址。
+6. `validate=True` 时用 `PE(data)` 回读；失败 → `RebuildError`（消息带解析器给出的原因），不返回半成品。
+
+### 11.4 gaps 与失败语义
+
+- `Gap.reason` 来自 `enum_regions` 的 `state`/`protect`；**不用** `read_memory_safe` 的 `win32_error`
+  （未提交页那里恒为 0）。
+- gap 落在节数据上 → 零填充并按节记 `"gap in <section>"`；落在头上 → `RebuildError`。
+- 结构性错误（不是 PE、头不可读、`validate` 失败）→ `RebuildError`；可降级项只进 `report`/`warnings`。
+
+### 11.5 OEP 查询
+
+```python
+pydbg.dump.tls_callbacks(pe) -> tuple[int, ...]
+pydbg.dump.executable_ranges_outside_functions(result) -> tuple[tuple[int, int], ...]
+pydbg.dump.watch_writes(dbg, addr, length=4, *, tid=None) -> WatchResult
+pydbg.dump.watched_facts(summary, *, module_base) -> tuple[tuple[int, str], ...]
+pydbg.dump.oep_candidates(pe_or_result, watched=()) -> tuple[OepCandidate, ...]
+WatchResult(summary, warnings)
+OepCandidate(rva, sources, evidence)     # sources ⊆ {"tls", "pdata-gap", "watched"}
+```
+
+- 聚合器**只排序、不评分、不判定**；`evidence` 是事实（TLS 回调 RVA、该范围在 `.pdata` 内但不在任何
+  已知函数起点、写观察命中的地址 + 命中次数 `write@0x<addr>x<count>`），绝不输出「最可能」。
+- `executable_ranges_outside_functions` 与 `AnalyzedImage.exec_ranges` 取交集，所以**每个返回的
+  范围都可执行**；`.pdata` 里落在不可执行节的记录不是可进入的入口，不返回。
+- `watch_writes` 是 `MemoryWatch` 的组合薄封装，返回 `WatchResult(summary, warnings)`：`summary` 是
+  `MemoryWatch.run()` 的 `TraceSummary`，`warnings` 是 `disarm()` 的清理警告（ADR-0004：teardown
+  失败交回调用方）。`run()` 抛错时异常照常传播，此时没有返回值承载清理警告。已知限制写进
+  docstring：只观察**写**、4 个调试寄存器槽共享、必须在正常停止点 arm。
+- `watched_facts` 把 `TraceSummary.mem_writes` 的 `(地址, 命中次数)` 整理成
+  `(addr - module_base, "write@0x...xN")`，直接喂 `oep_candidates(..., watched=watched_facts(...))`。
+- `OepCandidate.sources` 是显式元组（规范顺序 tls → pdata-gap → watched，不可为空）；
+  `source` 是只读属性，返回 `sources[0]`。候选按 RVA 排序、同一 RVA 合并。
+- 已知不可用也要写进 docstring：`StackWalker` 是 x64-only（WOW64 没有栈回溯），没有页级 guard 监控。
+
+### 11.6 验收
+
+1. writer round-trip：`pe_builder` 的加载布局镜像 → `write_pe` → `PE(data)`：节数、每节
+   `characteristics`、`AddressOfEntryPoint`、导入项 RVA 与原来一致；`PointerToRawData` 按 `FileAlignment`
+   对齐且单调；`SizeOfImage` 等于按节算出的值。
+2. 重建：`build_loaded_image_with_one_import` + 人为 gaps → `report.imports == 1`、`load_delta == 0`；
+   gap 落在 `.text` → 该节零填充 + `"gap in .text"` 警告；gap 落在头 → `RebuildError`。
+3. 可加载：把重建字节写成临时文件，`LoadLibraryExW(path, 0, DONT_RESOLVE_DLL_REFERENCES)` 成功
+   （ctypes；失败按 `environment:` 跳过）。
+4. live 冒烟（`optional dependency: Cython extension`）：dump `simple_target` 主模块 → `rebuild_pe` →
+   `PE(data)` 解析通过，节数与入口点与源模块一致（`tests/test_dump_rebuild.py`；目标缺失按
+   `target not built:` 跳过）。
+5. OEP：`tls_callbacks` 与 `PE.tls.callbacks` 一致（同一个 `va_base`）；`executable_ranges_outside_functions`
+   在目标上给出范围且每个范围都可执行；`oep_candidates` 的 `tls` 条目证据含 RVA；空输入返回 `()`。
+6. Phase 4 整体：新测试全绿、`flake8 --max-line-length=120` 干净、`pyproject.toml` 无改动、现有测试全绿。
+
+### 11.7 不做
+
+一键自动脱壳、导入表合成 / 延迟 thunk 解析、全进程快照（按页）、minidump **写**（Phase 6）、
+重定位重写、资源 / TLS / 导出表重建、签名与校验和、页级 guard 监控、WOW64 栈回溯。
+
+## 12. 明确不做
 
 GUI、正式 CLI、插件机制、AArch64、.NET/CLR 分析、内核/ETW、自建 DBI 引擎、BinDiff、
 一键自动脱壳、商业类型库与签名库本体。

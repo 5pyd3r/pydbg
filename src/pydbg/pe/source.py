@@ -8,10 +8,13 @@ class Source(ABC):
     """Abstract byte source with random access.
 
     Implementations must raise — OSError when the underlying access failed,
-    ValueError when the range is out of bounds — rather than return a short
-    slice; try_read turns either into the None that callers in pe/ actually
-    test for. A short slice is the one wrong answer, because it is
-    indistinguishable from real data at the call site.
+    ValueError when the range is out of bounds or otherwise unavailable —
+    rather than return a short slice; try_read turns either into the None that
+    callers in pe/ actually test for. A source over process memory belongs in
+    the ValueError group too: an uncommitted page and a range past the end are
+    both just "not available" to the walkers here. A short slice is the one
+    wrong answer, because it is indistinguishable from real data at the call
+    site.
 
     `path` is where the bytes came from when they came from a file, and None
     for a memory buffer. It is what lets `PE` hand a consumer the image path

@@ -49,6 +49,15 @@ print("analysis shares pydbg value classes without the extension")
 '''
 
 
+_IMPORT_DUMP_WITHOUT_TRACE = '''
+import sys
+import pydbg.dump
+assert "pydbg.trace" not in sys.modules, "import pydbg.dump pulled in pydbg.trace"
+assert "pydbg._pydbg" not in sys.modules, "import pydbg.dump pulled in _pydbg"
+print("dump import is lightweight")
+'''
+
+
 class TestImportBoundary(unittest.TestCase):
     def _run(self, code):
         return subprocess.run([sys.executable, "-c", code],
@@ -68,6 +77,11 @@ class TestImportBoundary(unittest.TestCase):
         done = self._run(_ANALYSIS_IMPORTS_PDB_WITHOUT_EXTENSION)
         self.assertEqual(done.returncode, 0, done.stderr)
         self.assertIn("value classes", done.stdout)
+
+    def test_importing_dump_does_not_pull_in_the_trace_package(self):
+        done = self._run(_IMPORT_DUMP_WITHOUT_TRACE)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertIn("lightweight", done.stdout)
 
     def test_the_debugger_is_still_reachable_lazily(self):
         from pydbg import Debugger

@@ -3,8 +3,13 @@
 The piece that lets a running process be parsed by the same code as a file:
 pair this with LoadedView and every RVA resolves as a direct offset into the
 module, which is exactly what a Source positioned at the module base means.
+
+An unreadable page is not a parse failure. Live modules routinely have holes —
+an uncommitted page, a guard page, a packed image's stub — and analysis is
+expected to degrade to the parts it can read.
 """
 
+from ..exceptions import MemError
 from ..pe.source import Source
 
 
@@ -28,15 +33,24 @@ class ProcessSource(Source):
     def read(self, offset, size):
         """Bytes at 'offset' from the module base.
 
-        Reads through the strict memory path and lets its error out: a Source
-        that quietly returned short reads would make an uncommitted page look
-        like the end of the file. pe.Source.try_read turns the failure into the
-        None that callers test for.
+        An unavailable range is reported as ValueError, the Source contract:
+        pe.Source.try_read then answers None and a directory walk stops where
+        the data stops instead of aborting the parse. Only `MemError` — the
+        "this page could not be read" signal — is translated. Every other
+        `PydbgError` (a dead debug session, a bad handle) is a real failure and
+        keeps bubbling: "no data at this address" and "the analysis cannot
+        continue" are not the same answer.
+
+        OSError is left alone: try_read already handles it, and it stays a
+        distinct signal when a caller bypasses try_read.
         """
         if self.size is not None and offset >= self.size:
             raise ValueError(
                 f"Read past the end of the module: offset={offset:#x}")
-        return self._reader(self.base_address + offset, size)
+        try:
+            return self._reader(self.base_address + offset, size)
+        except MemError as exc:
+            raise ValueError(str(exc)) from exc
 
     def __repr__(self):
         return (f"ProcessSource(base={self.base_address:#x}, "

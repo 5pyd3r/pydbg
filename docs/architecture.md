@@ -29,7 +29,7 @@ src/pydbg/
 │   └── hardware.py      Dr0-3
 ├── module/resolver.py   模块枚举与文件名
 ├── symbol/resolver.py   dbghelp 封装（dbg.symbols）
-├── pe/                  纯 Python PE 解析（无第三方依赖）
+├── pe/                  纯 Python PE 解析**与写出**（无第三方依赖）
 ├── pdb/                 纯 Python PDB 读取（MSF 校验 + ctypes dbghelp 离线）
 ├── disasm/engine.py     capstone 封装；模式**按次**判定，不锁存
 ├── instrument/          插桩：硬编码 stub + LLVM 动态代码生成
@@ -42,6 +42,14 @@ src/pydbg/
 `pdb/`（6 模块）是纯 Python + ctypes dbghelp 的 PDB 读取层：`analysis` 对它是
 单向依赖，`pdb` 不认识 `analysis`；导入 `pydbg.analysis` 因此不会加载 `_pydbg`，
 ADR-0001 不破。
+
+`pe/` 不再只是 parse-only：`pe/writer.py` 的 `write_pe(pe, image_bytes)` 把
+`LoadedView` 读出的加载布局镜像写成文件布局的 PE，`file_layout(pe)` 是
+`SizeOfImage`/`SizeOfHeaders`/每节文件偏移的唯一计算。`dump/` 在其上组链：
+`dump_module`（读活内存 + gap 表）→ `rebuild_pe`（写文件布局，再用 `PE(data)`
+回读自检并交出报告）。`pe/` 仍是纯 Python，且不 import `memory`/`dump`
+（ADR-0001 延伸）；`import pydbg.dump` 也不加载 `pydbg.trace`（硬件观察是
+`watch_writes` 内的延迟导入）。
 
 ## 分层
 

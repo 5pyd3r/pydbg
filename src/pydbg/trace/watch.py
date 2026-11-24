@@ -232,6 +232,10 @@ class MemoryWatch:
             warnings=tuple(dict.fromkeys(self._warnings)),
             single_step_pending=_shared.single_step_pending(
                 self.dbg, self._uncontinued),
+            # A watch is one address, so every recorded hit is a write to
+            # self.addr; keeping the address in the summary is what lets a
+            # caller name the hit without re-deriving it from the watch.
+            mem_writes=((self.addr, self._events),) if self._events else (),
         )
 
     def _reset(self):
