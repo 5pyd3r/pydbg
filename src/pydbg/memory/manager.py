@@ -9,6 +9,11 @@ from ..exceptions import MemError
 _MEM_COMMIT = 0x1000
 _PAGE_SIZE = 0x1000
 
+# Allocation constants for the remote scratch/buffer path.
+_MEM_COMMIT_RESERVE = 0x3000     # MEM_COMMIT | MEM_RESERVE
+_MEM_RELEASE = 0x8000
+_PAGE_READWRITE = 0x04
+
 # Ceiling on a single tolerant read. Generous enough for the largest image
 # anyone dumps in one call (a whole 512MB process would still fit), small
 # enough that a length field which lies fails loudly instead of trying to
@@ -75,6 +80,46 @@ class MemoryManager:
             )
         except OSError as e:
             raise MemError(f"VirtualProtectEx at 0x{addr:X}: {e}")
+
+    # ── remote allocation ──
+    #
+    # Instrumentation needs a scratch region inside the target that outlives a
+    # single write: the event ring a stub appends to lives there. The rest of
+    # this class reads and writes memory that already exists; allocation was the
+    # missing half, and it belongs here so callers never reach for `_pydbg`
+    # themselves (and tests can stand in one object).
+
+    def alloc_remote(self, size, protect=_PAGE_READWRITE):
+        """Allocate `size` bytes in the target; return the base address.
+
+        Committed and reserved in one call (VirtualAllocEx), zero-filled by
+        Windows. Arbitrary placement is intentional: the buffer is reached by
+        absolute address in the stub, so it needs no ±2GB neighbourhood.
+
+        Raises:
+            MemError: VirtualAllocEx refused, or answered without an address.
+        """
+        try:
+            result = _pydbg.virtual_alloc_ex(
+                self._s.process_handle, 0, size, _MEM_COMMIT_RESERVE, protect)
+        except OSError as e:
+            raise MemError(f"VirtualAllocEx({size}) failed: {e}") from e
+        address = result.get('base_address', 0)
+        if not address:
+            raise MemError(f"VirtualAllocEx({size}) returned no address")
+        return address
+
+    def free_remote(self, address):
+        """Release an allocation made by `alloc_remote` (MEM_RELEASE).
+
+        Raises:
+            MemError: VirtualFreeEx refused; the allocation is still there.
+        """
+        try:
+            _pydbg.virtual_free(
+                self._s.process_handle, address, 0, _MEM_RELEASE)
+        except OSError as e:
+            raise MemError(f"VirtualFreeEx at 0x{address:X}: {e}") from e
 
     # ── handle variants for child process support ──
 
