@@ -14,6 +14,7 @@ from .types import (
 from .source import Source, FileSource, BytesSource
 from .view import View, FileView, LoadedView
 from .parser import PEParser
+from .writer import write_pe
 from .resource import (
     PEResourceParser, ResourceEntry, RESOURCE_TYPES, RT_VERSION,
 )
@@ -278,6 +279,7 @@ class PE:
 
 __all__ = [
     'PE',
+    'write_pe',
     'DosHeader', 'FileHeader', 'OptionalHeader', 'DataDirectory',
     'SectionHeader', 'ExportEntry', 'ImportEntry', 'DelayImport',
     'BoundImport', 'BoundImportForwarder', 'LoadConfig', 'CLRHeader',
