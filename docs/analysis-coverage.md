@@ -675,7 +675,7 @@ UnsupportedInstruction(PydbgError)
 
 - `plan()`：块起点与 `BblTracer.plan()` **同源**（同一份 CFG），额外保留块范围、块内指令 RVA、前缀长度与
   可重定位性；`blocks=` 显式列表覆盖；`max_blocks` 截断。
-- `install()`：逐块 `挂起其余线程 → 检查 RIP → 写 5 字节 → 恢复线程`；冲突或挂起失败 → 该块进 `refused`，
+- `install()`：逐块 `挂起其余线程 → 检查 RIP → 写 E9 rel32 并用 NOP 填满被覆盖的整段前缀 → 恢复线程`；冲突或挂起失败 → 该块进 `refused`，
   成功的进 `installed`；每个失败都带原因。
 - `events()`：读环形缓冲、解析成 `TraceEvent(kind=BLOCK, tid=0, ts=0, rva=块起点, a=块内指令数, b=0)` 并清空读指针。
 - `uninstall()`：先读回并校验原始字节，再写回；不匹配记 `"bytes changed under us"` 警告，不静默覆盖。
@@ -694,8 +694,9 @@ UnsupportedInstruction(PydbgError)
 
 ### 12.4 线程语义
 
-改写 `[block, block+5)` 前：挂起其余线程 → 逐个 `get_context` 检查 RIP 是否落在窗口内 → 有冲突就恢复字节、
+改写被覆盖的整段前缀 `[block, block + prefix_size)` 前：挂起其余线程 → 逐个 `get_context` 检查 RIP 是否落在窗口内 → 有冲突就恢复字节、
 恢复线程、以 `"target busy"` 拒绝该块（**不单步、不猜**）；挂起失败同样拒绝。任何路径下 `finally` 都要恢复线程。
+`prefix_size` 是 capstone 解码给出的整段前缀长度（`E9 rel32` 之外用 NOP 填满），不是固定 5 字节。
 `uninstall` 走同样的窗口检查，只撤自己装的块。
 
 ### 12.5 验收
