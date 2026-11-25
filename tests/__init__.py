@@ -32,6 +32,13 @@ TEST_WEDGE_TARGET_PATH = os.environ.get('TEST_WEDGE_TARGET_PATH',
 _DEFAULT_AV_TARGET = os.path.join(_TEST_DIR, 'target', 'av_target.exe')
 TEST_AV_TARGET_PATH = os.environ.get('TEST_AV_TARGET_PATH', _DEFAULT_AV_TARGET)
 
+# Phase 6 anti-debug target (spec §13.2): calls IsDebuggerPresent and reads the
+# PEB BeingDebugged / NtGlobalFlag fields. Built by meson, not committed.
+_DEFAULT_ANTIDEBUG_TARGET = os.path.join(_TEST_DIR, 'target',
+                                         'antidebug_target.exe')
+TEST_ANTIDEBUG_TARGET_PATH = os.environ.get('TEST_ANTIDEBUG_TARGET_PATH',
+                                            _DEFAULT_ANTIDEBUG_TARGET)
+
 # Architecture-aware register name helpers
 HOST_ARCH = struct.calcsize("P") * 8  # 32 or 64
 IP_REG = "rip" if HOST_ARCH == 64 else "eip"
