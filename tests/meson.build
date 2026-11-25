@@ -10,6 +10,14 @@ instrument_target = executable(
   'target/instrument_target.c',
 )
 
+# 1e6 块循环目标（§13.5/§13.7）：main 的循环每轮调用一次 noinline 的 bump。
+# 只对 bump 所在块插桩，一次迭代就是一个 BLOCK 记录；同一循环也用来跑
+# 10^4 单步窗口 —— 热路径不调用导入函数，窗口不会因离开模块而提前结束。
+loop_target = executable(
+  'loop_target',
+  'target/loop_target.c',
+)
+
 # 记录自身 argv 的测试目标（用于 create_process(cmdline=...) 验证）
 argv_target = executable(
   'argv_target',
@@ -110,6 +118,7 @@ test_env.set('TEST_WOW64_TARGET_PATH',
 test_env.set('TEST_INSTRUMENT_TARGET_PATH', instrument_target.full_path())
 test_env.set('TEST_INSTRUMENT_TARGET32_PATH',
   meson.project_source_root() / 'tests' / 'target' / 'instrument_target32.exe')
+test_env.set('TEST_LOOP_TARGET_PATH', loop_target.full_path())
 test_env.set('TEST_ARGV_TARGET_PATH', argv_target.full_path())
 test_env.set('TEST_NESTED_TARGET_PATH', nested_target.full_path())
 test_env.set('TEST_WINDOW_TARGET_PATH', window_target.full_path())
