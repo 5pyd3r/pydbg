@@ -242,6 +242,10 @@ cdef extern from "windows.h":
     DWORD SuspendThread(HANDLE hThread)
     DWORD ResumeThread(HANDLE hThread)
     DWORD GetThreadId(HANDLE hThread)
+    # APCs: QueueUserAPC takes a bare function pointer, which is why the
+    # typedef is here instead of a void* (the two are not interchangeable in C).
+    ctypedef void (*PAPCFUNC)(SIZE_T)
+    DWORD QueueUserAPC(PAPCFUNC pfnAPC, HANDLE hThread, ULONG_PTR dwData)
     BOOL GetThreadTimes(HANDLE hThread, void* lpCreationTime, void* lpExitTime,
         void* lpKernelTime, void* lpUserTime)
     BOOL IsWow64Process(HANDLE hProcess, BOOL* Wow64Process)
