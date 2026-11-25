@@ -16,6 +16,8 @@ Everything that needs the extension is resolved on first use through
 import struct as _struct
 
 from .constants import (
+    DBG_CONTINUE,
+    DBG_EXCEPTION_NOT_HANDLED,
     EXCEPTION_ACCESS_VIOLATION,
     EXCEPTION_BREAKPOINT,
     EXCEPTION_EXECUTE_FAULT,
@@ -48,6 +50,7 @@ HOST_ARCH = _struct.calcsize("P") * 8  # 64 under the x64-only build policy
 # package import time.
 _LAZY = {
     "Debugger": ".core.debugger",
+    "ExceptionPolicy": ".core.policy",
     "DebugEvent": ".core.event",
     "ChildProcessInfo": ".core.session",
     "ExitReason": ".core.status",
@@ -107,6 +110,9 @@ def __dir__():
 
 __all__ = [
     "Debugger",
+    "ExceptionPolicy",
+    "DBG_CONTINUE",
+    "DBG_EXCEPTION_NOT_HANDLED",
     "HOST_ARCH",
     "ChildProcessInfo",
     "enumerate_processes",
