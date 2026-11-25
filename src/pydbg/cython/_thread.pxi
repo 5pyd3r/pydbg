@@ -12,6 +12,7 @@ from _win32types cimport (
     CreateToolhelp32Snapshot, Thread32First, Thread32Next,
     THREADENTRY32, TH32CS_SNAPTHREAD,
     pydbg_ctx_sizeof, pydbg_ctx_init,
+    pydbg_ctx_arch_sizeof,
     pydbg_ctx_get_ip, pydbg_ctx_set_ip,
     pydbg_ctx_get_sp, pydbg_ctx_set_sp,
     pydbg_ctx_get_bp, pydbg_ctx_set_bp,
@@ -104,6 +105,53 @@ cpdef dict get_thread_context(unsigned long long h_thread, int machine=64):
     out['arch'] = arch
     free(ctx)
     return out
+
+
+cpdef bytes get_thread_context_bytes(unsigned long long h_thread, int machine=64):
+    """Capture a thread's raw CONTEXT bytes.
+
+    machine: 32 = WOW64_CONTEXT (716 bytes), 64 = native x64 CONTEXT
+    (1232 bytes). This is the buffer StackWalk64 consumes; the dict-shaped
+    get_thread_context() above stays the register API. Raises OSError on
+    failure.
+    """
+    cdef int ctx_size = pydbg_ctx_sizeof()
+    cdef void* ctx = malloc(ctx_size)
+    if ctx == NULL:
+        raise MemoryError("Failed to allocate CONTEXT")
+    cdef BOOL result
+    if machine == 32:
+        pydbg_ctx_init(ctx, machine, WOW64_CONTEXT_ALL)
+        result = Wow64GetThreadContext(<HANDLE><LPVOID>h_thread, ctx)
+    else:
+        pydbg_ctx_init(ctx, machine, CONTEXT_ALL)
+        result = GetThreadContext(<HANDLE><LPVOID>h_thread, ctx)
+    if result == 0:
+        free(ctx)
+        raise OSError(GetLastError(), "GetThreadContext failed")
+    cdef char* raw = <char*>ctx
+    cdef bytes data = raw[:pydbg_ctx_arch_sizeof(machine)]
+    free(ctx)
+    return data
+
+
+cpdef tuple context_frame_bytes(int machine, object context_bytes):
+    """(ip, sp, fp) read from raw CONTEXT bytes, without touching a thread.
+
+    StackWalker starts from the context it was handed rather than from
+    whatever the thread's registers hold now. Raises ValueError when the
+    buffer is shorter than the architecture's CONTEXT.
+    """
+    cdef bytes data = bytes(context_bytes)
+    cdef int need = pydbg_ctx_arch_sizeof(machine)
+    if len(data) < need:
+        raise ValueError(
+            "CONTEXT for machine %d is %d bytes, got %d"
+            % (machine, need, len(data)))
+    cdef char* raw = data
+    return (pydbg_ctx_get_ip(<void*>raw, machine),
+            pydbg_ctx_get_sp(<void*>raw, machine),
+            pydbg_ctx_get_bp(<void*>raw, machine))
 
 
 cpdef int set_thread_context(unsigned long long h_thread, dict context, int machine=64) except? -1:

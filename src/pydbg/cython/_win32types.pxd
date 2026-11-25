@@ -429,6 +429,13 @@ cdef extern from *:
 
     static inline int pydbg_ctx_sizeof(void) { return (int)sizeof(pydbg_ctx_buf_t); }
 
+    /* 单个架构的 CONTEXT 字节数，用于把抓到的缓冲区原样交给调用方：
+       x64 = 1232，x86 (WOW64) = 716。 */
+    static inline int pydbg_ctx_arch_sizeof(int machine) {
+        return machine == 32 ? (int)sizeof(WOW64_CONTEXT)
+                             : (int)sizeof(CONTEXT);
+    }
+
     /* machine: 32 = WOW64/x86 布局，其它 = x64 布局 */
     static inline void pydbg_ctx_init(void* pctx, int machine, unsigned long flags) {
         memset(pctx, 0, sizeof(pydbg_ctx_buf_t));
@@ -583,6 +590,7 @@ cdef extern from *:
     static inline int pydbg_host_arch(void) { return 64; }
     """
     int pydbg_ctx_sizeof()
+    int pydbg_ctx_arch_sizeof(int machine)
     void pydbg_ctx_init(void* pctx, int machine, unsigned long flags)
     unsigned long pydbg_ctx_get_flags(void* pctx, int machine)
     void pydbg_ctx_set_flags(void* pctx, int machine, unsigned long f)
