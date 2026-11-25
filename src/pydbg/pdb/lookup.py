@@ -13,6 +13,7 @@ and §A5 for the reason strings a failed lookup reports.
 import os
 from dataclasses import dataclass
 
+from .dbghelp import line_for as read_line
 from .dbghelp import symbols as read_symbols
 from .errors import PdbFormatError
 from .msf import MSFFile
@@ -242,6 +243,7 @@ class Pdb:
         self._msf = None
         self._symbols = None
         self._structs = None
+        self._lines = {}
 
     def _file(self):
         if self._msf is None:
@@ -272,6 +274,32 @@ class Pdb:
             self._symbols = read_symbols(self.path, self.image_path,
                                          self.image_base)
         return self._symbols
+
+    def line_for(self, rva):
+        """The source line covering 'rva' in this PDB, or None.
+
+        The image-relative address is the same key `symbols()` reports, so a
+        `PdbSymbol.rva` can be passed straight in. The answer is cached per
+        module — this Pdb is one module — and the session keeps the loaded
+        module, so asking again (for this RVA or another) does not reload it.
+
+        Args:
+            rva: An image-relative virtual address.
+
+        Returns:
+            LineInfo | None: the recorded file, its 1-based line and the byte
+            displacement into it; None for an address outside the image or one
+            with no line record. Absent line information is an answer, not an
+            error.
+
+        Raises:
+            PdbError: no image path was given, the image is missing or
+                unreadable, or dbghelp failed to load the module.
+        """
+        if rva not in self._lines:
+            self._lines[rva] = read_line(self.path, self.image_path,
+                                         self.image_base, rva)
+        return self._lines[rva]
 
     def structs(self):
         """Every UDT this PDB describes, sorted by name and size.
