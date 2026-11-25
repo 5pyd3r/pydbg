@@ -75,6 +75,11 @@ _LAZY = {
     "InstrumentInfo": ".instrument",
     "InstrumentTemplates": ".instrument",
     "BblInstrumenter": ".instrument",
+    # Read-only anti-debug detection (spec §13.2). The module itself is
+    # exported too, so `pydbg.antidebug.detect(dbg)` works after either
+    # `import pydbg` + attribute access or `from pydbg import antidebug`.
+    "antidebug": ".antidebug",
+    "DebuggerCheck": ".antidebug",
 }
 
 
@@ -85,7 +90,13 @@ def __getattr__(name):
         raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
     import importlib
 
-    value = getattr(importlib.import_module(module_name, __name__), name)
+    module = importlib.import_module(module_name, __name__)
+    # A key that names a submodule resolves to the module itself rather than
+    # to an attribute of it: _LAZY maps `antidebug` to `.antidebug`.
+    if name == module_name.rsplit(".", 1)[-1]:
+        value = module
+    else:
+        value = getattr(module, name)
     globals()[name] = value          # resolve once; later lookups skip __getattr__
     return value
 
@@ -144,4 +155,6 @@ __all__ = [
     "InstrumentInfo",
     "InstrumentTemplates",
     "BblInstrumenter",
+    "antidebug",
+    "DebuggerCheck",
 ]
