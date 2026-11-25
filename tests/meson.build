@@ -97,6 +97,16 @@ dump_host = executable(
   link_with: dump_target,
 )
 
+# Phase 6 D10 stack-walk target (spec §13.3): a real call chain
+# main -> f1 -> f2 -> f3, with f3 sleeping so a debugger can capture a live
+# CONTEXT that holds at least three return addresses. A synthetic context
+# cannot prove StackWalker works: the previous live test walked a zeroed
+# buffer and only asserted "must not crash".
+stack_target = executable(
+  'stack_target',
+  'target/stack_target.c',
+)
+
 # Common environment: PYTHONPATH includes project root (for tests).
 # The editable install (pip install -e .) handles pydbg package discovery,
 # including the compiled Cython extension at the correct import path.
@@ -116,6 +126,7 @@ test_env.set('TEST_WINDOW_TARGET_PATH', window_target.full_path())
 test_env.set('TEST_MODAL_TARGET_PATH', modal_target.full_path())
 test_env.set('TEST_WEDGE_TARGET_PATH', wedge_target.full_path())
 test_env.set('TEST_AV_TARGET_PATH', av_target.full_path())
+test_env.set('TEST_STACK_TARGET_PATH', stack_target.full_path())
 # /DEBUG leaves each .pdb next to its .exe, so the build dir already holds it.
 # Deriving the name from the built target keeps the two in step; a hard-coded
 # "pdb_target.pdb" would stop matching silently if the target were renamed.
