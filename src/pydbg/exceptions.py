@@ -14,6 +14,15 @@ class ThreadError(PydbgError):
     """Thread operation errors (context, suspend, resume)."""
 
 
+class InjectionError(PydbgError):
+    """An injection primitive failed.
+
+    The message names the stage that failed (path/resolve/alloc/write/thread/
+    apc/threads/target) and the Win32 error code, because "injection failed"
+    alone cannot tell a refused allocation from a refused CreateRemoteThread.
+    """
+
+
 class BreakpointError(PydbgError):
     """Breakpoint operation errors."""
 

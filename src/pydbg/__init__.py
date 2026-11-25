@@ -28,6 +28,7 @@ from .constants import (
 )
 from .exceptions import (
     BreakpointError,
+    InjectionError,
     MemError,
     ProcessError,
     PydbgError,
@@ -75,6 +76,13 @@ _LAZY = {
     "InstrumentInfo": ".instrument",
     "InstrumentTemplates": ".instrument",
     "BblInstrumenter": ".instrument",
+    "inject": ".inject",
+    "InjectionReport": ".inject",
+    "inject_dll": ".inject",
+    "inject_shellcode": ".inject",
+    "queue_apc": ".inject",
+    "suspend_process": ".inject",
+    "resume_process": ".inject",
 }
 
 
@@ -116,6 +124,7 @@ __all__ = [
     "ProcessError",
     "MemError",
     "ThreadError",
+    "InjectionError",
     "BreakpointError",
     "TimeoutError",
     "TeardownError",
@@ -144,4 +153,11 @@ __all__ = [
     "InstrumentInfo",
     "InstrumentTemplates",
     "BblInstrumenter",
+    "inject",
+    "InjectionReport",
+    "inject_dll",
+    "inject_shellcode",
+    "queue_apc",
+    "suspend_process",
+    "resume_process",
 ]
