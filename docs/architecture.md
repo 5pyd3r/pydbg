@@ -86,9 +86,11 @@ cython/_pydbg（Win32 薄封装） → Win32 / dbghelp / WoW64
 
 每个会写目标的 manager 实现 `teardown()`（还原，返回失败清单，不抛）与
 `discard()`（进程已死时只忘记记录）。`Debugger.close()` 按固定顺序
-`hook_iat → hook_inline → instrumenter → bbl_instrumenter → brk_hw →
-brk_sw → symbols` 撤销，再停止调试、释放句柄；失败聚合成一个
-`TeardownError`。`detach()` 与
+`hook_iat → hook_inline → instrumenter → bbl_instrumenter → traces →
+brk_hw → brk_sw → symbols → memory → thread` 撤销，再停止调试、释放句柄；
+失败聚合成一个 `TeardownError`。`traces` 是 `Debugger` 持有的注册表：四个
+tracer 交给 `Debugger` 时自动登记，`attach_trace(obj)` 显式登记，tracer 的
+`teardown()` 返回 `disarm()` 的清理警告。`detach()` 与
 `terminate_process()` 是它的特例；支持 `with Debugger() as dbg:`。
 
 ## 状态与真相

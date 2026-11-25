@@ -134,3 +134,14 @@ class ThreadManager:
         regs = self.get_context(h_thread)
         regs["eflags"] = regs.get("eflags", 0) | 0x100
         self.set_context(h_thread, regs)
+
+    def teardown(self):
+        """Undo nothing: this manager opens no handle and keeps no record.
+
+        It writes the target (context, suspend/resume), so it belongs in the
+        teardown chain (ADR-0004), but it owns no artifact to release: `open()`
+        hands the handle to the caller, every context/suspend call acts on a
+        caller-owned handle, and `Debugger.close()` closes the session's own
+        thread handle. Returning () is the honest answer, not a placeholder.
+        """
+        return ()

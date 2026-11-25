@@ -188,6 +188,12 @@ class FunctionProbe:
         self._step_pending = False
         # True when the run ended on an uncontinued debug event.
         self._uncontinued = False
+        # Handed a Debugger, a tracer is part of that debugger's teardown
+        # chain (ADR-0004); a fake or proxy without attach_trace() is simply
+        # not a lifecycle owner.
+        attach = getattr(dbg, "attach_trace", None)
+        if callable(attach):
+            attach(self)
 
     @property
     def hook_id(self):
@@ -274,6 +280,34 @@ class FunctionProbe:
         finally:
             self._close_thread(h_thread)
         return ()
+
+    def teardown(self):
+        """Undo the probe as one manager-contract step (ADR-0004).
+
+        `Debugger.close()` calls it through the `traces` registry. It is
+        `disarm()` under the name close() looks for: the same slot removal,
+        the same warnings, and the same idempotence.
+
+        Returns:
+            tuple[str, ...]: cleanup warnings ("breakpoint left",
+            "target exited during cleanup"), empty when the slot came back.
+        """
+        return tuple(self.disarm())
+
+    def discard(self):
+        """Forget the armed slot without touching the target (it is gone).
+
+        For `Debugger.terminate_process()`: the debug registers died with the
+        process, so there is no write to attempt, but the thread handle this
+        probe opened still belongs to this process and is closed here.
+        """
+        h_thread = self._h_thread
+        self._bp_id = None
+        self._slot = None
+        self._h_thread = None
+        self._step_pending = False
+        self._close_thread(h_thread)
+        self._reset()
 
     # ── running ────────────────────────────────────────────────
 

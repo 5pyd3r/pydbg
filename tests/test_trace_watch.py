@@ -223,5 +223,70 @@ class TestMemoryWatchRun(_WatchLiveCase):
               f"elapsed={summary.elapsed_ns / 1e9:.3f}s")
 
 
+class _FakeCleanupDebugger:
+    """The calls disarm()/discard() make, so cleanup needs no target."""
+
+    def __init__(self):
+        self.breakpoints = {}       # bp_id -> addr
+        self.removed = []
+        self.closed = []
+
+    def add(self, bp_id, addr):
+        self.breakpoints[bp_id] = addr
+
+    def remove_breakpoint(self, bp_id):
+        self.removed.append(bp_id)
+        self.breakpoints.pop(bp_id, None)
+
+    def find_breakpoint(self, addr):
+        return next((bid for bid, a in self.breakpoints.items() if a == addr),
+                    None)
+
+    def close_handle(self, h):
+        self.closed.append(h)
+
+    def get_exit_code(self):
+        return 259                  # STILL_ACTIVE
+
+
+class TestMemoryWatchTeardown(unittest.TestCase):
+    """The watch answers the teardown contract close() walks (ADR-0004)."""
+
+    def armed(self):
+        dbg = _FakeCleanupDebugger()
+        watch = MemoryWatch(dbg, 0x1000, 4)
+        watch._bp_id = 7
+        watch._slot = 1
+        watch._h_threads = {123: 0x55, 456: 0x66}
+        dbg.add(7, 0x1000)
+        return watch, dbg
+
+    def test_teardown_disarms_and_closes_every_thread_handle(self):
+        watch, dbg = self.armed()
+
+        self.assertEqual(watch.teardown(), ())
+        self.assertEqual(dbg.removed, [7])
+        self.assertEqual(sorted(dbg.closed), [0x55, 0x66])
+        self.assertIsNone(watch._bp_id)
+        self.assertIsNone(watch._slot)
+        self.assertEqual(watch._h_threads, {})
+        self.assertEqual(watch.teardown(), (), "teardown is idempotent")
+
+    def test_discard_forgets_the_slot_without_touching_the_target(self):
+        watch, dbg = self.armed()
+
+        watch.discard()
+
+        self.assertEqual(dbg.removed, [])
+        self.assertEqual(dbg.breakpoints, {7: 0x1000},
+                         "discard wrote to a target it was told is gone")
+        self.assertIsNone(watch._bp_id)
+        self.assertIsNone(watch._slot)
+        self.assertEqual(watch._h_threads, {})
+        self.assertEqual(sorted(dbg.closed), [0x55, 0x66],
+                         "the handles the watch opened still had to be closed")
+        watch.discard()         # idempotent
+
+
 if __name__ == "__main__":
     unittest.main()
