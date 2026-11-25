@@ -30,6 +30,7 @@ from .constants import (
 )
 from .exceptions import (
     BreakpointError,
+    InjectionError,
     MemError,
     ProcessError,
     PydbgError,
@@ -78,6 +79,15 @@ _LAZY = {
     "InstrumentInfo": ".instrument",
     "InstrumentTemplates": ".instrument",
     "BblInstrumenter": ".instrument",
+    # The injection package and its extension-free types; the functions are
+    # lazy inside it, so `pydbg.inject.inject_dll` needs `_pydbg` only on call.
+    "inject": ".inject",
+    "InjectionReport": ".inject",
+    "inject_dll": ".inject",
+    "inject_shellcode": ".inject",
+    "queue_apc": ".inject",
+    "suspend_process": ".inject",
+    "resume_process": ".inject",
     # Read-only anti-debug detection (spec §13.2). The module itself is
     # exported too, so `pydbg.antidebug.detect(dbg)` works after either
     # `import pydbg` + attribute access or `from pydbg import antidebug`.
@@ -95,7 +105,7 @@ def __getattr__(name):
 
     module = importlib.import_module(module_name, __name__)
     # A key that names a submodule resolves to the module itself rather than
-    # to an attribute of it: _LAZY maps `antidebug` to `.antidebug`.
+    # to an attribute of it: _LAZY maps `antidebug`/`inject` to those modules.
     if name == module_name.rsplit(".", 1)[-1]:
         value = module
     else:
@@ -133,6 +143,7 @@ __all__ = [
     "ProcessError",
     "MemError",
     "ThreadError",
+    "InjectionError",
     "BreakpointError",
     "TimeoutError",
     "TeardownError",
@@ -161,6 +172,13 @@ __all__ = [
     "InstrumentInfo",
     "InstrumentTemplates",
     "BblInstrumenter",
+    "inject",
+    "InjectionReport",
+    "inject_dll",
+    "inject_shellcode",
+    "queue_apc",
+    "suspend_process",
+    "resume_process",
     "antidebug",
     "DebuggerCheck",
 ]

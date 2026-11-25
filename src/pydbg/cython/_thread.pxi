@@ -2,11 +2,11 @@
 
 from libc.stdlib cimport malloc, free
 from _win32types cimport (
-    HANDLE, DWORD, BOOL, LPVOID,
+    HANDLE, DWORD, BOOL, LPVOID, SIZE_T, ULONG_PTR,
     OpenThread, GetThreadContext, SetThreadContext,
     Wow64GetThreadContext, Wow64SetThreadContext, WOW64_CONTEXT_ALL,
     SuspendThread, ResumeThread, GetThreadId, GetLastError,
-    CloseHandle,
+    CloseHandle, PAPCFUNC, QueueUserAPC,
     THREAD_ALL_ACCESS, CONTEXT_ALL,
     CONTEXT_DEBUG_REGISTERS, CONTEXT_INTEGER, CONTEXT_CONTROL,
     CreateToolhelp32Snapshot, Thread32First, Thread32Next,
@@ -235,6 +235,25 @@ cpdef int resume_thread(unsigned long long h_thread):
     if result == <DWORD>-1:
         raise OSError(GetLastError(), "ResumeThread failed")
     return <int>result
+
+
+cpdef int queue_user_apc(unsigned long long h_thread, unsigned long long addr,
+                         unsigned long long data=0):
+    """Queue a user-mode APC to 'h_thread' at 'addr', with 'data' as parameter.
+
+    The target thread must enter an alertable wait before the routine runs
+    (SleepEx / WaitForSingleObjectEx(..., TRUE) / MsgWaitForMultipleObjectsEx
+    with MWMO_ALERTABLE); queueing does not interrupt a non-alertable wait.
+
+    Returns 1 on success. Raises OSError on failure.
+    """
+    cdef DWORD result = QueueUserAPC(
+        <PAPCFUNC>addr,
+        <HANDLE><LPVOID>h_thread,
+        <ULONG_PTR>data)
+    if result == 0:
+        raise OSError(GetLastError(), "QueueUserAPC failed")
+    return 1
 
 
 cpdef int close_thread(unsigned long long h_handle):
