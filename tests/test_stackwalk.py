@@ -140,6 +140,7 @@ class TestContextFrameBytes(unittest.TestCase):
                 _pydbg.context_frame_bytes(arch, b'\x00' * 8)
 
 
+@unittest.skipUnless(_has_cython, 'optional dependency: Cython extension')
 class TestWalkMachine(unittest.TestCase):
     """walk()/get_call_stack() machine handling and per-frame state."""
 
