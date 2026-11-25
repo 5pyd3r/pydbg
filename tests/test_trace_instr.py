@@ -532,5 +532,42 @@ class TestLiveWindow(_LiveWindowCase):
                          "the target did not terminate after the window")
 
 
+class TestInstructionTracerTeardown(unittest.TestCase):
+    """The window answers the teardown contract close() walks (ADR-0004).
+
+    Unlike the other three tracers it owns no persistent arm: the trap flag is
+    set and cleared inside `run()`, and the thread handle it opens is closed in
+    the same `finally`. So teardown has nothing to undo — and must not touch the
+    target to say so.
+    """
+
+    def test_teardown_has_no_persistent_write_to_undo(self):
+        dbg = _FakeDebugger()
+        tracer = InstructionTracer(dbg)
+        tracer._events = 5
+        tracer._h_thread = 0x55
+
+        self.assertEqual(tracer.teardown(), ())
+        self.assertEqual(dbg.driven, [],
+                         "teardown drove the target it was not asked to touch")
+
+    def test_discard_forgets_the_last_window_without_touching_the_target(self):
+        dbg = _FakeDebugger()
+        tracer = InstructionTracer(dbg)
+        tracer._events = 5
+        tracer._reason = STOP_MAX_EVENTS
+        tracer._warnings = ["undecodable"]
+        tracer._h_thread = 0x55
+
+        tracer.discard()
+
+        self.assertEqual(tracer._events, 0)
+        self.assertIsNone(tracer._reason)
+        self.assertEqual(tracer._warnings, [])
+        self.assertIsNone(tracer._h_thread)
+        self.assertEqual(dbg.driven, [])
+        tracer.discard()        # idempotent
+
+
 if __name__ == "__main__":
     unittest.main()

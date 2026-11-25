@@ -133,6 +133,12 @@ class InstructionTracer:
         self._engine_cache = None
         # Thread handle opened once per run(); see `run()` for why.
         self._h_thread = None
+        # Handed a Debugger, a tracer is part of that debugger's teardown
+        # chain (ADR-0004); a fake or proxy without attach_trace() is simply
+        # not a lifecycle owner.
+        attach = getattr(dbg, "attach_trace", None)
+        if callable(attach):
+            attach(self)
 
     # ── module resolution ──────────────────────────────────────
 
@@ -249,6 +255,31 @@ class InstructionTracer:
         self._warnings = []
         self._uncontinued = False
         self._h_thread = None
+
+    def disarm(self):
+        """There is no persistent arm to remove; return ().
+
+        A window writes the trap flag one instruction at a time and the
+        single-step event clears it again, and the thread handle is closed in
+        `run()`'s finally. Named so all four tracers can be asked the same
+        question, not because a stale write can outlive a run.
+        """
+        return ()
+
+    def teardown(self):
+        """Report that the window left nothing armed (ADR-0004).
+
+        `Debugger.close()` calls it through the `traces` registry. Unlike the
+        other three tracers, this one owns no INT3 or debug-register slot: the
+        trap flag is set and cleared inside `run()` and its thread handle is
+        closed there. The method exists so the four tracers share one teardown
+        contract, and so a future owned write has an obvious home.
+        """
+        return tuple(self.disarm())
+
+    def discard(self):
+        """Forget the last window without touching the target (it is gone)."""
+        self._reset()
 
     def _summary(self, started):
         """The run's facts, with the pending-stop flag derived, not stored."""

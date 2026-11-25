@@ -413,6 +413,10 @@ class TestBblTracerCleanup(_LiveTestCase):
             return real_remove(bp_id)
 
         proxy.remove_breakpoint = counting_remove
+        # terminate_process() discards a registered tracer's records (ADR-0004);
+        # this test is about disarm() meeting a target that is already gone, so
+        # keep the tracer out of that path and let the debugger kill the target.
+        self.dbg.traces.discard = lambda: None
         self.dbg.terminate_process(0)
         warnings = tracer.disarm()
 
@@ -420,6 +424,18 @@ class TestBblTracerCleanup(_LiveTestCase):
         self.assertNotIn("breakpoint left", warnings)
         self.assertEqual(len(calls), 1,
                          "cleanup kept trying to write to a dead target")
+
+    def test_terminate_discards_a_registered_tracers_records(self):
+        """The terminate path cannot restore bytes, so it forgets the tracer."""
+        tracer = BblTracer(self.dbg)
+        tracer._armed_ids = {0x1000: 1}     # a record, without a live arm
+
+        self.dbg.terminate_process(0)
+
+        self.assertEqual(tracer._armed_ids, {},
+                         "terminate_process left the tracer armed")
+        self.assertEqual(tracer.disarm(), (),
+                         "there was nothing left to restore")
 
 
 @unittest.skipUnless(_has_cython, "optional dependency: Cython extension")
@@ -501,6 +517,72 @@ class TestBblTracerIdleTimeout(_LiveTestCase):
         tracer.run()
 
         self.assertEqual(proxy.run_calls[-1].get("max_idle_timeouts"), 3)
+
+
+class _FakeCleanupDebugger:
+    """The breakpoint bookkeeping `disarm()` reads, and nothing else.
+
+    A real target is not needed to prove the ADR-0004 contract: teardown is
+    disarm plus a name, and discard must not touch the target at all.
+    """
+
+    def __init__(self):
+        self.breakpoints = {}       # bp_id -> addr, like the session's record
+        self.removed = []
+
+    def add(self, bp_id, addr):
+        self.breakpoints[bp_id] = addr
+
+    def remove_breakpoint(self, bp_id):
+        self.removed.append(bp_id)
+        self.breakpoints.pop(bp_id, None)
+
+    def find_breakpoint(self, addr):
+        return next((bid for bid, a in self.breakpoints.items() if a == addr),
+                    None)
+
+    def get_exit_code(self):
+        return 259                  # STILL_ACTIVE
+
+
+class TestBblTracerTeardown(unittest.TestCase):
+    """The tracer answers the teardown contract close() walks (ADR-0004)."""
+
+    def armed(self):
+        dbg = _FakeCleanupDebugger()
+        tracer = BblTracer(dbg)
+        tracer._armed_ids = {0x1000: 1, 0x2000: 2}
+        dbg.add(1, 0x1000)
+        dbg.add(2, 0x2000)
+        return tracer, dbg
+
+    def test_teardown_is_disarm_and_reports_its_warnings(self):
+        tracer, dbg = self.armed()
+
+        self.assertEqual(tracer.teardown(), ())
+        self.assertEqual(sorted(dbg.removed), [1, 2])
+        self.assertEqual(tracer._armed_ids, {})
+        self.assertEqual(tracer.teardown(), (), "teardown is idempotent")
+
+    def test_teardown_passes_disarm_warnings_through(self):
+        tracer, dbg = self.armed()
+
+        def fail(bp_id):
+            raise BreakpointError("the byte could not be restored")
+
+        dbg.remove_breakpoint = fail
+        self.assertEqual(tracer.teardown(), ("breakpoint left",))
+
+    def test_discard_forgets_the_armed_records_without_touching_the_target(self):
+        tracer, dbg = self.armed()
+
+        tracer.discard()
+
+        self.assertEqual(dbg.removed, [])
+        self.assertEqual(tracer._armed_ids, {})
+        self.assertEqual(dbg.breakpoints, {1: 0x1000, 2: 0x2000},
+                         "discard wrote to a target it was told is gone")
+        tracer.discard()        # idempotent
 
 
 if __name__ == "__main__":
