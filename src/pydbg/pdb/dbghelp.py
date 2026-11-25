@@ -3,10 +3,16 @@
 dbghelp can read a PDB without a debuggee, but only if it is handed the image:
 the image names the PDB and its preferred base, and the PDB's directory is the
 symbol search path. This module owns that session, the ctypes bindings, the
-translation from SYMBOL_INFOW records to `PdbSymbol`, and the TI_* type reader
-the layouts are built from. Both readers share one session and one lock because
-that is what dbghelp requires; `types.py` decides what a type *means*, this
-module only asks the questions.
+translation from SYMBOL_INFOW records to `PdbSymbol`, `IMAGEHLP_LINEW64` to
+`LineInfo`, and the TI_* type reader the layouts are built from. The symbol,
+type and line readers share one session and one lock because that is what
+dbghelp requires; `types.py` decides what a type *means*, this module only asks
+the questions.
+
+A line query is a point lookup, not an enumeration: it is one call on the same
+session with `LOAD_LINES` among the session options, so it starts no second
+dbghelp instance and — measured — does not change what the symbol or type
+readers return.
 
 Four measured properties shape the code (research/pdb-format.md §B5-B9):
 
@@ -38,12 +44,19 @@ from ..pe import PE
 from .errors import PdbError
 
 # Measured with dbghelp.dll 10.0.26100 (research/pdb-format.md §B5): a fresh
-# process starts with options 0x0, so the two safe defaults are set explicitly.
-# SYMOPT_UNDNAME (0x2) is deliberately not among them; see `demangle_name`.
+# process starts with options 0x0, so the defaults this package needs are set
+# explicitly. LOAD_LINES (0x10) is documented as a requirement of
+# SymGetLineFromAddrW64, so it goes into the same process-wide word as the other
+# defaults; measured, this build additionally needs the module's symbols
+# enumerated before a line query answers after an explicit-base load (see
+# `_Session.line_for`). Measured, LOAD_LINES leaves symbol and type enumeration
+# unchanged. SYMOPT_UNDNAME (0x2) is deliberately not among them; see
+# `demangle_name`.
 # SymSetOptions is process-wide and `symbol/resolver.py` sets it too, so a
 # process using both owners has the two overwrite each other — known, and not
 # solved in this phase.
-SYM_SET_OPTIONS = 0x204          # DEFERRED_LOADS | FAIL_CRITICAL_ERRORS
+LOAD_LINES = 0x10                # SYMOPT_LOAD_LINES
+SYM_SET_OPTIONS = 0x204 | LOAD_LINES   # DEFERRED_LOADS | FAIL_CRITICAL_ERRORS
 LOAD_LIBRARY_SEARCH_SYSTEM32 = 0x00000800
 
 # `UnDecorateSymbolName` flags: NAME_ONLY strips the decoration but keeps the
@@ -107,6 +120,22 @@ class PdbSymbol:
     is_public: bool
 
 
+@dataclass(frozen=True)
+class LineInfo:
+    """One source line and how far into it an address falls (spec §13.6).
+
+    `file` is the path the compiler recorded in the PDB — usually an absolute
+    path from the build machine — and is returned unchanged: rewriting it would
+    make a line claim a file the PDB does not name. `line` is 1-based.
+    `displacement` is the byte distance from the line's first instruction, so
+    the same line asked at two addresses differs only in that number.
+    """
+
+    file: str
+    line: int
+    displacement: int
+
+
 class SYMBOL_INFOW(ctypes.Structure):
     """The measured SYMBOL_INFOW layout (88 bytes including Name[1]).
 
@@ -132,6 +161,24 @@ class SYMBOL_INFOW(ctypes.Structure):
         ("NameLen", ctypes.c_uint32),
         ("MaxNameLen", ctypes.c_uint32),
         ("Name", ctypes.c_wchar * 1),
+    ]
+
+
+class IMAGEHLP_LINEW64(ctypes.Structure):
+    """The measured IMAGEHLP_LINEW64 layout (40 bytes on x64).
+
+    Field for field from dbghelp.h, including the padding ctypes inserts after
+    the two DWORDs. `FileName` points into an allocation dbghelp owns and stays
+    valid until the module is unloaded, so it is copied out while the session
+    lock is held.
+    """
+
+    _fields_ = [
+        ("SizeOfStruct", ctypes.c_uint32),
+        ("Key", ctypes.c_void_p),
+        ("LineNumber", ctypes.c_uint32),
+        ("FileName", ctypes.c_wchar_p),
+        ("Address", ctypes.c_uint64),
     ]
 
 
@@ -317,6 +364,10 @@ class _Dbghelp:
         dll.SymLoadModuleExW.restype = ctypes.c_uint64
         dll.SymGetModuleBase64.argtypes = [ctypes.c_void_p, ctypes.c_uint64]
         dll.SymGetModuleBase64.restype = ctypes.c_uint64
+        dll.SymGetLineFromAddrW64.argtypes = [
+            ctypes.c_void_p, ctypes.c_uint64, ctypes.POINTER(ctypes.c_uint32),
+            ctypes.POINTER(IMAGEHLP_LINEW64)]
+        dll.SymGetLineFromAddrW64.restype = ctypes.c_int
         dll.SymEnumSymbolsW.argtypes = [
             ctypes.c_void_p, ctypes.c_uint64, ctypes.c_wchar_p,
             ctypes.c_void_p, ctypes.c_void_p]
@@ -363,6 +414,26 @@ class _Dbghelp:
 
     def module_base(self, handle, address):
         return self._load().SymGetModuleBase64(handle, address)
+
+    def line_from_addr(self, handle, address):
+        """`SymGetLineFromAddrW64`: the line covering 'address', or None.
+
+        The Unicode entry point is SymGetLineFromAddrW64 — the W sits before
+        the width, unlike SymGetLineFromAddr64 for ANSI (measured from the
+        system dbghelp's export table). An address with no line record makes
+        dbghelp return FALSE; that is the expected answer for a data symbol or
+        padding, not an error, so it becomes None.
+        """
+        line = IMAGEHLP_LINEW64()
+        line.SizeOfStruct = ctypes.sizeof(IMAGEHLP_LINEW64)
+        displacement = ctypes.c_uint32(0)
+        if not self._load().SymGetLineFromAddrW64(
+                handle, address, ctypes.byref(displacement),
+                ctypes.byref(line)):
+            return None
+        if not line.FileName or line.LineNumber <= 0:
+            return None
+        return LineInfo(line.FileName, line.LineNumber, displacement.value)
 
     def enum_symbols(self, handle, base, callback):
         """Enumerate one module's symbols through 'callback'."""
@@ -468,6 +539,7 @@ class _Session:
         self.search_path = search_path
         self.loaded = {}
         self.types_loaded = {}
+        self.lines_primed = set()
         self._open()
 
     def _open(self):
@@ -490,6 +562,7 @@ class _Session:
         self.api.cleanup(self.handle)
         self.loaded.clear()
         self.types_loaded.clear()
+        self.lines_primed.clear()
         self._open()
 
     def close(self):
@@ -497,6 +570,7 @@ class _Session:
         self.api.cleanup(self.handle)
         self.loaded.clear()
         self.types_loaded.clear()
+        self.lines_primed.clear()
 
     def load(self, image_path, requested_base, preferred_base):
         """Load 'image_path' once and return the base its symbols use.
@@ -530,10 +604,41 @@ class _Session:
         return loaded
 
     def enumerate(self, base):
-        """Every raw symbol record for the module loaded at 'base'."""
-        return _collect(
+        """Every raw symbol record for the module loaded at 'base'.
+
+        The enumeration also makes the module's line table available: measured,
+        dbghelp does not answer SymGetLineFromAddrW64 for a module that was
+        loaded with an explicit base until a symbol operation has happened, so
+        the two share this one priming step.
+        """
+        records = _collect(
             lambda callback: self.api.enum_symbols(self.handle, base, callback),
             _record_callback, "symbol")
+        self.lines_primed.add(base)
+        return records
+
+    def line_for(self, address, base):
+        """The source line covering 'address' for this session, or None.
+
+        `address` is a virtual address (loaded base plus RVA), because that is
+        the key dbghelp looks modules up by; `base` is the same module's loaded
+        base. Callers must hold `_lock`.
+
+        Measured: after `SymLoadModuleExW` with an explicit base, the first
+        `SymGetLineFromAddrW64` for that module answers FALSE even though the
+        PDB has lines, and only a symbol enumeration makes it answer. So a miss
+        primes the module once (or reuses the priming `enumerate` already did)
+        and asks again. A miss with no line record stays None; the module is
+        not primed a second time.
+        """
+        line = self.api.line_from_addr(self.handle, address)
+        if line is not None or base in self.lines_primed:
+            return line
+        try:
+            self.enumerate(base)
+        except PdbError:
+            return None
+        return self.api.line_from_addr(self.handle, address)
 
     def type_records(self, base):
         """Every (TypeIndex, Tag) the module loaded at 'base' describes.
@@ -747,6 +852,40 @@ def symbols(pdb_path, image_path, image_base=None):
         loaded_base = session.load(image_path, image_base or 0, pe.image_base)
         records = session.enumerate(loaded_base)
         return build_symbols(records, loaded_base, image_size)
+
+
+def line_for(pdb_path, image_path, image_base, rva):
+    """The source line covering 'rva' in this PDB, or None.
+
+    Single point lookup, not an enumeration: only the module that contains the
+    address is asked, and dbghelp keeps that module's line table for the rest
+    of the session. The same session, lock and search-path rule as `symbols`
+    apply, so a line query never starts a second dbghelp instance.
+
+    'rva' is relative to the image file, like `PdbSymbol.rva`. An address
+    outside the image, or one the PDB has no line record for (a data symbol,
+    padding, a module without lines), answers None instead of raising: a line
+    is information that may be absent, not a promise that every address has
+    one.
+
+    Returns:
+        LineInfo | None: the file the PDB records, the 1-based line and the
+        byte displacement into it; None when there is no line information.
+
+    Raises:
+        PdbError: no image path was supplied, the image cannot be read, or
+            dbghelp failed to load the module.
+    """
+    pdb_path = os.fspath(pdb_path)
+    pe, image_path = _loadable_image(image_path, "lines")
+    if not 0 <= rva < pe.optional_header.size_of_image:
+        return None
+    search_path = os.path.dirname(os.path.abspath(pdb_path))
+
+    with _lock:
+        session = _session_for(search_path)
+        loaded_base = session.load(image_path, image_base or 0, pe.image_base)
+        return session.line_for(loaded_base + rva, loaded_base)
 
 
 def read_types(pdb_path, image_path, image_base, action):
