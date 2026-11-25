@@ -776,6 +776,9 @@ DebuggerCheck(name, detected, evidence)
 `NtQueryInformationProcess` 的 `ProcessDebugPort` / `ProcessDebugFlags` / `ProcessDebugObjectHandle`、
 硬件断点 `DR0-3`/`DR7`、关键位置 `0xCC` 扫描、`NtQuerySystemInformation(SystemKernelDebuggerInformation)`。
 时序检测不做（写进文档）。
+检测得到的是「当前是否被调试」这一运行时**状态**，不是「目标是否主动反调试」：API 与
+`NtQueryInformationProcess` 读的是内核状态，任何被调试进程（含不查反调试的 `simple_target`）都为真；
+只有入口点前的 `0xCC` 扫描看目标自身影像。
 
 ### 13.3 D10：原始 CONTEXT 与 x86 栈回溯
 
