@@ -44,13 +44,6 @@ from .analysis import StaticAnalyzer, analyze_bytes, analyze_file, analyze_pe
 __version__ = "0.1.0"
 HOST_ARCH = _struct.calcsize("P") * 8  # 64 under the x64-only build policy
 
-# Submodules exposed as attributes (the spec's entry point is
-# `pydbg.inject.inject_dll`). Importing one must stay extension-free; the
-# functions inside it are lazy in turn.
-_LAZY_MODULES = {
-    "inject": ".inject",
-}
-
 # name -> module that defines it. Importing any of these pulls in `_pydbg`
 # (directly or through the managers), which is exactly what must not happen at
 # package import time.
@@ -83,35 +76,43 @@ _LAZY = {
     "InstrumentInfo": ".instrument",
     "InstrumentTemplates": ".instrument",
     "BblInstrumenter": ".instrument",
+    # The injection package and its extension-free types; the functions are
+    # lazy inside it, so `pydbg.inject.inject_dll` needs `_pydbg` only on call.
+    "inject": ".inject",
     "InjectionReport": ".inject",
     "inject_dll": ".inject",
     "inject_shellcode": ".inject",
     "queue_apc": ".inject",
     "suspend_process": ".inject",
     "resume_process": ".inject",
+    # Read-only anti-debug detection (spec §13.2). The module itself is
+    # exported too, so `pydbg.antidebug.detect(dbg)` works after either
+    # `import pydbg` + attribute access or `from pydbg import antidebug`.
+    "antidebug": ".antidebug",
+    "DebuggerCheck": ".antidebug",
 }
 
 
 def __getattr__(name):
     """Import a lazily-held name on first use (see _LAZY and ADR-0001)."""
-    if name in _LAZY_MODULES:
-        import importlib
-
-        value = importlib.import_module(_LAZY_MODULES[name], __name__)
-        globals()[name] = value
-        return value
     module_name = _LAZY.get(name)
     if module_name is None:
         raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
     import importlib
 
-    value = getattr(importlib.import_module(module_name, __name__), name)
+    module = importlib.import_module(module_name, __name__)
+    # A key that names a submodule resolves to the module itself rather than
+    # to an attribute of it: _LAZY maps `antidebug`/`inject` to those modules.
+    if name == module_name.rsplit(".", 1)[-1]:
+        value = module
+    else:
+        value = getattr(module, name)
     globals()[name] = value          # resolve once; later lookups skip __getattr__
     return value
 
 
 def __dir__():
-    return sorted(set(globals()) | set(_LAZY) | set(_LAZY_MODULES))
+    return sorted(set(globals()) | set(_LAZY))
 
 
 __all__ = [
@@ -172,4 +173,6 @@ __all__ = [
     "queue_apc",
     "suspend_process",
     "resume_process",
+    "antidebug",
+    "DebuggerCheck",
 ]

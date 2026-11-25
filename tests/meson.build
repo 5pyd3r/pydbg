@@ -49,6 +49,15 @@ av_target = executable(
   'target/av_target.c',
 )
 
+# Phase 6 anti-debug target (spec §13.2). The sample performs the reads the
+# detector reports — IsDebuggerPresent, CheckRemoteDebuggerPresent, and the PEB
+# BeingDebugged / NtGlobalFlag fields — so pydbg.antidebug is checked against
+# an image that contains those checks, not against a synthetic fixture.
+antidebug_target = executable(
+  'antidebug_target',
+  'target/antidebug_target.c',
+)
+
 # Phase 5 PDB targets (spec §10.6(8)). /Zi makes the compiler write symbols and
 # types; /DEBUG makes the linker write the .pdb beside the image. They are plain
 # executables that nothing runs: the Phase 5 tests read the artefacts offline,
@@ -116,6 +125,7 @@ test_env.set('TEST_WINDOW_TARGET_PATH', window_target.full_path())
 test_env.set('TEST_MODAL_TARGET_PATH', modal_target.full_path())
 test_env.set('TEST_WEDGE_TARGET_PATH', wedge_target.full_path())
 test_env.set('TEST_AV_TARGET_PATH', av_target.full_path())
+test_env.set('TEST_ANTIDEBUG_TARGET_PATH', antidebug_target.full_path())
 # /DEBUG leaves each .pdb next to its .exe, so the build dir already holds it.
 # Deriving the name from the built target keeps the two in step; a hard-coded
 # "pdb_target.pdb" would stop matching silently if the target were renamed.
