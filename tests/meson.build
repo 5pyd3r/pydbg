@@ -136,6 +136,15 @@ test_env.set('TEST_PDB_PATH',
 test_env.set('TEST_PDB_CPP_TARGET_PATH', pdb_target_cpp.full_path())
 test_env.set('TEST_PDB_CPP_PDB_PATH',
   pdb_target_cpp.full_path().replace('.exe', '.pdb'))
+# P41's PE32 sample is built out of band by scripts/build-target32.ps1 (the
+# x86 toolchain is not part of the meson build), so these name the source-tree
+# artefacts instead of a build-dir target: the file exists only once that
+# script has run, and test_pdb32.py skips with "target not built:" when it has
+# not.
+test_env.set('TEST_PDB_TARGET32_PATH',
+  meson.project_source_root() / 'tests' / 'target' / 'pdb_target32.exe')
+test_env.set('TEST_PDB32_PATH',
+  meson.project_source_root() / 'tests' / 'target' / 'pdb_target32.pdb')
 test_env.set('TEST_CHILD_TARGET',
   meson.project_source_root() / 'tests' / 'target' / 'child_target32.exe')
 test_env.set('TEST_CHILD_TARGET_X64', child_target.full_path())
