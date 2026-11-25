@@ -92,6 +92,8 @@ class TestInjectionTypes(unittest.TestCase):
         code = (
             "import sys\n"
             "import pydbg\n"
+            "assert pydbg.inject is not None\n"
+            "assert '_pydbg' not in sys.modules, sorted(sys.modules)\n"
             "import pydbg.inject\n"
             "assert '_pydbg' not in sys.modules, sorted(sys.modules)\n"
             "assert pydbg.inject.InjectionReport is not None\n"

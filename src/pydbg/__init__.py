@@ -44,6 +44,13 @@ from .analysis import StaticAnalyzer, analyze_bytes, analyze_file, analyze_pe
 __version__ = "0.1.0"
 HOST_ARCH = _struct.calcsize("P") * 8  # 64 under the x64-only build policy
 
+# Submodules exposed as attributes (the spec's entry point is
+# `pydbg.inject.inject_dll`). Importing one must stay extension-free; the
+# functions inside it are lazy in turn.
+_LAZY_MODULES = {
+    "inject": ".inject",
+}
+
 # name -> module that defines it. Importing any of these pulls in `_pydbg`
 # (directly or through the managers), which is exactly what must not happen at
 # package import time.
@@ -76,7 +83,6 @@ _LAZY = {
     "InstrumentInfo": ".instrument",
     "InstrumentTemplates": ".instrument",
     "BblInstrumenter": ".instrument",
-    "inject": ".inject",
     "InjectionReport": ".inject",
     "inject_dll": ".inject",
     "inject_shellcode": ".inject",
@@ -88,6 +94,12 @@ _LAZY = {
 
 def __getattr__(name):
     """Import a lazily-held name on first use (see _LAZY and ADR-0001)."""
+    if name in _LAZY_MODULES:
+        import importlib
+
+        value = importlib.import_module(_LAZY_MODULES[name], __name__)
+        globals()[name] = value
+        return value
     module_name = _LAZY.get(name)
     if module_name is None:
         raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
@@ -99,7 +111,7 @@ def __getattr__(name):
 
 
 def __dir__():
-    return sorted(set(globals()) | set(_LAZY))
+    return sorted(set(globals()) | set(_LAZY) | set(_LAZY_MODULES))
 
 
 __all__ = [
