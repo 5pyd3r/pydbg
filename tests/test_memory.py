@@ -1,7 +1,10 @@
-"""Tests for memory operations: read, write, query, modules."""
+"""Tests for memory operations: read, write, query, modules, allocation."""
 
 import unittest
+from types import SimpleNamespace
+from unittest import mock
 
+from pydbg.exceptions import MemError
 from tests import TEST_TARGET_PATH
 
 try:
@@ -199,6 +202,147 @@ class TestMemoryManagerCoverage(unittest.TestCase):
             self.dbg.memory.query_handle(0, base)
         with self.assertRaises(MemError):
             self.dbg.memory.protect_handle(0, base, 1, 0x04)
+
+
+# The near allocator's window and placement rule. Spelled out here rather than
+# imported so the numbers are checked against the documented ±2GB, not against
+# the implementation's own constant.
+NEAR_LIMIT = 0x80000000
+BASE = 0x140000000
+
+
+@unittest.skipUnless(_has_cython, "optional dependency: Cython extension")
+class TestNearAllocator(unittest.TestCase):
+    """`alloc_near`: the placement rule, and a refusal that says why."""
+
+    def setUp(self):
+        from pydbg.memory.manager import (   # needs the extension
+            _near_hint, MemoryManager)
+        self.hint = _near_hint
+        self.manager = MemoryManager(SimpleNamespace(process_handle=0x1234))
+        self.regions = []
+        self.scan_calls = []
+        self.manager.regions_handle = self._regions
+
+    def _regions(self, handle, low, high):
+        self.scan_calls.append((handle, low, high))
+        return self.regions
+
+    @staticmethod
+    def free(base, size):
+        return {"base_address": base, "region_size": size, "state": 0x10000}
+
+    # ── where inside a free region the hint goes ──
+
+    def test_an_aligned_free_region_is_used_as_is(self):
+        self.assertEqual(
+            self.hint(self.free(BASE + 0x100000, 0x10000), BASE,
+                      NEAR_LIMIT, 0x1000),
+            BASE + 0x100000)
+
+    def test_a_misaligned_region_base_is_rounded_up(self):
+        self.assertEqual(
+            self.hint(self.free(BASE + 0x100123, 0x20000), BASE,
+                      NEAR_LIMIT, 0x1000),
+            BASE + 0x110000)
+
+    def test_a_region_smaller_than_the_request_is_rejected(self):
+        self.assertIsNone(
+            self.hint(self.free(BASE + 0x100000, 0x800), BASE,
+                      NEAR_LIMIT, 0x1000))
+
+    def test_a_hint_that_would_leave_the_window_is_clamped(self):
+        high = BASE + NEAR_LIMIT
+        self.assertEqual(
+            self.hint(self.free(high - 0x8000, 0x10000), BASE,
+                      NEAR_LIMIT, 0x1000),
+            high - 0x1000)
+
+    def test_a_clamp_that_falls_before_the_region_is_rejected(self):
+        high = BASE + NEAR_LIMIT
+        self.assertIsNone(
+            self.hint(self.free(high - 0x100, 0x20000), BASE,
+                      NEAR_LIMIT, 0x8000))
+
+    # ── the allocation itself ──
+
+    def test_the_scan_covers_the_window_around_near(self):
+        self.regions = [self.free(BASE + 0x100000, 0x10000)]
+
+        with mock.patch("pydbg.memory.manager._pydbg.virtual_alloc_ex",
+                        return_value={"base_address": BASE + 0x100000}):
+            self.assertEqual(
+                self.manager.alloc_near(0x1000, BASE), BASE + 0x100000)
+
+        low = (BASE - NEAR_LIMIT) & ~0xFFFF
+        self.assertEqual(self.scan_calls, [(0x1234, low, BASE + NEAR_LIMIT)])
+
+    def test_the_first_placeable_region_wins(self):
+        self.regions = [self.free(BASE + 0x100000, 0x10000),
+                        self.free(BASE + 0x400000, 0x10000)]
+        allocated = BASE + 0x400000
+
+        with mock.patch(
+                "pydbg.memory.manager._pydbg.virtual_alloc_ex",
+                side_effect=[OSError(487, "invalid address"),
+                             {"base_address": allocated}]) as alloc:
+            self.assertEqual(self.manager.alloc_near(0x1000, BASE),
+                             allocated)
+
+        self.assertEqual([call.args[1] for call in alloc.call_args_list],
+                         [BASE + 0x100000, BASE + 0x400000])
+
+    def test_every_failed_candidate_is_named_in_the_refusal(self):
+        self.regions = [
+            self.free(BASE + 0x100000, 0x10000),
+            self.free(BASE + 0x400000, 0x10000),
+            self.free(BASE + 0x800000, 0x800),      # too small
+        ]
+
+        with mock.patch(
+                "pydbg.memory.manager._pydbg.virtual_alloc_ex",
+                side_effect=[OSError(5, "access denied"),
+                             OSError(487, "invalid address")]):
+            with self.assertRaises(MemError) as caught:
+                self.manager.alloc_near(0x1000, BASE)
+
+        message = str(caught.exception)
+        self.assertIn("access denied", message)
+        self.assertIn("invalid address", message)
+        self.assertIn("cannot hold", message)
+        self.assertIn("no free region", message)
+
+    def test_an_allocation_without_an_address_is_a_failure_too(self):
+        self.regions = [self.free(BASE + 0x100000, 0x10000)]
+
+        with mock.patch("pydbg.memory.manager._pydbg.virtual_alloc_ex",
+                        return_value={}):
+            with self.assertRaises(MemError) as caught:
+                self.manager.alloc_near(0x1000, BASE)
+
+        self.assertIn("returned no address", str(caught.exception))
+
+    def test_no_free_region_is_reported_as_what_the_scan_saw(self):
+        self.regions = [{"base_address": BASE, "region_size": 0x1000,
+                         "state": 0x1000}]       # MEM_COMMIT
+
+        with self.assertRaises(MemError) as caught:
+            self.manager.alloc_near(0x1000, BASE)
+
+        self.assertIn("saw no free region", str(caught.exception))
+
+    def test_a_failed_region_walk_is_reported_not_guessed(self):
+        self.manager.regions_handle = mock.Mock(side_effect=MemError("denied"))
+
+        with self.assertRaises(MemError) as caught:
+            self.manager.alloc_near(0x1000, BASE)
+
+        self.assertIn("cannot scan", str(caught.exception))
+
+    def test_a_non_positive_size_is_refused(self):
+        with self.assertRaises(MemError):
+            self.manager.alloc_near(0, BASE)
+        self.assertEqual(self.scan_calls, [])
 
 
 if __name__ == "__main__":

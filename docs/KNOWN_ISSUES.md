@@ -12,6 +12,10 @@
 
 - 特性自 v0.2 **冻结**：不新增插桩功能，不修 x64 RIP-relative。
 - x64 目标若被覆盖的首个 ≥5B 序列含 RIP-relative 指令，trampoline 不做重定位。
+- 旧 `instrument/templates.py` 的 trampoline 把被覆盖指令**原样复制**：前缀里出现
+  `[rip+disp]` 时，指令搬到 trampoline 后 `disp` 仍按原地址解释，目标被静默寻址到错误位置
+  （`_read_min_5_bytes` 也不拒绝这种前缀）。Phase 3c 的 `instrument/bbl.py` 用自己的
+  `relocate_prefix` + 机器码 stub，不经过这个 trampoline；该缺陷不在 3c 范围内修复。
 - C 子集只支持 `int`/`void`；指针等类型静默映射为 `i32`。
 - `&&` / `||` 不保留短路求值。
 - 多线程安全由调用方负责（需自行挂起其他线程）。
@@ -20,7 +24,7 @@
   `instrument` 中，核心安装不链接 LLVM。未启用时相关测试声明为
   `optional dependency:` 并跳过。
 
-_核对：2026-11-22_
+_核对：2026-11-25_
 
 ## 调试核心
 

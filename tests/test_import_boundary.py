@@ -58,6 +58,17 @@ print("dump import is lightweight")
 '''
 
 
+_INSTRUMENT_STUB_LAYER_WITHOUT_EXTENSION = '''
+import sys
+import pydbg.instrument
+assert "pydbg._pydbg" not in sys.modules, "pydbg.instrument pulled in _pydbg"
+from pydbg.instrument import bbl
+assert bbl.STUB_PROLOGUE_SIZE > 0
+assert "pydbg._pydbg" not in sys.modules, "the stub layer pulled in _pydbg"
+print("instrument stub layer importable without the extension")
+'''
+
+
 class TestImportBoundary(unittest.TestCase):
     def _run(self, code):
         return subprocess.run([sys.executable, "-c", code],
@@ -82,6 +93,12 @@ class TestImportBoundary(unittest.TestCase):
         done = self._run(_IMPORT_DUMP_WITHOUT_TRACE)
         self.assertEqual(done.returncode, 0, done.stderr)
         self.assertIn("lightweight", done.stdout)
+
+    def test_instrument_stub_layer_is_importable_without_the_extension(self):
+        """The stub/relocation layer is pure Python; only its callers need _pydbg."""
+        done = self._run(_INSTRUMENT_STUB_LAYER_WITHOUT_EXTENSION)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertIn("without the extension", done.stdout)
 
     def test_the_debugger_is_still_reachable_lazily(self):
         from pydbg import Debugger

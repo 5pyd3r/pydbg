@@ -32,7 +32,7 @@ src/pydbg/
 ├── pe/                  纯 Python PE 解析**与写出**（无第三方依赖）
 ├── pdb/                 纯 Python PDB 读取（MSF 校验 + ctypes dbghelp 离线）
 ├── disasm/engine.py     capstone 封装；模式**按次**判定，不锁存
-├── instrument/          插桩：硬编码 stub + LLVM 动态代码生成
+├── instrument/          插桩：硬编码 stub + LLVM 动态代码生成 + BBL detour
 ├── hook/{iat,inline}.py IAT / inline hook（dbg.hook_iat / dbg.hook_inline）
 ├── trace/, dump/, patch/, analysis/
 └── cython/              Win32 薄绑定（_pydbg 扩展）
@@ -56,13 +56,18 @@ ADR-0001 不破。
 ```
 Debugger（门面）
   ├─ process / memory / thread / brk_sw / brk_hw / modules     原语，需要会话
-  ├─ hook_iat / hook_inline / symbol / instrumenter / step_tracer / disasm / assembler
-  │                                                            能力对象，独立可测
+  ├─ hook_iat / hook_inline / symbol / instrumenter / bbl_instrumenter
+  │  / step_tracer / disasm / assembler                         能力对象，独立可测
   └─ windows                                                   同上
 cython/_pydbg（Win32 薄封装） → Win32 / dbghelp / WoW64
 ```
 
-依赖方向单向。管理器只拿到 `DebugSession`，从不反向依赖 `Debugger`。
+依赖方向单向。管理器只拿到 `DebugSession`，从不反向依赖 `Debugger`（例外是
+`bbl_instrumenter`：它要按门面自己的读写/线程方法装卸 detour，所以拿到门面，
+但仍不反向 import `core.debugger`）。
+`memory` 不只读写已有内存，也负责目标内分配：`alloc_remote` 给独立 scratch
+（BBL 事件环），`alloc_near` 给需要落在地址附近的区域（5 字节 `E9 rel32`
+能跳到的 stub）。调用方因此不必自己碰 `_pydbg`。
 
 ## 门面边界（ADR-0002）
 
@@ -81,8 +86,9 @@ cython/_pydbg（Win32 薄封装） → Win32 / dbghelp / WoW64
 
 每个会写目标的 manager 实现 `teardown()`（还原，返回失败清单，不抛）与
 `discard()`（进程已死时只忘记记录）。`Debugger.close()` 按固定顺序
-`hook_iat → hook_inline → instrumenter → brk_hw → brk_sw → symbols` 撤销，
-再停止调试、释放句柄；失败聚合成一个 `TeardownError`。`detach()` 与
+`hook_iat → hook_inline → instrumenter → bbl_instrumenter → brk_hw →
+brk_sw → symbols` 撤销，再停止调试、释放句柄；失败聚合成一个
+`TeardownError`。`detach()` 与
 `terminate_process()` 是它的特例；支持 `with Debugger() as dbg:`。
 
 ## 状态与真相

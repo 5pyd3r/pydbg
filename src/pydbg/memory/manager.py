@@ -1,4 +1,12 @@
-"""MemoryManager — read/write/query/protect process memory."""
+"""MemoryManager — read/write/query/protect process memory, plus allocation.
+
+The manager owns both halves of the interface to the target's address space:
+the memory that already exists (read, write, query, protect, tolerant reads)
+and the scratch regions callers ask it to create. Remote allocation lives here
+so instrumentation code never reaches for `_pydbg` itself: `alloc_remote` is a
+free-standing buffer (the BBL event ring) and `alloc_near` is a region within a
+window of an address (the stubs a 5-byte E9 detour has to reach).
+"""
 
 from dataclasses import dataclass, field
 
@@ -7,13 +15,52 @@ from ..exceptions import MemError
 
 # VirtualQueryEx state / page constants, used by the tolerant read path.
 _MEM_COMMIT = 0x1000
+_MEM_FREE = 0x10000
 _PAGE_SIZE = 0x1000
+
+# Allocation constants for the remote scratch/buffer path.
+_MEM_COMMIT_RESERVE = 0x3000     # MEM_COMMIT | MEM_RESERVE
+_MEM_RELEASE = 0x8000
+_PAGE_READWRITE = 0x04
+_PAGE_EXECUTE_READWRITE = 0x40
+
+# VirtualAllocEx rounds a hint down to the allocation granularity, so a hint
+# inside an occupied page fails with ERROR_INVALID_ADDRESS; round up instead.
+_ALLOC_GRANULARITY = 0x10000
+
+# The default half-window of `alloc_near`: ±2GB, the reach of an E9 rel32.
+_NEAR_LIMIT = 0x80000000
 
 # Ceiling on a single tolerant read. Generous enough for the largest image
 # anyone dumps in one call (a whole 512MB process would still fit), small
 # enough that a length field which lies fails loudly instead of trying to
 # allocate its way through the address space.
 DEFAULT_MAX_READ = 0x20000000      # 512 MiB
+
+
+def _near_hint(region, near, limit, size):
+    """The allocation hint inside `region` for `size` bytes, or None.
+
+    The placement rule for `alloc_near`, kept a pure function so it can be
+    tested without a target: aligned up to the allocation granularity, inside
+    the free region, and inside `near ± limit`. `region` is a `regions_handle`
+    dict. A hint that would leave the high edge is pulled back (the window is
+    the hard limit); if that lands before the region, or the region is simply
+    too small, the answer is None and the caller records why.
+    """
+    base = region.get('base_address', 0)
+    span = region.get('region_size', 0)
+    if span < size:
+        return None
+    hint = (base + _ALLOC_GRANULARITY - 1) & ~(_ALLOC_GRANULARITY - 1)
+    high = near + limit
+    if hint + size > high:
+        hint = high - size
+        if hint < base:
+            return None
+    if hint + size > base + span:
+        return None
+    return hint
 
 
 @dataclass
@@ -75,6 +122,111 @@ class MemoryManager:
             )
         except OSError as e:
             raise MemError(f"VirtualProtectEx at 0x{addr:X}: {e}")
+
+    # ── remote allocation ──
+    #
+    # Instrumentation needs a scratch region inside the target that outlives a
+    # single write: the event ring a stub appends to lives there. The rest of
+    # this class reads and writes memory that already exists; allocation was the
+    # missing half, and it belongs here so callers never reach for `_pydbg`
+    # themselves (and tests can stand in one object).
+
+    def alloc_remote(self, size, protect=_PAGE_READWRITE):
+        """Allocate `size` bytes in the target; return the base address.
+
+        Committed and reserved in one call (VirtualAllocEx), zero-filled by
+        Windows. Arbitrary placement is intentional: the buffer is reached by
+        absolute address in the stub, so it needs no ±2GB neighbourhood.
+
+        Raises:
+            MemError: VirtualAllocEx refused, or answered without an address.
+        """
+        try:
+            result = _pydbg.virtual_alloc_ex(
+                self._s.process_handle, 0, size, _MEM_COMMIT_RESERVE, protect)
+        except OSError as e:
+            raise MemError(f"VirtualAllocEx({size}) failed: {e}") from e
+        address = result.get('base_address', 0)
+        if not address:
+            raise MemError(f"VirtualAllocEx({size}) returned no address")
+        return address
+
+    def free_remote(self, address):
+        """Release an allocation made by `alloc_remote` (MEM_RELEASE).
+
+        Raises:
+            MemError: VirtualFreeEx refused; the allocation is still there.
+        """
+        try:
+            _pydbg.virtual_free(
+                self._s.process_handle, address, 0, _MEM_RELEASE)
+        except OSError as e:
+            raise MemError(f"VirtualFreeEx at 0x{address:X}: {e}") from e
+
+    def alloc_near(self, size, near, limit=_NEAR_LIMIT):
+        """Allocate `size` RWX bytes within `limit` of `near`; return its base.
+
+        The near variant exists for detours: a 5-byte `E9 rel32` only reaches
+        ±2GB, so a stub the detour jumps to has to be placed next to the
+        module. `alloc_remote` deliberately does not care where its buffer
+        lands. The scan walks the target's regions between `near - limit` and
+        `near + limit`, takes each free one, and asks VirtualAllocEx for a
+        64KB-aligned hint inside it (`_near_hint`).
+
+        Every candidate is tried, and every failure is kept: a free region
+        that cannot hold the request inside the window, a VirtualAllocEx that
+        refuses the hint (the region is usually already occupied by the time
+        the stale snapshot is used), an allocation that answers without an
+        address. The refusal names all of them, because "no free region" would
+        be false when regions existed and the allocator was what said no.
+
+        Raises:
+            MemError: the region walk failed, or no candidate succeeded; the
+                message lists what each failure was.
+        """
+        if size <= 0:
+            raise MemError(f"cannot allocate {size} bytes near 0x{near:X}")
+        handle = self._s.process_handle
+        low = (near - limit) & ~(_ALLOC_GRANULARITY - 1)
+        if low < _ALLOC_GRANULARITY:
+            low = _ALLOC_GRANULARITY
+        high = near + limit
+        try:
+            regions = self.regions_handle(handle, low, high)
+        except (MemError, OSError) as exc:
+            raise MemError(
+                f"cannot scan for memory near 0x{near:X}: {exc}") from exc
+
+        failures = []
+        for region in regions:
+            if region.get('state') != _MEM_FREE:
+                continue
+            base = region.get('base_address', 0)
+            span = region.get('region_size', 0)
+            hint = _near_hint(region, near, limit, size)
+            if hint is None:
+                failures.append(
+                    f"free region 0x{base:X}+0x{span:X} cannot hold "
+                    f"{size} bytes inside the window")
+                continue
+            try:
+                result = _pydbg.virtual_alloc_ex(
+                    handle, hint, size, _MEM_COMMIT_RESERVE,
+                    _PAGE_EXECUTE_READWRITE)
+            except OSError as exc:
+                failures.append(f"VirtualAllocEx at 0x{hint:X}: {exc}")
+                continue
+            address = result.get('base_address', 0)
+            if address:
+                return address
+            failures.append(f"VirtualAllocEx at 0x{hint:X} returned no address")
+
+        detail = ("; ".join(failures) if failures
+                  else f"the scan from 0x{low:X} to 0x{high:X} saw no free "
+                       f"region")
+        raise MemError(
+            f"no free region within ±0x{limit:X} of 0x{near:X} for "
+            f"{size} bytes: {detail}")
 
     # ── handle variants for child process support ──
 
