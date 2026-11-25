@@ -725,7 +725,121 @@ InstalledPatch(address, patch, original)         # 装过什么；install_patch 
 函数级 detour / 返回值回传、rel8/rel32 重写、32 位与 WOW64、跨线程聚合、与旧 `instrument/` 路径互通、
 每次命中回到调试器、超出 `max_blocks` 的全模块插桩。
 
-## 13. 明确不做
+## 13. Phase 6：D2/D9/D10 补齐与 X3/X4 收口
+
+范围：**D2 / D9 / D10 / X3 / X4 + 32 位 PDB + 行号**。YARA/FLIRT、Go `pclntab` / Rust v0 不做。
+目标：把「剩下的族」从 partial 推到「存在且可用」，并把 teardown 与性能从口号变成可执行的验收。
+
+### 13.1 D2：异常策略（可配置，默认不变）
+
+现状：`continue_event(pid, tid)` 不转发状态，所有非断点异常都 `DBG_CONTINUE`（`_process.pxi`），
+`DBG_EXCEPTION_NOT_HANDLED` 零调用点，`first_chance` 解析了但没人用。
+
+```python
+ExceptionPolicy(
+    ignore_codes=(),            # 这些异常码不交给调用方？不——见下
+    first_chance_only=False,
+    on_exception=None,          # callable(event) -> int | None
+)
+ExceptionPolicy.continue_flags(code) -> int      # 默认返回 DBG_CONTINUE
+
+Debugger(exception_policy=None)                  # 默认策略 = 现有行为
+Debugger.continue_event(pid, tid, status=None)   # status 给定时覆盖策略
+```
+
+- **默认策略必须让现有测试零改动**：`continue_flags` 返回 `DBG_CONTINUE`，`on_exception` 为 `None`。
+- `first_chance_only=True` 时，二次机会异常继续走原路径（不因策略改变异常投递）。
+- 忽略列表只影响「交给 `on_exception` 之前」的判断，不改变事件是否上报给调用方。
+
+### 13.2 D9：注入原语与反调试检测
+
+```python
+pydbg.inject.inject_dll(dbg, path) -> InjectionReport
+pydbg.inject.inject_shellcode(dbg, code: bytes) -> InjectionReport
+pydbg.inject.queue_apc(dbg, thread_id, addr, data: bytes = b"") -> int
+pydbg.inject.suspend_process(dbg) / resume_process(dbg)
+InjectionReport(thread_id, handle, remote_base)
+InjectionError(PydbgError)
+```
+
+- DLL：路径写进目标（`VirtualAllocEx` + `WriteProcessMemory`），`CreateRemoteThread(LoadLibraryW)`；返回线程句柄。
+- shellcode：`CreateRemoteThread` 直接执行；`remote_base` 是分配地址。
+- `queue_apc` 的 docstring 必须写明「目标线程要进入 alertable 等待才会执行」。
+- 反调试检测（**只读目标**）：
+
+```python
+pydbg.antidebug.detect(dbg) -> tuple[DebuggerCheck, ...]
+DebuggerCheck(name, detected, evidence)
+```
+
+覆盖：`IsDebuggerPresent`、`CheckRemoteDebuggerPresent`、PEB `BeingDebugged`、PEB `NtGlobalFlag`、
+`NtQueryInformationProcess` 的 `ProcessDebugPort` / `ProcessDebugFlags` / `ProcessDebugObjectHandle`、
+硬件断点 `DR0-3`/`DR7`、关键位置 `0xCC` 扫描、`NtQuerySystemInformation(SystemKernelDebuggerInformation)`。
+时序检测不做（写进文档）。
+
+### 13.3 D10：原始 CONTEXT 与 x86 栈回溯
+
+现状：`stack_walk_frame` 已收 machine；缺的是拿到**原始 `CONTEXT` 字节**（现在 `get_thread_context` 返回 dict），
+`StackWalker.walk()` 接不上真实上下文。
+
+```python
+ThreadManager.get_context_bytes(handle, *, machine=None) -> bytes     # 原始 CONTEXT
+pydbg.dump.StackWalker.walk(h_thread, context_bytes, max_frames=64, machine=None)
+```
+
+- `machine=None` 时用目标模块的机器类型；WOW64 目标传 `MACHINE_X86`。
+- 栈回溯的 `resolve=` 继续走 dbghelp；不把 `pydbg.pdb` 接进活进程路径。
+- 已知限制写进 docstring：x86 下 `StackWalk64` 依赖 FPO/PDB 信息，缺信息时可能提前结束。
+
+### 13.4 X3：teardown 收口
+
+- `trace` 的四个 tracer（`BblTracer`、`InstructionTracer`、`MemoryWatch`、`FunctionProbe`）加 `teardown()`/`discard()`；
+  `Debugger` 增注册表（构造时登记或 `attach_trace(obj)`），`_TEARDOWN_ORDER` 增 `traces` 一项。
+- `memory`/`thread` manager 的 `teardown()` 释放自己开的句柄（没有就返回 `()`）。
+- 新增**枚举测试**：所有在 `Debugger` 上写目标的 manager 都在 `_TEARDOWN_ORDER` 里，且都有 `teardown()`；
+  这条测试要在加新 manager 时失败。
+
+### 13.5 X4：按路径的预算
+
+| 路径 | 样本 | 预算 |
+|---|---|---|
+| 静态分析 | `pe_builder` 合成的 10k 函数镜像 | < 60 s |
+| 动态单步 | 现有目标上的 10^4 指令窗口 | < 5 s（3b 口径） |
+| 动态插桩 | 新增的「跑 1e6 个块」循环目标（BBL 路径） | < 120 s |
+
+测试打印实测值；上限只抓数量级退化。10^6 不向单步/断点路径承诺（`trace/bbl.py` 的注释已写明到不了）。
+
+### 13.6 32 位 PDB 与行号
+
+- 32 位 PDB：`scripts/build-target32.ps1` 加 `/Zi /DEBUG`，meson `test_env` 暴露 `TEST_PDB_TARGET32_PATH`；
+  验收 `find(PE32)` 端到端 + `symbols()`/`structs()`。**不承诺**活进程符号化。
+- 行号：`Pdb.line_for(rva) -> LineInfo(file, line, displacement)`；按需解析并缓存所在模块的行表，不做全量枚举。
+
+### 13.7 新增测试目标
+
+反调试目标（调 `IsDebuggerPresent` / 读 PEB）、32 位 PDB 目标、x86 栈回溯目标（真实调用链）、
+1e6 块循环目标。都走 meson / `scripts/build-target32.ps1`，产物不入库。
+
+### 13.8 验收
+
+1. D2：默认策略下现有测试零改动；`continue_event(status=DBG_EXCEPTION_NOT_HANDLED)` 让目标自己的 SEH 收到异常
+   （用 `av_target` 验证）；`ignore`/`first_chance_only`/`on_exception` 各有单测。
+2. D9：`inject_dll` 把 `dump_target.dll` 注入 `dump_host` 并拿到导出地址；`inject_shellcode` 写入
+   `ret` 级 stub 不崩目标；`queue_apc` 在 alertable 线程上执行；`detect()` 在「被调试」与「未被调试」两种
+   状态给出不同 `detected`（反调试目标 + `simple_target` 各一次）。
+3. D10：`get_context_bytes` 返回的字节能被 `StackWalker.walk(..., machine="x86"/"x64")` 吃下；
+   x64 与 WOW64 各一条真实调用链断言帧数 ≥ 2 且首帧 IP 落在目标模块内。
+4. X3：枚举测试通过；`BblTracer`/`MemoryWatch` 在 `close()` 后自行 disarm（目标仍活时字节恢复）。
+5. X4：三条预算测试存在、打印实测、在 CI 上不抖。
+6. PDB：32 位目标 `find` + `symbols` + `structs` + `line_for` 全绿；行号在 x64 目标上返回 `file/line`。
+7. 整体：新测试全绿、`flake8 --max-line-length=120` 干净、`pyproject.toml` 不变、现有测试全绿。
+
+### 13.9 不做
+
+YARA/FLIRT、Go `pclntab` / Rust v0、VEH 注入式异常处理、反调试绕过写目标、线程劫持注入、
+活进程 32 位符号化、时序反调试检测、全量行号枚举。
+
+## 14. 明确不做
 
 GUI、正式 CLI、插件机制、AArch64、.NET/CLR 分析、内核/ETW、自建 DBI 引擎、BinDiff、
 一键自动脱壳、商业类型库与签名库本体。
