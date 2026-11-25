@@ -17,3 +17,9 @@ EXCEPTION_EXECUTE_FAULT = 0x8
 # WOW64 reports 32-bit breakpoints and single-steps under these codes.
 STATUS_WX86_BREAKPOINT = 0x4000001F
 STATUS_WX86_SINGLE_STEP = 0x4000001E
+
+# ContinueDebugEvent statuses for an exception debug event. DBG_CONTINUE says
+# the debugger handled the exception; DBG_EXCEPTION_NOT_HANDLED keeps dispatching
+# it inside the target (its SEH, then the unhandled-exception filter).
+DBG_CONTINUE = 0x00010002
+DBG_EXCEPTION_NOT_HANDLED = 0x80010001

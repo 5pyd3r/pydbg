@@ -276,8 +276,13 @@ cpdef object wait_for_debug_event(int timeout_ms=10000):
     return event
 
 
-cpdef void continue_debug_event(int pid, int tid, int status=DBG_CONTINUE):
+cpdef void continue_debug_event(int pid, int tid, DWORD status=DBG_CONTINUE):
     """Continue a thread that was stopped for a debug event.
+
+    'status' is a DWORD, not a C int: DBG_EXCEPTION_NOT_HANDLED is
+    0x80010001, which does not fit in a signed int and used to raise
+    OverflowError before ContinueDebugEvent was reached. The default is
+    unchanged (DBG_CONTINUE), so every existing caller keeps the old status.
 
     Raises OSError on failure.
     """
