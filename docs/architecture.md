@@ -11,13 +11,16 @@ Windows 二进制分析工具箱：一个 64 位宿主进程同时驱动**动态
 src/pydbg/
 ├── __init__.py          公共 API 面。除注解/常量/分析外**全部惰性**（见「导入边界」）
 ├── constants.py         Win32 常量字面值（不依赖扩展）
-├── exceptions.py        PydbgError → Process/Mem/Thread/Breakpoint/Timeout/Teardown
+├── exceptions.py        PydbgError → Process/Mem/Thread/Breakpoint/Timeout/Teardown/Injection
+├── antidebug.py         只读反调试状态检测（detect；不写目标）
 ├── core/
 │   ├── debugger.py      门面：生命周期 + 事件循环 + 原语委托
 │   ├── process.py       ProcessManager：句柄解析的唯一入口
 │   ├── session.py       DebugSession：状态 + 架构的唯一存储（pid_arch）
 │   ├── event.py         DebugEvent
 │   ├── status.py        ExitStatus / ExitReason
+│   ├── policy.py        ExceptionPolicy：ContinueDebugEvent 的状态选择
+│   ├── trace_registry.py  Debugger 持有的 tracer 注册表（teardown 的一步）
 │   ├── windows.py       窗口探测能力对象（dbg.windows）
 │   └── window_probe.py  探测实现（WindowProbeQuery / classify）
 ├── memory/manager.py    读/写/查询/保护；read_memory_safe 的 gaps
@@ -33,6 +36,7 @@ src/pydbg/
 ├── pdb/                 纯 Python PDB 读取（MSF 校验 + ctypes dbghelp 离线）
 ├── disasm/engine.py     capstone 封装；模式**按次**判定，不锁存
 ├── instrument/          插桩：硬编码 stub + LLVM 动态代码生成 + BBL detour
+├── inject/              注入原语：DLL / shellcode / APC / 进程挂起恢复
 ├── hook/{iat,inline}.py IAT / inline hook（dbg.hook_iat / dbg.hook_inline）
 ├── trace/, dump/, patch/, analysis/
 └── cython/              Win32 薄绑定（_pydbg 扩展）
@@ -72,7 +76,7 @@ cython/_pydbg（Win32 薄封装） → Win32 / dbghelp / WoW64
 ## 门面边界（ADR-0002）
 
 `Debugger` 只保留**必须知道本会话**的东西：生命周期、事件循环、内存、线程、
-断点、模块、异常辅助（46 个公开方法）。窗口探测、符号、hook、单步追踪、
+断点、模块、异常辅助（47 个公开方法，含 `attach_trace`）。窗口探测、符号、hook、单步追踪、
 反汇编/汇编通过属性访问——它们能独立构造、独立测试，就不再在门面上开洞。
 
 ## 导入边界（ADR-0001）

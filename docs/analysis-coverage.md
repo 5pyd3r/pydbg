@@ -807,10 +807,12 @@ pydbg.dump.StackWalker.walk(h_thread, context_bytes, max_frames=64, machine=None
 | 路径 | 样本 | 预算 |
 |---|---|---|
 | 静态分析 | `pe_builder` 合成的 10k 函数镜像 | < 60 s |
-| 动态单步 | 现有目标上的 10^4 指令窗口 | < 5 s（3b 口径） |
+| 动态单步 | `loop_target`（可填满窗口；`instrument_target` 仅作预算守卫，其循环离开模块，记不到 10^4） | < 10 s（3b 口径） |
 | 动态插桩 | 新增的「跑 1e6 个块」循环目标（BBL 路径） | < 120 s |
 
-测试打印实测值；上限只抓数量级退化。10^6 不向单步/断点路径承诺（`trace/bbl.py` 的注释已写明到不了）。
+测试打印实测值；上限只抓数量级退化。单步的 10^4 断言挂在 `loop_target`：`instrument_target` 每轮调 `Sleep()`，
+tracer 一旦离开模块就停，窗口只填 7 条（`left_module`），填不满就不是 10^4 的测量。阈值 10 s 是实测 2.5 s
+留出 CI 抖动余量。10^6 不向单步/断点路径承诺（`trace/bbl.py` 的注释已写明到不了）。
 
 ### 13.6 32 位 PDB 与行号
 
@@ -820,16 +822,19 @@ pydbg.dump.StackWalker.walk(h_thread, context_bytes, max_frames=64, machine=None
 
 ### 13.7 新增测试目标
 
-反调试目标（调 `IsDebuggerPresent` / 读 PEB）、32 位 PDB 目标、x86 栈回溯目标（真实调用链）、
-1e6 块循环目标。都走 meson / `scripts/build-target32.ps1`，产物不入库。
+反调试目标（调 `IsDebuggerPresent` / 读 PEB）与 1e6 块循环目标走 meson；32 位 PDB 目标走
+`scripts/build-target32.ps1`。产物不入库。
+x86 栈回溯**不新增目标**，复用现有 32 位目标 `threaded_target32`（真实调用链，探针停在 `main_add`）。
 
 ### 13.8 验收
 
 1. D2：默认策略下现有测试零改动；`continue_event(status=DBG_EXCEPTION_NOT_HANDLED)` 让目标自己的 SEH 收到异常
    （用 `av_target` 验证）；`ignore`/`first_chance_only`/`on_exception` 各有单测。
 2. D9：`inject_dll` 把 `dump_target.dll` 注入 `dump_host` 并拿到导出地址；`inject_shellcode` 写入
-   `ret` 级 stub 不崩目标；`queue_apc` 在 alertable 线程上执行；`detect()` 在「被调试」与「未被调试」两种
-   状态给出不同 `detected`（反调试目标 + `simple_target` 各一次）。
+   `ret` 级 stub 不崩目标；`queue_apc` 在 alertable 线程上执行；`detect()` 的活体验证只覆盖「被调试」
+   状态（`detect()` 需要 attach 的目标，未调试进程无法从它观察），在反调试目标与 `simple_target` 上
+   各跑一次且 `detected=True`；「未被调试」状态由 fake probe 单测覆盖
+   （`TestChecks.test_a_clean_state_is_not_detected`）。
 3. D10：`get_context_bytes` 返回的字节能被 `StackWalker.walk(..., machine="x86"/"x64")` 吃下；
    x64 与 WOW64 各一条真实调用链断言帧数 ≥ 2 且首帧 IP 落在目标模块内。
 4. X3：枚举测试通过；`BblTracer`/`MemoryWatch` 在 `close()` 后自行 disarm（目标仍活时字节恢复）。
