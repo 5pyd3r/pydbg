@@ -151,8 +151,36 @@ class TestInjectionValidation(unittest.TestCase):
         message = self._message(suspend_process, None)
         self.assertIn("target", message)
 
+    def test_a_failure_without_a_win32_code_does_not_print_win32_zero(self):
+        """`win32=0` reads as "Windows said success" when there was no call.
+
+        Only a real Win32/errno number belongs in the message; a precondition
+        that never reached Windows says so instead of inventing a code.
+        """
+        message = self._message(suspend_process, None)
+        self.assertNotIn("win32=0", message)
+        self.assertIn("no Win32 code", message)
+
+    def test_a_translated_failure_without_a_code_also_omits_win32_zero(self):
+        """The same rule for an exception with no winerror/errno to carry."""
+        from pydbg.exceptions import MemError
+        from pydbg.inject import api
+
+        with self.assertRaises(InjectionError) as ctx:
+            api._translate("alloc", MemError("the allocator said no"))
+        message = str(ctx.exception)
+        self.assertNotIn("win32=0", message)
+        self.assertIn("no Win32 code", message)
+        self.assertIn("the allocator said no", message)
+
     def test_queue_apc_docstring_requires_an_alertable_wait(self):
         self.assertIn("alertable", queue_apc.__doc__.lower())
+
+    def test_queue_apc_docstring_names_the_data_leak(self):
+        """A non-empty `data` allocation is never returned or freed."""
+        doc = queue_apc.__doc__.lower()
+        self.assertIn("leak", doc)
+        self.assertIn("data", doc)
 
 
 def _remote_export(h_process, module_base, name):

@@ -367,3 +367,13 @@ class MemoryManager:
         Returning () is the honest answer, not a placeholder.
         """
         return ()
+
+    def discard(self):
+        """Forget nothing: this manager records nothing to forget.
+
+        `Debugger.terminate_process()` calls this on a killed target. Unlike
+        the managers that track what they installed, this one keeps no record
+        — reads/writes use the session's handle and allocations belong to the
+        caller — so there is nothing to drop.
+        """
+        return None

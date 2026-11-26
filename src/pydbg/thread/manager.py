@@ -1,24 +1,43 @@
 """ThreadManager — thread open/context/suspend/resume/enumerate/step."""
 
-from .. import _pydbg
 from ..exceptions import ThreadError
 
 # dbghelp/IMAGE_FILE machine constants for the two architectures this package
-# walks. StackWalker spells the same values on its own class; callers may pass
-# either form (or 'x86'/'x64') where a machine is wanted.
+# walks. This is their only definition: `dump/stackwalk.py` imports them from
+# here, and callers may pass either form (or 'x86'/'x64') where a machine is
+# wanted.
 MACHINE_X86 = 0x14C
 MACHINE_X64 = 0x8664
 
 _ARCH_BY_NAME = {'x86': 32, 'x32': 32, 'i386': 32, 'x64': 64, 'amd64': 64}
 
 
+def _extension():
+    """The Cython extension, imported at call time.
+
+    Importing this module must stay extension-free (ADR-0001): `dump/stackwalk.py`
+    imports the machine constants above, and `import pydbg.dump` must not load
+    `_pydbg` — that boundary is asserted by tests/test_import_boundary.py.
+    Every operation that needs Win32 resolves the extension here instead.
+    """
+    from .. import _pydbg
+    return _pydbg
+
+
 def arch_for_machine(machine):
     """The 32/64 architecture a machine specification names, or None.
 
-    Accepts the forms callers actually hold: None (meaning "ask the target"),
-    the extension's 32/64, the dbghelp machine constants MACHINE_X86 /
-    MACHINE_X64, and the strings 'x86'/'x64'. Anything else raises ValueError
-    instead of quietly unwinding a WOW64 stack with x64 rules.
+    `machine` is an int, a str, or None:
+
+    * None — ask the target; this answers None and `arch_for` does the asking;
+    * 32 / 64 — the extension's own width;
+    * MACHINE_X86 (0x14C) / MACHINE_X64 (0x8664) — dbghelp's IMAGE_FILE
+      machine constants;
+    * 'x86' / 'x32' / 'i386' / 'x64' / 'amd64' — string spellings, matched
+      case-insensitively after stripping whitespace.
+
+    Anything else raises ValueError instead of quietly unwinding a WOW64 stack
+    with x64 rules.
     """
     if machine is None:
         return None
@@ -49,7 +68,7 @@ def arch_for(session, h_thread, machine=None):
     if arch is not None:
         return arch
     try:
-        tid = _pydbg.get_thread_id(h_thread)
+        tid = _extension().get_thread_id(h_thread)
     except OSError:
         tid = None
     lookup = getattr(session, 'arch_for_tid', None)
@@ -66,7 +85,7 @@ class ThreadManager:
 
     def open(self, tid):
         try:
-            return _pydbg.open_thread(tid)
+            return _extension().open_thread(tid)
         except OSError as e:
             raise ThreadError(f"OpenThread for tid {tid}: {e}")
 
@@ -77,7 +96,7 @@ class ThreadManager:
 
     def get_context(self, h_thread):
         try:
-            return _pydbg.get_thread_context(h_thread, self._machine_for(h_thread))
+            return _extension().get_thread_context(h_thread, self._machine_for(h_thread))
         except OSError as e:
             raise ThreadError(f"GetThreadContext: {e}")
 
@@ -96,13 +115,13 @@ class ThreadManager:
             raise ThreadError("get_context_bytes: no thread handle given")
         arch = arch_for(self._s, h_thread, machine)
         try:
-            return _pydbg.get_thread_context_bytes(h_thread, arch)
+            return _extension().get_thread_context_bytes(h_thread, arch)
         except OSError as e:
             raise ThreadError(f"GetThreadContext: {e}")
 
     def set_context(self, h_thread, context):
         try:
-            _pydbg.set_thread_context(h_thread, context, self._machine_for(h_thread))
+            _extension().set_thread_context(h_thread, context, self._machine_for(h_thread))
         except OSError as e:
             raise ThreadError(f"SetThreadContext: {e}")
 
@@ -111,19 +130,19 @@ class ThreadManager:
 
     def suspend(self, h_thread):
         try:
-            return _pydbg.suspend_thread(h_thread)
+            return _extension().suspend_thread(h_thread)
         except OSError as e:
             raise ThreadError(f"SuspendThread: {e}")
 
     def resume(self, h_thread):
         try:
-            return _pydbg.resume_thread(h_thread)
+            return _extension().resume_thread(h_thread)
         except OSError as e:
             raise ThreadError(f"ResumeThread: {e}")
 
     def enumerate(self, pid):
         try:
-            return _pydbg.enumerate_threads(pid)
+            return _extension().enumerate_threads(pid)
         except OSError as e:
             raise ThreadError(f"EnumerateThreads: {e}")
 
@@ -145,3 +164,12 @@ class ThreadManager:
         thread handle. Returning () is the honest answer, not a placeholder.
         """
         return ()
+
+    def discard(self):
+        """Forget nothing: this manager records nothing to forget.
+
+        `Debugger.terminate_process()` calls this on a killed target. Nothing
+        here tracks an opened handle or a suspended thread — each call acts on
+        a caller-owned handle and returns — so there is no record to drop.
+        """
+        return None

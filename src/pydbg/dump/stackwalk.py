@@ -1,4 +1,5 @@
 from ..exceptions import PydbgError
+from ..thread.manager import MACHINE_X64, MACHINE_X86, arch_for
 
 
 class StackWalker:
@@ -10,8 +11,9 @@ class StackWalker:
     captured at an earlier stop walks the stack as it was then.
 
     'machine' is None to ask the target process's architecture, or
-    'x86'/'x64', 32/64, MACHINE_X86 / MACHINE_X64 to state it. A WOW64 target
-    needs a WOW64_CONTEXT, which get_context_bytes(machine='x86') returns.
+    'x86'/'x64', 32/64, MACHINE_X86 / MACHINE_X64 (defined once in
+    thread/manager.py) to state it. A WOW64 target needs a WOW64_CONTEXT,
+    which get_context_bytes(machine='x86') returns.
 
     StackWalk64 cannot unwind until dbghelp knows the target's modules, so
     walk() takes a temporary symbol session for the process and releases it in
@@ -29,8 +31,8 @@ class StackWalker:
       the resolver uses.
     """
 
-    MACHINE_X86 = 0x14C
-    MACHINE_X64 = 0x8664
+    MACHINE_X86 = MACHINE_X86
+    MACHINE_X64 = MACHINE_X64
 
     def __init__(self, session):
         self._s = session
@@ -64,8 +66,6 @@ class StackWalker:
             from .. import _pydbg
         except ImportError:
             raise PydbgError("_pydbg extension not available")
-
-        from ..thread.manager import arch_for
 
         if h_thread is None:
             raise PydbgError("walk() needs a thread handle")

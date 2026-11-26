@@ -4,7 +4,6 @@ import os
 import struct
 import sys
 import unittest
-import warnings
 from unittest import mock
 
 try:
@@ -17,13 +16,9 @@ except ImportError:
 from pydbg.core.session import DebugSession
 from pydbg.dump.stackwalk import StackWalker
 from pydbg.exceptions import ThreadError
-
-try:
-    from pydbg.thread.manager import (
-        MACHINE_X64, MACHINE_X86, ThreadManager,
-    )
-except ImportError:  # pragma: no cover — extension-free collection
-    ThreadManager = None
+from pydbg.thread.manager import (
+    MACHINE_X64, MACHINE_X86, ThreadManager,
+)
 
 _TEST_DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -77,8 +72,7 @@ def _export_rva(path, name):
 class TestContextBytes(unittest.TestCase):
     """ThreadManager.get_context_bytes: raw bytes, machine resolution."""
 
-    @unittest.skipUnless(ThreadManager is not None,
-                         'optional dependency: Cython extension')
+    @unittest.skipUnless(_has_cython, 'optional dependency: Cython extension')
     def test_the_extension_bytes_come_back_unchanged(self):
         manager = ThreadManager(_session())
         raw = bytes(range(256)) * 4 + bytes(_CONTEXT_X64 - 1024)
@@ -89,8 +83,7 @@ class TestContextBytes(unittest.TestCase):
                 manager.get_context_bytes(0x55, machine='x64'), raw)
         getter.assert_called_once_with(0x55, 64)
 
-    @unittest.skipUnless(ThreadManager is not None,
-                         'optional dependency: Cython extension')
+    @unittest.skipUnless(_has_cython, 'optional dependency: Cython extension')
     def test_machine_none_asks_the_target(self):
         manager = ThreadManager(_session(arch=32))
         raw = b'\x00' * _CONTEXT_WOW64
@@ -101,8 +94,7 @@ class TestContextBytes(unittest.TestCase):
                              _CONTEXT_WOW64)
         getter.assert_called_once_with(0x55, 32)
 
-    @unittest.skipUnless(ThreadManager is not None,
-                         'optional dependency: Cython extension')
+    @unittest.skipUnless(_has_cython, 'optional dependency: Cython extension')
     def test_every_machine_spelling_reaches_the_same_architecture(self):
         manager = ThreadManager(_session())
         for spec, arch in (('x86', 32), ('X86', 32), (32, 32),
@@ -113,15 +105,13 @@ class TestContextBytes(unittest.TestCase):
                 manager.get_context_bytes(1, machine=spec)
             getter.assert_called_once_with(1, arch)
 
-    @unittest.skipUnless(ThreadManager is not None,
-                         'optional dependency: Cython extension')
+    @unittest.skipUnless(_has_cython, 'optional dependency: Cython extension')
     def test_an_unknown_machine_is_refused(self):
         manager = ThreadManager(_session())
         with self.assertRaises(ValueError):
             manager.get_context_bytes(1, machine='arm64')
 
-    @unittest.skipUnless(ThreadManager is not None,
-                         'optional dependency: Cython extension')
+    @unittest.skipUnless(_has_cython, 'optional dependency: Cython extension')
     def test_oserror_becomes_thread_error(self):
         manager = ThreadManager(_session())
         with mock.patch('pydbg._pydbg.get_thread_context_bytes',
@@ -365,11 +355,14 @@ class TestLiveWow64StackWalk(unittest.TestCase):
             self.assertTrue(
                 base <= first < base + module['size'],
                 f'first frame 0x{first:X} is outside the target module')
-            if len(frames) < 2:
-                warnings.warn(
-                    'WOW64 StackWalk64 ended after %d frame(s): x86 unwinding '
-                    'needs FPO/PDB records and none are loaded for this target'
-                    % len(frames), stacklevel=2)
+            # §13.8(3): two real frames, the same bar as x64. The threaded
+            # target's main thread calls main_add, so a one-frame answer is the
+            # known FPO/PDB limitation showing up, not a passing walk.
+            self.assertGreaterEqual(
+                len(frames), 2,
+                f'WOW64 StackWalk64 ended after {len(frames)} frame(s): '
+                f'x86 unwinding needs FPO/PDB records and the meson build '
+                f'loads none for this target: {frames}')
         finally:
             if h_thread is not None:
                 try:
