@@ -3,6 +3,11 @@
 The pure half (PEB layouts and evidence assembly) runs without a target and
 without the Cython extension. The live half needs the extension and a built
 `antidebug_target.exe`; it is skipped, never silently green.
+
+The live half verifies the **debugged** state only: `detect()` needs an
+attached target, so a process with no debugger has no `detect()` to observe.
+That half of the answer — DebuggerCheck(detected=False) — is covered through
+the FakeProbe seam (`TestChecks.test_a_clean_state_is_not_detected`).
 """
 
 import os
@@ -274,6 +279,29 @@ class TestChecks(unittest.TestCase):
             self.assertTrue(by_name[name].detected, f"{name}: {by_name[name]}")
             self.assertTrue(by_name[name].evidence, f"{name} has no evidence")
 
+    def test_the_two_being_debugged_checks_report_the_same_read(self):
+        """`IsDebuggerPresent` and PEB.BeingDebugged are two labels on one byte.
+
+        They share a helper, so the PEB offset and value appear in both
+        evidence strings in one spelling — not two hand-built variants of the
+        same fact.
+        """
+        by_name = self.run_checks(FakeProbe())
+        self.assertIn("PEB+0x2=0x01", by_name["IsDebuggerPresent"].evidence)
+        self.assertIn("PEB+0x2=0x01", by_name["PEB.BeingDebugged"].evidence)
+
+    def test_a_failed_nt_status_becomes_that_checks_evidence(self):
+        """One error template for every NtQuery call; the status survives."""
+        class Failing(FakeProbe):
+            def process_info(self, info_class, size):
+                return 0x8000000D, b"\x00" * size
+
+        check = self.run_checks(Failing())[
+            "NtQueryInformationProcess(ProcessDebugPort)"]
+        self.assertFalse(check.detected)
+        self.assertIn("0x8000000D", check.evidence)
+        self.assertIn("query failed", check.evidence)
+
     def test_a_clean_state_is_not_detected(self):
         by_name = self.run_checks(FakeProbe(
             peb=FakeProbe.CLEAN_PEB, debug_port=0, debug_flags=1,
@@ -517,7 +545,9 @@ class TestLiveSimpleTarget(LiveDetectionMixin, unittest.TestCase):
     """A target that asks nothing still reports the debugging state.
 
     This is the documented boundary: detect() reports whether a debugger is
-    attached, not whether the target runs anti-debug code.
+    attached, not whether the target runs anti-debug code. The opposite state
+    (no debugger) cannot be reached through detect() — it needs an attached
+    target — so `TestChecks` covers it with a fake probe.
     """
 
     def test_api_checks_fire_even_though_the_target_never_asks(self):

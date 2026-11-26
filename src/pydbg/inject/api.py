@@ -5,8 +5,9 @@ surface: `_session.process_handle`, `_session.pid`, `memory`). Remote memory is
 allocated with `VirtualAllocEx` through `dbg.memory`, never freed on success,
 and the address comes back in the `InjectionReport`; the caller owns both the
 allocation and the thread handle. Failures raise `InjectionError` with the
-stage and the Win32 code, because an injection that fails at `alloc` and one
-that fails at `CreateRemoteThread` need different fixes.
+stage and, when Windows refused a call, the Win32 code, because an injection
+that fails at `alloc` and one that fails at `CreateRemoteThread` need different
+fixes.
 
 The `LoadLibraryW` address is resolved in *this* process's kernel32. That is
 valid only for a same-bitness target: Windows maps kernel32 at the same base in
@@ -46,15 +47,28 @@ def _win32_code(exc):
     return 0
 
 
-def _fail(stage, message, code):
+def _code_detail(code):
+    """The code half of an InjectionError message: "win32=N" or its absence."""
+    return f"win32={code}" if code else "no Win32 code"
+
+
+def _fail(stage, message, code=None):
+    """Raise InjectionError for 'stage'.
+
+    'code' is the Win32/errno number when Windows made the call and refused
+    it. A failure that never reached Windows — a missing target, a WOW64
+    target, a bad argument — has no code, and says so instead of printing
+    `win32=0`, which reads like a successful call.
+    """
     raise InjectionError(
-        f"injection {stage} failed (win32={code}): {message}")
+        f"injection {stage} failed ({_code_detail(code)}): {message}")
 
 
 def _translate(stage, exc):
     """Re-raise a lower-level failure as an InjectionError for 'stage'."""
     raise InjectionError(
-        f"injection {stage} failed (win32={_win32_code(exc)}): {exc}") from exc
+        f"injection {stage} failed ({_code_detail(_win32_code(exc))}): "
+        f"{exc}") from exc
 
 
 def _session(dbg):
@@ -62,9 +76,9 @@ def _session(dbg):
     session = getattr(dbg, "_session", None)
     if getattr(session, "process_handle", None) is None:
         _fail("target", "no target process handle; create_process() or "
-                        "attach() first", 0)
+                        "attach() first")
     if getattr(session, "pid", None) is None:
-        _fail("target", "no target pid; create_process() or attach() first", 0)
+        _fail("target", "no target pid; create_process() or attach() first")
     return session
 
 
@@ -72,7 +86,7 @@ def _require_native(session):
     """Refuse a WOW64 target: this injection path only has 64-bit addresses."""
     if getattr(session, "target_arch", None) == 32:
         _fail("arch", "cross-architecture injection is not supported "
-                      "(WOW64 target, 64-bit host)", 0)
+                      "(WOW64 target, 64-bit host)")
 
 
 def _alloc(dbg, size, protect):
@@ -131,7 +145,8 @@ def inject_dll(dbg, path):
         InjectionError: the path is unusable (`path`), kernel32/LoadLibraryW
             cannot be resolved (`resolve`), `VirtualAllocEx` refused (`alloc`),
             `WriteProcessMemory` refused (`write`), or `CreateRemoteThread`
-            refused (`thread`); the message carries the Win32 code.
+            refused (`thread`); the message carries the Win32 code when there
+            is one.
     """
     if not isinstance(path, (str, os.PathLike)):
         _fail("path", f"not a path: {path!r}", _WIN32_INVALID_PARAMETER)
@@ -189,7 +204,8 @@ def inject_shellcode(dbg, code):
     Raises:
         InjectionError: `code` is empty or not bytes (`code`), the allocation
             failed (`alloc`), the write failed (`write`), or the thread could
-            not be created (`thread`); the message carries the Win32 code.
+            not be created (`thread`); the message carries the Win32 code when
+            there is one.
     """
     if not isinstance(code, (bytes, bytearray, memoryview)):
         _fail("code", f"shellcode must be bytes, not {type(code).__name__}",
@@ -231,11 +247,14 @@ def queue_apc(dbg, thread_id, addr, data=b""):
     `addr` is the APC routine's address in the target; it receives `data` as
     its `ULONG_PTR` parameter. An empty `data` passes 0. A non-empty `data` is
     copied into a new `PAGE_READWRITE` allocation in the target and that
-    address is what the routine receives; this function does not return that
-    address and does not free it, so a caller that needs to reclaim the bytes
-    should write them itself with `dbg.memory.alloc_remote`/`write` and pass an
-    empty `data` (its own address can then be baked into the routine or found
-    another way).
+    address is what the routine receives.
+
+    **A non-empty `data` leaks that allocation by design**: the address is
+    neither returned nor freed, because the APC routine owns what it receives
+    and this function cannot know when the APC ran. A caller that needs to
+    reclaim the bytes must allocate and write them itself with
+    `dbg.memory.alloc_remote`/`write` and pass an empty `data`; it then holds
+    the address and can free it after the APC has run.
 
     Returns:
         The `QueueUserAPC` result: nonzero on success.
@@ -244,7 +263,7 @@ def queue_apc(dbg, thread_id, addr, data=b""):
         InjectionError: the thread id or routine address is invalid (`apc`), the
             thread cannot be opened (`apc`), the data allocation/write failed
             (`alloc`/`write`), or Windows refused the APC (`apc`); the message
-            carries the Win32 code.
+            carries the Win32 code when there is one.
     """
     if not isinstance(thread_id, int) or isinstance(thread_id, bool) \
             or thread_id <= 0:
@@ -306,7 +325,7 @@ def suspend_process(dbg):
     Raises:
         InjectionError: no target (`target`), thread enumeration failed or a
             thread could not be opened/suspended (`threads`); the message
-            carries the Win32 code.
+            carries the Win32 code when there is one.
     """
     session = _session(dbg)
     thread_ids = _thread_ids(session)
@@ -348,7 +367,7 @@ def resume_process(dbg):
 
     Raises:
         InjectionError: no target (`target`), or enumeration/open/resume failed
-            (`threads`); the message carries the Win32 code.
+            (`threads`); the message carries the Win32 code when there is one.
     """
     session = _session(dbg)
     thread_ids = _thread_ids(session)

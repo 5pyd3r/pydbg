@@ -184,11 +184,37 @@ _ENTRY_SCAN_BYTES = 64
 _INT3_NOTE = ("an INT3 here may be the debugger's own software breakpoint")
 
 
-def _check_is_debugger_present(probe):
+def _peb_being_debugged(probe):
+    """The PEB byte that `IsDebuggerPresent` and `PEB.BeingDebugged` both read.
+
+    The two rows are two labels on one kernel-backed fact, so they share this
+    read and its evidence spelling: (raw byte, PEB offset, "PEB+0xN=0xNN").
+    Reading it twice would let the two rows disagree about the same byte.
+    """
     offset = peb_offsets(probe.arch)["being_debugged"]
     raw = probe.peb["being_debugged"]
+    return raw, offset, f"PEB+0x{offset:X}=0x{raw:02X}"
+
+
+def _nt_call(query, what, *args, tolerate=()):
+    """Run one NT query; return (status, raw bytes) or raise OSError.
+
+    Every `NtQueryInformationProcess`/`NtQuerySystemInformation` site raises
+    the same "failed: NTSTATUS 0x..." OSError, so the template lives here
+    instead of being copied at each call. 'tolerate' names statuses the check
+    handles itself (STATUS_PORT_NOT_SET means "no debug object", not a
+    failure); those come back to the caller instead of raising.
+    """
+    status, raw = query(*args)
+    if status != 0 and status not in tolerate:
+        raise OSError(f"{what} failed: NTSTATUS 0x{status:08X}")
+    return status, raw
+
+
+def _check_is_debugger_present(probe):
+    raw, _offset, fact = _peb_being_debugged(probe)
     return raw != 0, (
-        f"PEB.BeingDebugged=0x{raw:02X} at 0x{probe.peb_address + offset:X}; "
+        f"{fact} (PEB at 0x{probe.peb_address:X}); "
         f"kernel32!IsDebuggerPresent would return {raw}")
 
 
@@ -200,11 +226,9 @@ def _check_check_remote_debugger_present(probe):
 
 
 def _check_peb_being_debugged(probe):
-    offset = peb_offsets(probe.arch)["being_debugged"]
-    raw = probe.peb["being_debugged"]
+    raw, _offset, fact = _peb_being_debugged(probe)
     return raw != 0, (
-        f"PEB+0x{offset:X} = 0x{raw:02X} (PEB at 0x{probe.peb_address:X}, "
-        f"{probe.arch}-bit layout)")
+        f"{fact} (PEB at 0x{probe.peb_address:X}, {probe.arch}-bit layout)")
 
 
 def _check_peb_nt_global_flag(probe):
@@ -217,10 +241,9 @@ def _check_peb_nt_global_flag(probe):
 
 
 def _check_process_debug_port(probe):
-    status, raw = probe.process_info(PROCESS_DEBUG_PORT, _ULONG_PTR_SIZE)
-    if status != 0:
-        raise OSError("NtQueryInformationProcess(ProcessDebugPort) failed: "
-                      f"NTSTATUS 0x{status:08X}")
+    status, raw = _nt_call(
+        probe.process_info, "NtQueryInformationProcess(ProcessDebugPort)",
+        PROCESS_DEBUG_PORT, _ULONG_PTR_SIZE)
     port = int.from_bytes(raw, "little")
     return port != 0, (
         f"ProcessDebugPort=0x{port:X} (NTSTATUS 0x{status:08X}); a user-mode "
@@ -228,10 +251,9 @@ def _check_process_debug_port(probe):
 
 
 def _check_process_debug_flags(probe):
-    status, raw = probe.process_info(PROCESS_DEBUG_FLAGS, 4)
-    if status != 0:
-        raise OSError("NtQueryInformationProcess(ProcessDebugFlags) failed: "
-                      f"NTSTATUS 0x{status:08X}")
+    status, raw = _nt_call(
+        probe.process_info, "NtQueryInformationProcess(ProcessDebugFlags)",
+        PROCESS_DEBUG_FLAGS, 4)
     flags = int.from_bytes(raw, "little")
     return flags == 0, (
         f"ProcessDebugFlags={flags} (NTSTATUS 0x{status:08X}); 0 means the "
@@ -239,15 +261,14 @@ def _check_process_debug_flags(probe):
 
 
 def _check_process_debug_object_handle(probe):
-    status, raw = probe.process_info(PROCESS_DEBUG_OBJECT_HANDLE,
-                                     _ULONG_PTR_SIZE)
+    status, raw = _nt_call(
+        probe.process_info,
+        "NtQueryInformationProcess(ProcessDebugObjectHandle)",
+        PROCESS_DEBUG_OBJECT_HANDLE, _ULONG_PTR_SIZE,
+        tolerate=(STATUS_PORT_NOT_SET,))
     if status == STATUS_PORT_NOT_SET:
         return False, (f"NTSTATUS 0x{status:08X} STATUS_PORT_NOT_SET: no "
                        f"debug object is attached")
-    if status != 0:
-        raise OSError(
-            "NtQueryInformationProcess(ProcessDebugObjectHandle) failed: "
-            f"NTSTATUS 0x{status:08X}")
     handle = int.from_bytes(raw, "little")
     return handle != 0, (
         f"ProcessDebugObjectHandle=0x{handle:X} (NTSTATUS 0x{status:08X})")
@@ -298,11 +319,10 @@ def _check_int3_scan(probe):
 
 
 def _check_kernel_debugger_information(probe):
-    status, raw = probe.system_info(SYSTEM_KERNEL_DEBUGGER_INFORMATION, 2)
-    if status != 0:
-        raise OSError(
-            "NtQuerySystemInformation(SystemKernelDebuggerInformation) "
-            f"failed: NTSTATUS 0x{status:08X}")
+    status, raw = _nt_call(
+        probe.system_info,
+        "NtQuerySystemInformation(SystemKernelDebuggerInformation)",
+        SYSTEM_KERNEL_DEBUGGER_INFORMATION, 2)
     enabled = bool(raw[0]) if len(raw) > 0 else False
     not_present = bool(raw[1]) if len(raw) > 1 else True
     return enabled and not not_present, (
@@ -428,12 +448,11 @@ class _Nt:
 
     def process_basic_information(self, h_process):
         """PebBaseAddress from NtQueryInformationProcess(ProcessBasicInformation)."""
-        status, raw = self.query_process(
-            h_process, PROCESS_BASIC_INFORMATION, _PROCESS_BASIC_INFORMATION_SIZE)
-        if status != 0:
-            raise OSError(
-                "NtQueryInformationProcess(ProcessBasicInformation) failed: "
-                f"NTSTATUS 0x{status:08X}")
+        _status, raw = _nt_call(
+            self.query_process,
+            "NtQueryInformationProcess(ProcessBasicInformation)",
+            h_process, PROCESS_BASIC_INFORMATION,
+            _PROCESS_BASIC_INFORMATION_SIZE)
         return struct.unpack_from("<Q", raw, _PEB_ADDRESS_OFFSET)[0]
 
     def check_remote_debugger_present(self, h_process):

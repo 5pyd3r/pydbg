@@ -63,10 +63,15 @@ def _teardown_problems(dbg):
             problems.append(
                 f"_TEARDOWN_ORDER names {name!r}, but Debugger has no such "
                 f"attribute")
-        elif not callable(getattr(manager, "teardown", None)):
+            continue
+        if not callable(getattr(manager, "teardown", None)):
             problems.append(
                 f"{name} ({type(manager).__name__}) is in _TEARDOWN_ORDER but "
                 f"has no callable teardown()")
+        if not callable(getattr(manager, "discard", None)):
+            problems.append(
+                f"{name} ({type(manager).__name__}) is in _TEARDOWN_ORDER but "
+                f"has no callable discard()")
     for name, reason in _READ_ONLY_MANAGERS.items():
         if not hasattr(dbg, name):
             problems.append(
@@ -180,6 +185,11 @@ class TestManagerTeardown(unittest.TestCase):
         mgr = MemoryManager(DebugSession())
         self.assertEqual(mgr.teardown(), ())
 
+    def test_memory_discard_forgets_nothing_because_it_records_nothing(self):
+        """ADR-0004's other half: a killed target has no records to drop."""
+        mgr = MemoryManager(DebugSession())
+        self.assertIsNone(mgr.discard())
+
     def test_thread_teardown_owns_nothing_of_its_own(self):
         """Thread handles are opened and closed by their callers.
 
@@ -189,6 +199,11 @@ class TestManagerTeardown(unittest.TestCase):
         """
         mgr = ThreadManager(DebugSession())
         self.assertEqual(mgr.teardown(), ())
+
+    def test_thread_discard_forgets_nothing_because_it_records_nothing(self):
+        """ADR-0004's other half: a killed target has no records to drop."""
+        mgr = ThreadManager(DebugSession())
+        self.assertIsNone(mgr.discard())
 
 
 class _FakeTracer:
@@ -327,6 +342,18 @@ class TestTeardownRegistration(unittest.TestCase):
         self.assertTrue(
             any("traces" in p and "teardown" in p for p in problems),
             f"a missing teardown was not reported: {problems}")
+
+    def test_the_check_goes_red_when_a_registered_manager_has_no_discard(self):
+        """ADR-0004 has two halves: restore, and forget when it is too late."""
+        dbg = self._debugger()
+        try:
+            with mock.patch.object(type(dbg.traces), "discard", None):
+                problems = _teardown_problems(dbg)
+        finally:
+            dbg.close()
+        self.assertTrue(
+            any("traces" in p and "discard" in p for p in problems),
+            f"a missing discard was not reported: {problems}")
 
     def test_the_check_goes_red_for_a_manager_added_to_the_debugger(self):
         """The regression the test exists for: a new writer, never registered."""

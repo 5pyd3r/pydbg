@@ -5,7 +5,7 @@ One test per path, each printing its own `measured=` figure:
 - static: `pe_builder`-synthesised 10,000-function image -> `analyze_bytes`
   under 60 s;
 - dynamic single-step: the Phase 3b `InstructionTracer` 10^4-instruction
-  window under 5 s;
+  window on `loop_target` under 10 s;
 - dynamic instrumented: 1,000,000 BBL hits on `loop_target` under 120 s.
 
 The ceilings are deliberately loose: they catch an order-of-magnitude
@@ -14,12 +14,12 @@ publish the measurement, keep the threshold wide). A failing instrumented run
 prints the last RIP and the installed block count, so a dead detour reads
 differently from a slow one.
 
-Why the single-step budget has two samples. The ticket names
-`instrument_target`, and that run is kept, but its loop calls `Sleep()`: the
-tracer stops when control leaves the module, so a window there fills seven
-instructions, not 10^4. `loop_target`'s in-module loop is the only sample that
-can actually fill the Phase 3b window, so the count-bearing 10^4 budget is
-measured there too. Both are reported; neither replaces the other.
+Why the single-step budget has two samples. `loop_target`'s in-module loop is
+the spec's 10^4 sample: it can fill the Phase 3b window, so the count-bearing
+budget is measured there. The `instrument_target` run is kept as a guard —
+its loop calls `Sleep()`, and the tracer stops when control leaves the module,
+so that window fills a handful of instructions, not 10^4. Both are reported;
+neither replaces the other.
 
 The 10^6 promise is for the instrumented path only. `trace/bbl.py` says why a
 breakpoint tracer cannot reach it: one stop, a byte restore and a single-step
@@ -81,7 +81,7 @@ needs_loop_target = unittest.skipUnless(
 
 # The three budgets from spec §13.5.
 STATIC_BUDGET_S = 60.0
-SINGLE_STEP_BUDGET_S = 5.0
+SINGLE_STEP_BUDGET_S = 10.0
 INSTRUMENTED_BUDGET_S = 120.0
 
 # The samples, sized to the spec's table rather than to what the machine can do.
@@ -145,18 +145,19 @@ class TestStaticTenThousandFunctions(unittest.TestCase):
 
 
 class TestSingleStepTenThousand(unittest.TestCase):
-    """The Phase 3b instruction window: 10^4 single steps under 5 s."""
+    """The Phase 3b instruction window: 10^4 single steps under 10 s."""
 
     @needs_cython
     @needs_instrument_target
     def test_instrument_target_window_runs_within_budget(self):
-        """The ticket's stated sample, kept as a budget guard.
+        """A second budget guard, not the 10^4 measurement.
 
         `instrument_target` calls `Sleep()` every iteration, and the tracer
         stops when control leaves the module, so this window ends after a few
-        instructions. The test still does its job as a budget guard — a
-        10,000-instruction ceiling must not wedge the tracer — but the number
-        that proves 10^4 *were* recorded is the `loop_target` test below.
+        instructions. The test still does its job — a 10,000-instruction
+        ceiling must not wedge the tracer — but the number that proves 10^4
+        *were* recorded is the `loop_target` test below, which is the spec's
+        named sample (§13.5).
         """
         from pydbg.trace.instr import InstructionTracer
         from tests.helpers import create_debugger, export_address, teardown

@@ -21,10 +21,27 @@ import os
 import time
 import unittest
 
-from pydbg.pdb import find
+from pydbg.pdb import LineInfo, find
 
 MACHINE_I386 = 0x14C
 PE32_MAGIC = 0x10B
+
+_TARGET_SOURCE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                              "target", "pdb_target32.c")
+
+
+def _source_line(text):
+    """The 1-based line in pdb_target32.c that contains 'text'.
+
+    The expected number comes from the sample's source, not from a literal
+    copied into this file: a test that hard-codes 50 stops noticing when the
+    function moves, and can then pass for the wrong reason.
+    """
+    with open(_TARGET_SOURCE, encoding="utf-8", errors="replace") as handle:
+        for number, line in enumerate(handle, 1):
+            if text in line:
+                return number
+    raise AssertionError(f"{text!r} is not in {_TARGET_SOURCE}")
 
 
 def _require_target(env_var, name):
@@ -131,6 +148,31 @@ class TestRealPdb32(unittest.TestCase):
             self.assertIn(name, by_name)
         names = [layout.name or "" for layout in self.structs]
         self.assertEqual(names, sorted(names))
+
+    def test_line_for_a_32_bit_function_returns_its_source_line(self):
+        """§13.8(6): `line_for(rva)` works on the PE32 sample too.
+
+        The reader is machine-agnostic, but the line table lookup is the one
+        read path the x64 sample already proved and this one had not: the
+        answer must name this target's source file and a line of
+        `add_numbers`, not just any line.
+        """
+        by_name = {symbol.name: symbol for symbol in self.symbols}
+        self.assertIn("add_numbers", by_name)
+        line = self.lookup.pdb.line_for(by_name["add_numbers"].rva)
+
+        self.assertIsNotNone(line, "add_numbers has no line in the PE32 PDB")
+        self.assertIsInstance(line, LineInfo)
+        self.assertEqual(os.path.basename(line.file), "pdb_target32.c")
+        self.assertTrue(os.path.isabs(line.file), line.file)
+        self.assertIn(line.line,
+                      {_source_line("int __stdcall add_numbers(int a, int b)"),
+                       _source_line("return a + b + helper(b);")})
+        self.assertGreaterEqual(line.displacement, 0)
+
+    def test_line_for_an_address_outside_the_image_is_none(self):
+        size = self.pe.optional_header.size_of_image
+        self.assertIsNone(self.lookup.pdb.line_for(size))
 
     def test_find_symbols_and_structs_take_under_two_seconds(self):
         # Same deliberately loose ceiling as the x64 acceptance: it catches an
