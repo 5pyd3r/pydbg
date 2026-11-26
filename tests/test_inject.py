@@ -8,8 +8,8 @@ What this file proves, in the order the ticket lists it:
 2. `inject_shellcode` runs `xor eax,eax; ret` to a zero thread exit code and
    the target keeps running;
 3. `queue_apc` executes on a thread parked in an alertable wait;
-4. `suspend_process`/`resume_process` count every thread and leave the target
-   alive;
+4. `suspend_process`/`resume_process` count every distinct thread once and
+   leave the target alive;
 5. invalid path / empty code / invalid thread each raise `InjectionError`
    naming the stage and the Win32 code;
 6. the extension is not needed to import `pydbg` or `pydbg.inject`, and the
@@ -443,6 +443,33 @@ def _wait_for_dword(dbg, address, expected, timeout=5.0):
     return observed
 
 
+def _settled_thread_ids(dbg, samples=5, interval=0.04, timeout=10.0):
+    """The target's thread ids once the set stops changing.
+
+    A freshly started process is not yet a fixed set of threads: the Windows
+    loader, a runner's monitoring agent, or the process's own runtime can add
+    worker threads a few milliseconds after `CreateProcess` returns. Measuring
+    the set inside that window and comparing it with the count
+    `suspend_process` derives from its own (later) enumeration compares two
+    different thread sets, not two counts of the same one. Wait for `samples`
+    consecutive identical snapshots before handing the set to an assertion.
+    """
+    previous = ()
+    stable = 0
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        current = tuple(sorted(set(dbg.get_thread_ids())))
+        if current and current == previous:
+            stable += 1
+            if stable >= samples:
+                return list(current)
+        else:
+            stable = 0
+        previous = current
+        time.sleep(interval)
+    return list(previous)
+
+
 @needs_cython
 @needs_target
 class TestQueueApcLive(unittest.TestCase):
@@ -490,6 +517,78 @@ class TestQueueApcLive(unittest.TestCase):
         self.assertIn("87", message)
 
 
+class _FakeExtension:
+    """Just enough of `pydbg._pydbg` to observe what suspend/resume act on."""
+
+    def __init__(self, thread_ids):
+        self.thread_ids = list(thread_ids)
+        self.suspended = []
+        self.resumed = []
+        self.closed = []
+
+    def enumerate_threads(self, pid):
+        return [dict(tid=tid, owner_pid=pid, base_priority=8)
+                for tid in self.thread_ids]
+
+    def open_thread(self, thread_id, access=0):
+        return 0x1000 + thread_id
+
+    def suspend_thread(self, handle):
+        self.suspended.append(handle)
+        return 0
+
+    def resume_thread(self, handle):
+        self.resumed.append(handle)
+        return 0
+
+    def close_handle(self, handle):
+        self.closed.append(handle)
+        return 0
+
+
+class _FakeSession:
+    pid = 4242
+    process_handle = 0x99
+    target_arch = 64
+
+
+class _FakeDebugger:
+    """The session surface `pydbg.inject.api` actually uses."""
+
+    def __init__(self):
+        self._session = _FakeSession()
+
+
+@needs_cython
+class TestSuspendCountUnit(unittest.TestCase):
+    """The count is distinct threads successfully suspended, not attempts."""
+
+    def test_a_duplicate_tid_is_suspended_once_and_counted_once(self):
+        from unittest import mock
+
+        from pydbg.inject import api
+
+        fake = _FakeExtension([101, 202, 101, 202, 101])
+        with mock.patch.object(api, "_pydbg", fake):
+            suspended = suspend_process(_FakeDebugger())
+
+        self.assertEqual(suspended, 2)
+        self.assertEqual(fake.suspended, [0x1000 + 101, 0x1000 + 202])
+        self.assertEqual(fake.closed, [0x1000 + 101, 0x1000 + 202])
+
+    def test_resume_counts_a_duplicate_tid_once_too(self):
+        from unittest import mock
+
+        from pydbg.inject import api
+
+        fake = _FakeExtension([7, 7, 9])
+        with mock.patch.object(api, "_pydbg", fake):
+            resumed = resume_process(_FakeDebugger())
+
+        self.assertEqual(resumed, 2)
+        self.assertEqual(fake.resumed, [0x1007, 0x1009])
+
+
 @needs_cython
 @needs_target
 class TestSuspendResumeLive(unittest.TestCase):
@@ -497,18 +596,41 @@ class TestSuspendResumeLive(unittest.TestCase):
     def setUp(self):
         self.target = _LiveTarget(_TARGET)
         self.addCleanup(self.target.close)
+        self.dbg = self.target.dbg
 
     def test_every_thread_is_suspended_and_resumed(self):
-        dbg = self.target.dbg
-        thread_ids = dbg.get_thread_ids()
+        # One snapshot, taken once the target's thread set has settled, is the
+        # yardstick: suspend_process must account for exactly those threads.
+        thread_ids = _settled_thread_ids(self.dbg)
         self.assertGreaterEqual(len(thread_ids), 1)
 
-        suspended = suspend_process(dbg)
-        self.assertEqual(suspended, len(thread_ids))
+        suspended = suspend_process(self.dbg)
+        self.assertEqual(suspended, len(set(thread_ids)))
         self.assertTrue(self.target.alive(), "target died while suspended")
 
-        resumed = resume_process(dbg)
-        self.assertEqual(resumed, len(thread_ids))
+        resumed = resume_process(self.dbg)
+        self.assertEqual(resumed, suspended,
+                         "resume did not undo every suspension")
+        time.sleep(0.1)
+        self.assertTrue(self.target.alive(), "target died after resume")
+
+    def test_a_thread_injected_before_the_suspend_is_counted_too(self):
+        """A target with more than its startup threads: every one is counted."""
+        sleeper = inject_shellcode(self.dbg, _sleep_ex_infinite_alertable())
+        self.addCleanup(_pydbg.close_handle, sleeper.handle)
+
+        thread_ids = _settled_thread_ids(self.dbg)
+        self.assertIn(sleeper.thread_id, thread_ids,
+                      "the injected thread is missing from the thread set")
+        self.assertGreaterEqual(len(thread_ids), 2)
+
+        suspended = suspend_process(self.dbg)
+        self.assertEqual(suspended, len(set(thread_ids)))
+        self.assertTrue(self.target.alive(), "target died while suspended")
+
+        resumed = resume_process(self.dbg)
+        self.assertEqual(resumed, suspended,
+                         "resume did not undo every suspension")
         time.sleep(0.1)
         self.assertTrue(self.target.alive(), "target died after resume")
 

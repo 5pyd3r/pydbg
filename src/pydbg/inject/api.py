@@ -310,17 +310,39 @@ def _thread_ids(session):
         _translate("threads", exc)
 
 
+def _distinct_thread_ids(session):
+    """The target's thread ids with duplicates removed, in enumeration order.
+
+    `enumerate_threads` is a raw snapshot of a live process and the same tid can
+    be reported more than once. Suspending such a thread twice raises its
+    suspend count twice, and the count would then describe attempts rather than
+    threads. Counting each tid once keeps `suspend_process` and
+    `resume_process` symmetric — both answer "distinct threads", so
+    `resume_process` undoes exactly what `suspend_process` did.
+    """
+    seen = set()
+    distinct = []
+    for thread_id in _thread_ids(session):
+        if thread_id not in seen:
+            seen.add(thread_id)
+            distinct.append(thread_id)
+    return distinct
+
+
 def suspend_process(dbg):
     """Suspend every thread of the target; returns how many were suspended.
 
     Opens each thread with `THREAD_SUSPEND_RESUME`, calls `SuspendThread` once,
-    closes the handles, and returns the count. Each thread's suspend count is
-    raised by one, so `resume_process` is the matching undo. The target's
-    threads stop executing immediately; its memory is still readable.
+    closes the handles, and returns the number of **distinct threads** that were
+    suspended. A tid the enumeration reports more than once is suspended once
+    and counted once, so the answer is comparable with `dbg.get_thread_ids()`
+    after removing duplicates. Each thread's suspend count is raised by one, so
+    `resume_process` is the matching undo. The target's threads stop executing
+    immediately; its memory is still readable.
 
     If a thread cannot be suspended, the threads already suspended by this call
     are resumed before the error is raised, so a partial failure does not leave
-    the target wedged.
+    the target wedged; the threads resumed in the rollback are not counted.
 
     Raises:
         InjectionError: no target (`target`), thread enumeration failed or a
@@ -328,7 +350,7 @@ def suspend_process(dbg):
             carries the Win32 code when there is one.
     """
     session = _session(dbg)
-    thread_ids = _thread_ids(session)
+    thread_ids = _distinct_thread_ids(session)
     suspended = []
     try:
         for thread_id in thread_ids:
@@ -358,19 +380,22 @@ def resume_process(dbg):
     """Resume every thread of the target; returns how many were resumed.
 
     Opens each thread with `THREAD_SUSPEND_RESUME`, calls `ResumeThread` once,
-    and closes the handles. This is the undo for `suspend_process`; resuming a
-    thread that was not suspended by this API lowers a count someone else
-    raised, so pair the calls.
+    and closes the handles. A tid the enumeration reports more than once is
+    resumed once and counted once, so the answer counts distinct threads and is
+    symmetric with `suspend_process`. This is the undo for `suspend_process`;
+    resuming a thread that was not suspended by this API lowers a count someone
+    else raised, so pair the calls.
 
     Every thread is attempted even when one fails, and the first failure is
-    raised as an `InjectionError` after the rest have been tried.
+    raised as an `InjectionError` after the rest have been tried; only the
+    successful resumes are counted.
 
     Raises:
         InjectionError: no target (`target`), or enumeration/open/resume failed
             (`threads`); the message carries the Win32 code when there is one.
     """
     session = _session(dbg)
-    thread_ids = _thread_ids(session)
+    thread_ids = _distinct_thread_ids(session)
     resumed = 0
     failures = []
     for thread_id in thread_ids:
