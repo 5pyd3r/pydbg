@@ -115,6 +115,17 @@ assert len(calls) == before, calls
 assert resolver.enumerate(arch="64") == []
 assert calls[-1] == ("filtered", 0x1234, LIST_MODULES_64BIT), calls
 
+# A spelling that names no table is a PydbgError like every other refusal, and
+# costs no Win32 call.
+before = len(calls)
+try:
+    resolver.enumerate(arch="arm")
+except PydbgError as exc:
+    assert "must be None, 32 or 64" in str(exc), exc
+else:
+    raise AssertionError("an unknown module-view architecture was accepted")
+assert len(calls) == before, calls
+
 print("32-bit module view plumbing works without the extension")
 '''
 

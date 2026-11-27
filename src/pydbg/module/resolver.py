@@ -43,13 +43,18 @@ _MODULE_VIEW_ALIASES = {32: 32, "32": 32, "x86": 32,
 
 
 def _module_view_arch(arch):
-    """Normalise a requested module-table architecture; None keeps every table."""
+    """Normalise a requested module-table architecture; None keeps every table.
+
+    A bad spelling is a PydbgError, not a ValueError: every public entry point
+    in this package funnels its failures through the PydbgError hierarchy, and
+    a caller catching PydbgError would otherwise miss this one.
+    """
     if arch is None:
         return None
     try:
         return _MODULE_VIEW_ALIASES[arch]
     except (KeyError, TypeError):
-        raise ValueError(
+        raise PydbgError(
             "module view architecture must be None, 32 or 64 "
             f"(or 'x86'/'x64'), not {arch!r}") from None
 
