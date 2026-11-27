@@ -32,6 +32,20 @@ class PendingSingleStep:
     h_process: int | None
 
 
+@dataclass(frozen=True)
+class OpenedHandle:
+    """A process handle opened by pid, and the access mask it carries.
+
+    Kept as one value because the handle and its rights are meaningful only
+    together: a cached handle may be handed back only for a request its mask
+    satisfies, so a second mapping of masks could drift out of step with the
+    handles it describes. Stored in `DebugSession.foreign_handles`, keyed by
+    pid.
+    """
+    handle: int
+    access: int
+
+
 @dataclass
 class DebugSession:
     """Holds debug session state. No logic — pure data."""
@@ -42,7 +56,7 @@ class DebugSession:
     tid: int | None = None
     host_arch: int = struct.calcsize("P") * 8  # 32 or 64
     bp_counter: int = 0
-    breakpoints: dict = field(default_factory=dict)  # id -> (type, addr, extra)
+    breakpoints: dict = field(default_factory=dict)  # id -> Breakpoint
     # Breakpoint lifecycle: tid -> PendingSingleStep.
     pending_single_step: dict = field(default_factory=dict)
     # Set once the main target has been terminated: the handles stay open so
@@ -56,11 +70,11 @@ class DebugSession:
     # Processes opened by pid that we are NOT debugging (see Debugger.open_process).
     # The nested-debugging case: the memory wanted belongs to the debuggee of the
     # process we attached to, which never arrives as a CREATE_PROCESS event and is
-    # therefore not in child_processes. pid -> HANDLE, and pid -> access mask it
-    # was opened with, so a later request for different rights reopens instead of
-    # silently handing back a handle that cannot do what was asked.
+    # therefore not in child_processes. pid -> OpenedHandle, holding the handle
+    # and the access mask it was opened with, so a later request for different
+    # rights reopens instead of silently handing back a handle that cannot do
+    # what was asked.
     foreign_handles: dict = field(default_factory=dict)
-    foreign_access: dict = field(default_factory=dict)
 
     # The one place a process's architecture lives: pid -> 32 | 64. A thread
     # has no architecture of its own, only its process's — see tid_pid below.

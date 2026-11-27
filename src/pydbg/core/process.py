@@ -11,6 +11,7 @@ it carry.
 
 from .. import _pydbg
 from ..exceptions import ProcessError
+from .session import OpenedHandle
 
 
 def enumerate_processes():
@@ -76,13 +77,13 @@ class ProcessManager:
         opened = self._s.foreign_handles.get(pid)
         if opened is None:
             raise ProcessError(f"Unknown process pid={pid}")
-        have = self._s.foreign_access.get(pid, 0)
+        have = opened.access
         if need and (have & need) != need:
             raise ProcessError(
                 f"pid {pid} was opened with access 0x{have:X}, which does not "
                 f"include 0x{need:X} needed here. close_process({pid}) and "
                 f"reopen it with open_process({pid}, access=0x{have | need:X}).")
-        return opened
+        return opened.handle
 
     def try_handle(self, pid):
         """Handle for a *known* pid, or None. Never opens anything.
@@ -151,8 +152,8 @@ class ProcessManager:
             # it back for a wider request would fail later at the first write,
             # as ERROR_NOACCESS from VirtualProtectEx — which names none of
             # this. Reopen instead when the caller asks for different rights.
-            if access is None or self._s.foreign_access.get(pid) == access:
-                return cached
+            if access is None or cached.access == access:
+                return cached.handle
             self.close(pid)
 
         masks = ((access,) if access is not None
@@ -164,8 +165,7 @@ class ProcessManager:
             except OSError as e:
                 last = e
                 continue
-            self._s.foreign_handles[pid] = handle
-            self._s.foreign_access[pid] = mask
+            self._s.foreign_handles[pid] = OpenedHandle(handle, mask)
             return handle
 
         raise ProcessError(
@@ -175,12 +175,11 @@ class ProcessManager:
 
     def close(self, pid):
         """Close a handle opened by open(). No-op if never opened."""
-        handle = self._s.foreign_handles.pop(pid, None)
-        self._s.foreign_access.pop(pid, None)
-        if handle is None:
+        opened = self._s.foreign_handles.pop(pid, None)
+        if opened is None:
             return
         try:
-            _pydbg.close_handle(handle)
+            _pydbg.close_handle(opened.handle)
         except OSError as e:
             raise ProcessError(f"CloseHandle for pid {pid}: {e}")
 
