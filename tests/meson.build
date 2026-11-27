@@ -131,12 +131,17 @@ test_env = environment()
 test_env.prepend('PYTHONPATH',
   meson.project_source_root()
 )
+# The 32-bit WOW64 targets are products of scripts/build-target32.ps1 (meson
+# has no x86 toolchain) and are never committed. Their directory is defined
+# here once; the tests read the TEST_* variables set from it and skip with
+# `target not built:` naming that script when a file is absent.
+target32_dir = meson.project_source_root() / 'tests' / 'target'
 test_env.set('TEST_TARGET_PATH', test_target.full_path())
 test_env.set('TEST_WOW64_TARGET_PATH',
-  meson.project_source_root() / 'tests' / 'target' / 'simple_target32.exe')
+  target32_dir / 'simple_target32.exe')
 test_env.set('TEST_INSTRUMENT_TARGET_PATH', instrument_target.full_path())
 test_env.set('TEST_INSTRUMENT_TARGET32_PATH',
-  meson.project_source_root() / 'tests' / 'target' / 'instrument_target32.exe')
+  target32_dir / 'instrument_target32.exe')
 test_env.set('TEST_LOOP_TARGET_PATH', loop_target.full_path())
 test_env.set('TEST_ARGV_TARGET_PATH', argv_target.full_path())
 test_env.set('TEST_NESTED_TARGET_PATH', nested_target.full_path())
@@ -161,14 +166,14 @@ test_env.set('TEST_PDB_CPP_PDB_PATH',
 # script has run, and test_pdb32.py skips with "target not built:" when it has
 # not.
 test_env.set('TEST_PDB_TARGET32_PATH',
-  meson.project_source_root() / 'tests' / 'target' / 'pdb_target32.exe')
+  target32_dir / 'pdb_target32.exe')
 test_env.set('TEST_PDB32_PATH',
-  meson.project_source_root() / 'tests' / 'target' / 'pdb_target32.pdb')
+  target32_dir / 'pdb_target32.pdb')
 test_env.set('TEST_CHILD_TARGET',
-  meson.project_source_root() / 'tests' / 'target' / 'child_target32.exe')
+  target32_dir / 'child_target32.exe')
 test_env.set('TEST_CHILD_TARGET_X64', child_target.full_path())
 test_env.set('TEST_SPAWN_CHILD',
-  meson.project_source_root() / 'tests' / 'target' / 'spawn_child.exe')
+  target32_dir / 'spawn_child.exe')
 # Phase 4 e2e: the host exe and the DLL it loads, built together so the host
 # finds the DLL in its own directory.
 test_env.set('TEST_DUMP_DLL_PATH', dump_target.full_path())

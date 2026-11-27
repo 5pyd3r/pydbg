@@ -15,8 +15,8 @@ except ImportError:
 
 _TEST_DIR = os.path.dirname(os.path.abspath(__file__))
 
-# Same default as tests/test_wow64.py: `meson test` sets TEST_WOW64_TARGET_PATH,
-# plain pytest falls back to the out-of-band 32-bit target.
+# Same path tests/meson.build defines as target32_dir: `meson test` sets
+# TEST_WOW64_TARGET_PATH, plain pytest falls back to the out-of-band target.
 TEST_WOW64_TARGET = os.environ.get(
     "TEST_WOW64_TARGET_PATH",
     os.path.join(_TEST_DIR, "target", "simple_target32.exe"),
