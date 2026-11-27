@@ -105,6 +105,16 @@ _BREAKPOINT_CODES = frozenset((EXCEPTION_BREAKPOINT, STATUS_WX86_BREAKPOINT))
 # GetExitCodeProcess answers this while the process is still running.
 _STILL_ACTIVE = 259
 
+# The tracer's 100_000-event default is below what this slice costs on a CI
+# runner. loop_target32 statically links the CRT, so the startup that scans the
+# inherited environment block runs in the module and yields block events: a
+# 33 KB environment costs ~180_000 hits before `bump` is reached, against
+# ~27_000 for a developer's 3 KB one. With the default budget the run is cut off
+# during startup (reason `max_events`) while the stop block is planned and
+# armed, so the tracer never reaches it. 500_000 is ~3x the measured worst case
+# for the largest environment block CreateProcess may pass (32 KB).
+_TRACER_MAX_EVENTS = 500_000
+
 
 class _DictDecoder:
     """The decoder's one method `_decode_block` asks for.
@@ -356,6 +366,15 @@ class TestBblAcceptance(unittest.TestCase):
         The full plan is kept on purpose: the comparison then has to *exclude*
         the blocks the detour path could not install, which is what proves the
         reconciliation is over the instrumented window and not a tautology.
+
+        The tracer gets a larger event budget than the 100_000 default. The
+        32-bit target statically links the CRT, so the startup that scans the
+        inherited environment block runs in the module and produces block
+        events; a CI runner's environment is an order of magnitude larger than
+        a developer's, and the default budget then truncates the run during
+        startup. The stop block is planned and armed in that case, it is
+        simply never reached — so the budget, not the plan, is what has to
+        cover the target's startup (`_TRACER_MAX_EVENTS`).
         """
         from tests.helpers import teardown
 
@@ -368,7 +387,8 @@ class TestBblAcceptance(unittest.TestCase):
             # be missed by a race between resume and set_breakpoint.
             dbg.set_breakpoint(stop_address)
             recorded = []
-            tracer = _StopAtTracer(dbg, stop_address, module=module)
+            tracer = _StopAtTracer(dbg, stop_address, module=module,
+                                   max_events=_TRACER_MAX_EVENTS)
             self.assertGreater(tracer.plan(), 0, "the target planned no blocks")
             tracer.sink = recorded.append
 
@@ -379,6 +399,11 @@ class TestBblAcceptance(unittest.TestCase):
                                "the tracer hit no planned block")
             self.assertIn("reused caller breakpoints", summary.warnings,
                           "the stop breakpoint was not reused")
+            self.assertFalse(
+                summary.truncated,
+                f"the trace was cut short by {summary.reason} after "
+                f"{summary.events} events, before the shared stop block: a "
+                f"truncated run cannot reconcile the two slices")
             blocks = {event.rva for event in recorded}
             self.assertIn(stop_rva, blocks,
                           "the tracer did not reach the shared stop block")
