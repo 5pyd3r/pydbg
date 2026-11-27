@@ -143,6 +143,16 @@ class HardwareBreakpointManager:
                 except OSError:
                     pass
 
+    def _process_key(self, pid):
+        """The process a pid names, with None meaning the main target.
+
+        DR slots are shared four-per-process, not four-per-session, and "None"
+        is how the public API says "the main target". An explicit main pid and
+        None have to be the same key, or one process could hold two
+        breakpoints in the same slot while a child's slot blocked the parent.
+        """
+        return self._s.pid if pid is None else pid
+
     def set(self, addr, condition="x", length=1, slot=0, tid=None, pid=None):
         """Set a hardware breakpoint.
 
@@ -150,16 +160,16 @@ class HardwareBreakpointManager:
             addr: Breakpoint address.
             condition: 'x' (execute), 'w' (write), 'rw' (read/write).
             length: 1, 2, 4, or 8 bytes (8 only on 64-bit targets).
-            slot: Debug register slot 0-3 (globally unique across hw breakpoints).
+            slot: Debug register slot 0-3 (unique per process).
             tid: If given, arm only that thread; otherwise process-wide (all
                 threads + new threads via CREATE_THREAD replication).
             pid: Which process to arm (None = the main target). Its
                 architecture decides the 8-byte limit — not the main target's.
 
         Note:
-            Slots are globally unique across hardware breakpoints (a slot must
-            be freed with remove() before reuse; clear() only disables a slot
-            but keeps the record).
+            Slots are unique per process (a slot must be freed with remove()
+            before reuse in that process; clear() only disables a slot but
+            keeps the record).
 
         Returns:
             bp_id (int).
@@ -177,9 +187,13 @@ class HardwareBreakpointManager:
         if slot < 0 or slot > 3:
             raise BreakpointError(f"slot must be 0-3, got {slot}")
 
-        # Slot is globally unique across hardware breakpoints.
+        # Slots are occupied per process: a child's Dr0 says nothing about the
+        # parent's Dr0, so comparing the slot alone refused a free slot and
+        # made the main target's tracers trip over a child's breakpoint.
+        target = self._process_key(pid)
         for bp_id, bp in self._s.breakpoints.items():
-            if bp.kind == "hw" and bp.slot == slot:
+            if (bp.kind == "hw" and bp.slot == slot
+                    and self._process_key(bp.pid) == target):
                 raise BreakpointSlotBusy(
                     f"hardware breakpoint slot {slot} already in use (bp {bp_id})"
                 )
@@ -221,13 +235,26 @@ class HardwareBreakpointManager:
                       if bp.kind == "hw"]:
             self._s.breakpoints.pop(bp_id, None)
 
-    def clear(self, slot):
-        """Disarm a slot on all threads. The bp record is left for remove()."""
-        self._disarm_scope(None, slot)
+    def clear(self, slot, pid=None):
+        """Disarm a slot in one process (default: the main target).
 
-    def find(self, addr):
+        The bp record is left for remove(). 'pid' names the process whose
+        threads lose the slot: the child's Dr0 and the parent's Dr0 are
+        different registers, so clearing one must not touch the other.
+        """
+        self._disarm_scope(None, slot, pid)
+
+    def find(self, addr, pid=None):
+        """bp_id of the hardware breakpoint at addr in 'pid', or None.
+
+        pid=None means the main target. Both the address and the slot are
+        per-process, so a child's breakpoint at 0x401000 must not answer a
+        lookup for the parent's.
+        """
+        target = self._process_key(pid)
         for bp_id, bp in self._s.breakpoints.items():
-            if bp.kind == "hw" and bp.addr == addr:
+            if (bp.kind == "hw" and bp.addr == addr
+                    and self._process_key(bp.pid) == target):
                 return bp_id
         return None
 

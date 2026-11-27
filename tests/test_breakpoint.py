@@ -661,5 +661,216 @@ class TestBPDeliveryAPI(unittest.TestCase):
             teardown(dbg)
 
 
+class TestSoftwareBreakpointProcessScope(unittest.TestCase):
+    """A software breakpoint belongs to (process, address), not to an address."""
+
+    ADDR = 0x401000
+
+    @staticmethod
+    def _session_with_child():
+        from pydbg.core.session import ChildProcessInfo, DebugSession
+
+        session = DebugSession()
+        session.pid = 1000
+        session.process_handle = 0x1000
+        session.child_processes[2000] = ChildProcessInfo(
+            pid=2000, tid=2001, process_handle=0x2000, thread_handle=0x2001)
+        session.register_thread(1001, 1000)
+        session.register_thread(2001, 2000)
+        return session
+
+    def _patched(self, software, originals, writer):
+        """The Win32 calls a set/hit lifecycle makes, without a real target."""
+        from unittest import mock
+
+        return mock.patch.multiple(
+            software._pydbg,
+            create=True,
+            read_process_memory=mock.Mock(
+                side_effect=lambda h, addr, size: originals[h]),
+            virtual_protect_ex=mock.Mock(return_value=0x20),
+            write_process_memory=writer,
+            open_thread=mock.Mock(return_value=0x3000),
+            get_thread_context=mock.Mock(return_value={"rip": self.ADDR + 1}),
+            set_thread_context=mock.Mock(),
+            close_handle=mock.Mock())
+
+    def test_a_child_hit_restores_through_the_child_handle(self):
+        """Both processes hold 0x401000; the child's thread is the one that hit."""
+        from unittest import mock
+
+        software = extension_free_module("pydbg.breakpoint.software")
+        session = self._session_with_child()
+        mgr = software.SoftwareBreakpointManager(session)
+        originals = {0x1000: b"\x90", 0x2000: b"\x55"}
+        writer = mock.Mock()
+
+        with self._patched(software, originals, writer):
+            parent_bp = mgr.set_handle(0x1000, self.ADDR)
+            child_bp = mgr.set_handle(0x2000, self.ADDR)
+            writer.reset_mock()
+            outcome = mgr.handle_breakpoint_hit(2001, self.ADDR)
+
+        self.assertIs(outcome, software.HandleOutcome.HANDLED)
+        self.assertEqual(
+            writer.call_args_list,
+            [mock.call(0x2000, self.ADDR, b"\x55")],
+            "the child's hit restored a byte through another process's handle")
+        self.assertEqual(session.breakpoints[child_bp].hits, 1)
+        self.assertEqual(session.breakpoints[parent_bp].hits, 0,
+                         "the address-only lookup picked the parent's record")
+        self.assertEqual(
+            session.pending_single_step[2001][3], 0x2000,
+            "the re-arming single-step was scheduled against another process")
+
+    def test_a_thread_whose_pid_was_never_opened_still_dispatches(self):
+        """An unresolvable pid must not abort run(): fall back to the record.
+
+        session.tid_pid is filled from debug events, so it can name a process
+        this session never opened — a tid value reused by another process, or
+        a child that already exited. Raising here turned one unrecognised
+        thread into a failed event dispatch; the record's own handle is the
+        only identity left, so the hit degrades to it.
+        """
+        from unittest import mock
+
+        software = extension_free_module("pydbg.breakpoint.software")
+        session = self._session_with_child()
+        session.register_thread(3001, 9999)      # this pid was never opened
+        mgr = software.SoftwareBreakpointManager(session)
+        originals = {0x1000: b"\x90", 0x2000: b"\x55"}
+        writer = mock.Mock()
+
+        with self._patched(software, originals, writer):
+            mgr.set_handle(0x1000, self.ADDR)
+            writer.reset_mock()
+            outcome = mgr.handle_breakpoint_hit(3001, self.ADDR)
+
+        self.assertIs(outcome, software.HandleOutcome.HANDLED)
+        self.assertEqual(
+            writer.call_args_list,
+            [mock.call(0x1000, self.ADDR, b"\x90")],
+            "an unresolvable pid should degrade to the record's own handle")
+
+    def test_a_parent_hit_is_not_mistaken_for_the_child(self):
+        """The parent's record answers the parent's thread, not the child's."""
+        from unittest import mock
+
+        software = extension_free_module("pydbg.breakpoint.software")
+        session = self._session_with_child()
+        mgr = software.SoftwareBreakpointManager(session)
+        originals = {0x1000: b"\x90", 0x2000: b"\x55"}
+        writer = mock.Mock()
+
+        with self._patched(software, originals, writer):
+            parent_bp = mgr.set_handle(0x1000, self.ADDR)
+            mgr.set_handle(0x2000, self.ADDR)
+            writer.reset_mock()
+            outcome = mgr.handle_breakpoint_hit(1001, self.ADDR)
+
+        self.assertIs(outcome, software.HandleOutcome.HANDLED)
+        self.assertEqual(
+            writer.call_args_list,
+            [mock.call(0x1000, self.ADDR, b"\x90")],
+            "the parent's hit was restored through the child's handle")
+        self.assertEqual(session.breakpoints[parent_bp].hits, 1)
+
+
+class TestHardwareBreakpointProcessScope(unittest.TestCase):
+    """Dr0-3 are four slots per process, not four per session."""
+
+    ADDR = 0x401000
+
+    def setUp(self):
+        from pydbg.core.session import DebugSession
+
+        self.hardware = extension_free_module("pydbg.breakpoint.hardware")
+        self.session = DebugSession()
+        self.session.pid = 1000
+        self.session.tid = 1001
+        self.session.register_pid_arch(1000, 64)
+        self.session.register_pid_arch(2000, 64)
+        self.session.register_pid_arch(3000, 32)
+        self.threads = {1000: [{"tid": 1001}, {"tid": 1002}],
+                        2000: [{"tid": 2001}],
+                        3000: [{"tid": 3001}]}
+        for pid, threads in self.threads.items():
+            for thread in threads:
+                self.session.register_thread(thread["tid"], pid)
+        self.armed = []
+        self.cleared = []
+        self.manager = self.hardware.HardwareBreakpointManager(self.session)
+
+    def _record_armed(self, h_thread, slot, addr, condition, length, machine):
+        self.armed.append((h_thread, slot))
+
+    def _record_cleared(self, h_thread, slot, machine):
+        self.cleared.append((h_thread, slot))
+
+    def _extension(self):
+        from unittest import mock
+
+        return mock.patch.multiple(
+            self.hardware._pydbg,
+            create=True,
+            enumerate_threads=mock.Mock(
+                side_effect=lambda pid: self.threads[pid]),
+            open_thread=mock.Mock(side_effect=lambda tid: tid),
+            close_handle=mock.Mock(),
+            set_hw_breakpoint=mock.Mock(side_effect=self._record_armed),
+            clear_hw_breakpoint=mock.Mock(side_effect=self._record_cleared))
+
+    def test_the_same_slot_can_belong_to_two_processes(self):
+        with self._extension():
+            parent_bp = self.manager.set(self.ADDR, "x", 1, slot=0)
+            child_bp = self.manager.set(self.ADDR, "x", 1, slot=0, pid=2000)
+        self.assertNotEqual(parent_bp, child_bp)
+        self.assertEqual(self.manager.find(self.ADDR), parent_bp)
+        self.assertEqual(self.manager.find(self.ADDR, pid=2000), child_bp)
+        self.assertEqual([h for h, _slot in self.armed], [1001, 1002, 2001],
+                         "the main target's Dr0 blocked the child's Dr0")
+
+    def test_one_process_cannot_clear_the_other_slot(self):
+        with self._extension():
+            main_bp = self.manager.set(self.ADDR, "x", 1, slot=0)
+            child_bp = self.manager.set(self.ADDR, "x", 1, slot=0, pid=2000)
+            self.manager.clear(0)
+            cleared_main = [h for h, _slot in self.cleared]
+            self.cleared.clear()
+            self.manager.clear(0, pid=2000)
+            cleared_child = [h for h, _slot in self.cleared]
+        self.assertEqual(cleared_main, [1001, 1002],
+                         "clearing the main target touched another process")
+        self.assertEqual(cleared_child, [2001],
+                         "the child's own slot could not be cleared")
+        self.assertEqual(self.manager.find(self.ADDR), main_bp)
+        self.assertEqual(self.manager.find(self.ADDR, pid=2000), child_bp)
+
+    def test_freeing_a_slot_in_one_process_leaves_the_other_occupied(self):
+        with self._extension():
+            main_bp = self.manager.set(self.ADDR, "x", 1, slot=0)
+            child_bp = self.manager.set(self.ADDR, "x", 1, slot=0, pid=2000)
+            self.manager.remove(child_bp)
+            self.assertIsNone(self.manager.find(self.ADDR, pid=2000))
+            with self.assertRaises(self.hardware.BreakpointSlotBusy):
+                self.manager.set(0x401100, "x", 1, slot=0)
+            reused = self.manager.set(0x401100, "x", 1, slot=0, pid=2000)
+        self.assertEqual(self.manager.find(self.ADDR), main_bp)
+        self.assertEqual(self.manager.find(0x401100, pid=2000), reused)
+
+    def test_four_slots_are_a_per_process_limit(self):
+        with self._extension():
+            for slot in range(4):
+                self.manager.set(0x400000 + slot, "x", 1, slot=slot)
+            with self.assertRaises(self.hardware.BreakpointSlotBusy):
+                self.manager.set(0x400100, "x", 1, slot=0)
+            child_bp = self.manager.set(0x400000, "x", 1, slot=0, pid=2000)
+        self.assertEqual(self.manager.find(0x400000, pid=2000), child_bp)
+
+    def test_eight_byte_length_is_still_refused_on_x86(self):
+        with self.assertRaises(self.hardware.BreakpointError):
+            self.manager.set(0x400000, "w", 8, slot=0, pid=3000)
+
+
 if __name__ == "__main__":
     unittest.main()

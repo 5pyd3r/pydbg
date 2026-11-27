@@ -13,6 +13,33 @@ except ImportError:
     _has_cython = False
 
 
+def _process_module():
+    """Import pydbg.core.process on a machine without the compiled extension.
+
+    The module imports `_pydbg` at module scope but only calls it from open();
+    the strict-path tests below never reach that call. A stand-in keeps them
+    runnable where the extension was never built (this worktree), instead of
+    skipping the one handle rule that needs no process at all.
+    """
+    import importlib
+
+    import pydbg
+
+    if _has_cython:
+        return importlib.import_module("pydbg.core.process")
+
+    import types
+
+    added = not hasattr(pydbg, "_pydbg")
+    if added:
+        pydbg._pydbg = types.ModuleType("pydbg._pydbg")
+    try:
+        return importlib.import_module("pydbg.core.process")
+    finally:
+        if added:
+            del pydbg._pydbg
+
+
 class TestProcessLifecycle(unittest.TestCase):
     """Integration tests for process creation and debug event loop."""
 
@@ -181,6 +208,49 @@ class TestDebuggerAPI(unittest.TestCase):
         # detach() closes + clears the main-session process handle
         dbg.detach(pid)
         self.assertIsNone(dbg._session.process_handle)
+
+
+class TestProcessHandleResolution(unittest.TestCase):
+    """The strict handle path answers with a handle or raises — never None."""
+
+    def test_the_strict_path_raises_when_no_target_is_attached(self):
+        """The old answer was None, which the caller handed to the extension."""
+        from pydbg.core.session import DebugSession
+        from pydbg.exceptions import ProcessError
+
+        process = _process_module()
+        session = DebugSession()
+        manager = process.ProcessManager(session)
+
+        with self.assertRaises(ProcessError) as caught:
+            manager.handle()
+        self.assertIn("No process handle", str(caught.exception))
+
+        # Naming the main pid is the same question and the same answer.
+        session.pid = 1000
+        with self.assertRaises(ProcessError):
+            manager.handle(1000)
+
+    def test_the_try_path_is_where_no_handle_yet_is_an_answer(self):
+        """ModuleResolver asks "can I read this?"; None is a valid reply."""
+        from pydbg.core.session import DebugSession
+
+        process = _process_module()
+        manager = process.ProcessManager(DebugSession())
+        self.assertIsNone(manager.try_handle(None))
+        self.assertIsNone(manager.try_handle(1000))
+
+    def test_a_debug_child_still_resolves_without_the_main_handle(self):
+        from pydbg.core.session import ChildProcessInfo, DebugSession
+
+        process = _process_module()
+        session = DebugSession()
+        session.pid = 1000
+        session.child_processes[2000] = ChildProcessInfo(
+            pid=2000, tid=2001, process_handle=0x2000, thread_handle=0x2001)
+        manager = process.ProcessManager(session)
+
+        self.assertEqual(manager.handle(2000), 0x2000)
 
 
 if __name__ == "__main__":

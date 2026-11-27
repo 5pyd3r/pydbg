@@ -49,12 +49,13 @@ class ProcessManager:
         """Return a process handle for the main target, a debug child, or a
         process already opened by pid via open().
 
-        Deliberately strict: a pid that was never opened is an error here.
-        This is the handle used by the paths that *write* to a process
-        (write_memory, protect_memory) and by terminate_process, where
-        opening an arbitrary pid on request would turn 'terminate the thing I
-        am debugging' into 'terminate whatever pid was passed'. Reading keeps
-        a separate, more permissive path — see read_handle.
+        Deliberately strict: a pid that was never opened is an error here, and
+        so is asking for the main target before one is attached. The strict
+        path used to return None for the latter, which the caller then handed
+        to the extension and failed somewhere inside the syscall; a missing
+        handle is a caller error and is named as one. Callers that legitimately
+        want "no handle yet" use try_handle() (None) or read_handle() (opens on
+        demand).
 
         'need' is the access mask a handle opened by open() must carry for
         this operation. The target's own handle and a debug child's are taken
@@ -62,7 +63,13 @@ class ProcessManager:
         mask this class chose.
         """
         if pid is None or pid == self._s.pid:
-            return self._s.process_handle
+            target = self._s.process_handle
+            if target is None:
+                raise ProcessError(
+                    "No process handle: no target is attached. Call "
+                    "create_process()/attach() first; read_handle() and "
+                    "try_handle() are the paths that may run without one.")
+            return target
         child = self._s.child_processes.get(pid)
         if child is not None:
             return child.process_handle

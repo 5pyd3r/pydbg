@@ -1,7 +1,8 @@
 """SoftwareBreakpointManager — int3 software breakpoints."""
 
 from .. import _pydbg
-from ..exceptions import BreakpointError
+from ..core.process import ProcessManager
+from ..exceptions import BreakpointError, ProcessError
 from .model import Breakpoint
 from .outcome import HandleOutcome
 
@@ -174,6 +175,33 @@ class SoftwareBreakpointManager:
         """Write INT3 byte at addr using explicit handle."""
         self._write_protected(h_process, addr, self._INT3, "write_int3")
 
+    def _process_handle_for_thread(self, tid):
+        """The handle of the process the thread 'tid' belongs to, or None.
+
+        ProcessManager is the one place a pid becomes a handle (the target, a
+        debug child, or a process opened by pid), which is the same rule
+        Debugger._get_process_handle applies. `session.tid_pid` is recorded
+        from every debug event, so the process of a thread that produced one
+        is usually known.
+
+        None means this session cannot name the thread's process: no event has
+        named the thread, or its pid was never opened here (a tid value reused
+        by another process, a child that already exited). The caller then uses
+        the breakpoint record's own handle, which is the only process identity
+        left. Raising instead would turn one unrecognised thread into a failed
+        event dispatch — run() aborts mid-debug — for a lookup that has a
+        defined answer available.
+        """
+        pid = self._s.tid_pid.get(tid)
+        if pid is None:
+            return None
+        try:
+            # The handle is used to restore a byte, so ask for write access.
+            return ProcessManager(self._s).handle(
+                pid, need=ProcessManager.NEED_VM_WRITE)
+        except ProcessError:
+            return None
+
     def handle_breakpoint_hit(self, tid, addr):
         """Handle breakpoint lifecycle: remove INT3, set single-step, schedule restore.
 
@@ -182,7 +210,13 @@ class SoftwareBreakpointManager:
         DEGRADED when the INT3 was re-armed but the thread could not be
         prepared (last_error says why).
         """
-        bp_id = self.find(addr)
+        # Which process the hit belongs to has to be answered before the
+        # lookup. Addresses are process-local, so an address-only find()
+        # answers with whichever process armed that address first: when a
+        # parent and a child both stop at 0x401000, the child's hit would
+        # restore the parent's byte and leave the child's INT3 in place.
+        h_process = self._process_handle_for_thread(tid)
+        bp_id = self.find(addr, h_process)
         if bp_id is None:
             return HandleOutcome.NOT_MINE
 
@@ -194,7 +228,10 @@ class SoftwareBreakpointManager:
         bp.hits += 1
 
         bp_addr = bp.addr
-        h_process = bp.h_process or self._s.process_handle
+        # A thread whose process this session cannot name resolves to None
+        # (no event named it, or its pid was never opened); the record's own
+        # handle is then the only process identity left for this hit.
+        h_process = h_process or bp.h_process or self._s.process_handle
 
         # Restore original byte (remove INT3)
         self._restore_byte_handle(h_process, bp_addr, bp.original)
