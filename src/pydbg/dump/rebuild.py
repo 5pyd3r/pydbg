@@ -104,14 +104,15 @@ def rebuild_pe(dumped, *, entry_point=None, validate=True):
             f"cannot be rebuilt from zero-filled bytes")
 
     imports = list(pe.imports)
-    warnings = _section_gap_warnings(pe, dumped.gaps)
-    import_range = _import_directory_range(pe)
-    if import_range is not None and any(
-            _overlaps(gap, *import_range) for gap in dumped.gaps):
-        warnings.append('imports_unreadable')
-
     try:
+        # The report's size_of_image and the gap warnings below read the same
+        # layout the writer uses, so there is one source for the copy window.
         layout = file_layout(pe)
+        warnings = _section_gap_warnings(pe, layout, dumped.gaps)
+        import_range = _import_directory_range(pe)
+        if import_range is not None and any(
+                _overlaps(gap, *import_range) for gap in dumped.gaps):
+            warnings.append('imports_unreadable')
         data = write_pe(pe, dumped.data, entry_point=entry_point)
     except ValueError as e:
         raise RebuildError(f"cannot lay out the image: {e}") from e
@@ -173,17 +174,18 @@ def _import_directory_range(pe):
     return start, start + (directory.size or _IMPORT_DESCRIPTOR_SIZE)
 
 
-def _section_gap_warnings(pe, gaps):
+def _section_gap_warnings(pe, layout, gaps):
     """One "gap in <section>" per section whose copied data has a hole.
 
-    The extent is the writer's: `virtual_size or span` bytes starting at
-    VirtualAddress are what it copies into the file, so a hole outside that
-    window is not section corruption and does not get named here.
+    The extent is the layout's: `SectionLayout.size` bytes starting at its
+    `virtual_address` are what the writer copies, so a hole outside that
+    window is not section corruption and does not get named here. The names
+    come from the headers because a layout carries the destination, not the
+    identity.
     """
     warnings = []
-    for section in pe.sections:
+    for header, section in zip(pe.sections, layout.sections):
         start = section.virtual_address
-        size = section.virtual_size or section.span
-        if any(_overlaps(gap, start, start + size) for gap in gaps):
-            warnings.append(f"gap in {section.name}")
+        if any(_overlaps(gap, start, start + section.size) for gap in gaps):
+            warnings.append(f"gap in {header.name}")
     return warnings

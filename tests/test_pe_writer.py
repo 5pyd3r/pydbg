@@ -9,6 +9,7 @@ reader, which is the independent check: nothing here re-derives the expected
 bytes the way the writer lays them out.
 """
 
+import hashlib
 import struct
 import unittest
 
@@ -18,6 +19,13 @@ TEXT_RVA = 0x1000
 RDATA_RVA = 0x2000
 IMAGE_BASE = 0x140000000
 FILE_ALIGN = 0x200
+
+# SHA-256 of write_pe() over the fixture image. Reading the result back with
+# the parser — what every other test here does — cannot see a change that still
+# parses, such as a moved pad byte or a reordered field; this digest can.
+PINNED_WRITTEN_SHA256 = (
+    "aa98d8ecfd0001c43b459adb96baeb61bade391100af329c7b8cfd131d4f9da0")
+PINNED_WRITTEN_SIZE = 0xC00
 
 
 def loaded_layout_image():
@@ -34,6 +42,24 @@ def parse_loaded(data, image_base=IMAGE_BASE):
 
 class TestWritePEFileLayout(unittest.TestCase):
     """Sections moved to file offsets keep their identity and contents."""
+
+    def test_the_written_bytes_are_pinned_byte_for_byte(self):
+        """The public writer path stays byte-identical across refactors.
+
+        The fixture is built by tests.pe_builder and written through
+        `write_pe`; a digest over the whole result is the oracle no parser
+        round-trip can provide, because it sees padding and field placement
+        that still parse. This test is what makes "no behaviour change"
+        checkable: it must pass unchanged on both sides of a layout refactor.
+        """
+        from pydbg.pe import write_pe
+
+        data, _ = loaded_layout_image()
+        written = write_pe(parse_loaded(data), data)
+
+        self.assertEqual(len(written), PINNED_WRITTEN_SIZE)
+        self.assertEqual(hashlib.sha256(written).hexdigest(),
+                         PINNED_WRITTEN_SHA256)
 
     def test_round_trip_preserves_sections_entry_and_imports(self):
         from pydbg.pe import PE, write_pe

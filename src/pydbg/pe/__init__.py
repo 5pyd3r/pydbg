@@ -98,6 +98,9 @@ class PE:
         self.dos_header = parser.parse_dos_header()
         self.file_header, self.optional_header, sections_offset = (
             parser.parse_nt_headers(self.dos_header.e_lfanew))
+        # Where the parse found the section table. file_layout reports this
+        # offset instead of deriving a second one from the raw header.
+        self._sections_offset = sections_offset
 
         self.sections = parser.parse_sections(
             sections_offset, self.file_header.number_of_sections)
