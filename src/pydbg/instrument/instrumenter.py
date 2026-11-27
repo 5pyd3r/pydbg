@@ -98,7 +98,7 @@ class Instrumenter:
         from . import codegen
         from .templates import build_stub, build_trampoline
 
-        mode = "x64" if getattr(self._s, 'target_arch', 64) == 64 else "x86"
+        mode = "x64" if self._s.target_arch == 64 else "x86"
         engine = DisasmEngine(mode=mode)
 
         # 1. 读取 ≥5 字节原始代码（指令边界）

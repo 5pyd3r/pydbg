@@ -157,6 +157,28 @@ class TestWow64Registers(unittest.TestCase):
 
 @unittest.skipUnless(_HAS_TARGET and _wow64_available(),
                      "environment: 32-bit target and 64-bit host")
+class TestWow64Assembler(unittest.TestCase):
+    def test_assembler_follows_the_32_bit_target(self):
+        """The assembler is built before any target exists, so it asks the
+        session on every call. It used to latch the host's pointer width,
+        which encoded x64 bytes for a WOW64 target.
+        """
+        from pydbg import Debugger
+        from tests.helpers import teardown
+
+        dbg = Debugger()
+        try:
+            _launch(dbg)
+            self.assertEqual(dbg._session.target_arch, 32)
+            self.assertEqual(dbg.assembler.mode(), "x86")
+            # inc eax: 0x40 on x86, REX-prefixed 0xFF 0xC0 on x64.
+            self.assertEqual(dbg.assembler.assemble("inc eax"), b'\x40')
+        finally:
+            teardown(dbg)
+
+
+@unittest.skipUnless(_HAS_TARGET and _wow64_available(),
+                     "environment: 32-bit target and 64-bit host")
 class TestWow64SoftwareBreakpoint(unittest.TestCase):
     def test_run_auto_handles_wx86_breakpoint(self):
         from pydbg import Debugger

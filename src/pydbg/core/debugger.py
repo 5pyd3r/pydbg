@@ -98,7 +98,10 @@ class Debugger:
         self.modules = ModuleResolver(self._session)
         self.symbols = SymbolResolver(self._session)
         self.disasm = DisasmEngine(self._session)
-        self.assembler = Assembler()
+        # Handed the session, not a mode: the assembler resolves its mode per
+        # call, so a WOW64 target reached after this line is encoded 32-bit
+        # instead of with the host's pointer width.
+        self.assembler = Assembler(session=self._session)
         self.step_tracer = StepTracer(self._session)
         # Trace tracers are created by the caller, not here; once one is handed
         # this debugger it registers itself and close() disarms it (ADR-0004).
