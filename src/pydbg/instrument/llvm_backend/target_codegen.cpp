@@ -166,7 +166,11 @@ TargetCodeGen::~TargetCodeGen() = default;
 
 std::vector<uint8_t> TargetCodeGen::emitObjectFile(llvm::Module* module) {
     if (!targetMachine_) {
-        lastError_ = "TargetMachine not initialized";
+        /* The constructor already recorded the real cause (unknown triple or
+         * a failed createTargetMachine). Overwriting it here replaced that
+         * specific reason with a generic symptom the caller cannot act on. */
+        if (lastError_.empty())
+            lastError_ = "TargetMachine not initialized";
         return {};
     }
 
@@ -227,13 +231,27 @@ bool TargetCodeGen::applyRelocations(std::vector<uint8_t>& code,
         for (const auto& reloc : sec.relocations()) {
             auto sym = reloc.getSymbol();
             auto nameOrErr = sym->getName();
-            if (!nameOrErr) continue;
+            if (!nameOrErr) {
+                /* Every relocation is a potential call site. If its symbol
+                 * cannot even be named we can neither patch it nor prove it
+                 * needs no patch; skipping it left E8 00 00 00 00 in .text
+                 * and let compile() report success. Fail instead. */
+                lastError_ = "Cannot read the name of a relocation symbol in '" +
+                             secName->str() + "'";
+                return false;
+            }
 
             std::string symName = nameOrErr->str();
 
             /* Skip section symbols, debug symbols, etc. */
             auto flagsOrErr = sym->getFlags();
-            if (!flagsOrErr) continue;
+            if (!flagsOrErr) {
+                /* Without the flags we cannot tell whether this relocation
+                 * refers to an external symbol, so we cannot rule out an
+                 * unpatched placeholder. Refuse rather than ship one. */
+                lastError_ = "Cannot read the flags of symbol '" + symName + "'";
+                return false;
+            }
             uint32_t flags = *flagsOrErr;
             if (!(flags & llvm::object::SymbolRef::SF_Undefined))
                 continue;

@@ -82,6 +82,12 @@ std::vector<uint8_t> HookCompiler::compile(const std::string& cSource,
 
     // 4. IR → machine code with symbol injection
     TargetCodeGen codegen(targetTriple_);
+    // An unknown triple fails in the constructor and compile() clears
+    // lastError_ on entry, so ask before it can erase the specific reason.
+    if (!codegen.getLastError().empty()) {
+        lastError_ = "TargetCodeGen: " + codegen.getLastError();
+        return {};
+    }
     auto code = codegen.compile(module.get(), symbols, baseAddress);
     if (code.empty()) {
         lastError_ = "TargetCodeGen: " + codegen.getLastError();

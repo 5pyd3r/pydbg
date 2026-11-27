@@ -8,11 +8,15 @@ import time
 import unittest
 
 _TEST_DIR = os.path.dirname(os.path.abspath(__file__))
-TEST_WOW64_TARGET = os.environ.get(
-    "TEST_WOW64_TARGET_PATH",
-    os.path.join(_TEST_DIR, "target", "simple_target32.exe"),
-)
-_HAS_TARGET = os.path.exists(TEST_WOW64_TARGET)
+
+# simple_target32.exe is a product of scripts/build-target32.ps1 (meson has no
+# x86 toolchain) and is not committed. tests/meson.build defines its path once
+# and passes it here; a fallback path duplicated in this module used to hide a
+# missing file behind "environment:" instead of naming the script that builds
+# it.
+_WOW64_TARGET_VAR = "TEST_WOW64_TARGET_PATH"
+TEST_WOW64_TARGET = os.environ.get(_WOW64_TARGET_VAR)
+_HAS_TARGET = bool(TEST_WOW64_TARGET) and os.path.exists(TEST_WOW64_TARGET)
 
 TEST_THREADED_TARGET = os.environ.get(
     "TEST_THREADED_TARGET_PATH",
@@ -24,6 +28,25 @@ _HAS_THREADED = os.path.exists(TEST_THREADED_TARGET)
 def _wow64_available():
     """True only on 64-bit Windows (a 32-bit host cannot debug WOW64)."""
     return struct.calcsize("P") == 8 and sys.platform == "win32"
+
+
+def _wow64_skip_reason():
+    """Why the WOW64 classes cannot run, in the conftest skip families.
+
+    A 32-bit host cannot exercise them at all, so that reason wins; on a
+    capable host a missing target must say `target not built:` and name the
+    script, not masquerade as an environment limitation.
+    """
+    if not _wow64_available():
+        return "environment: 64-bit Windows host"
+    if not TEST_WOW64_TARGET:
+        return ("target not built: simple_target32.exe "
+                "(scripts/build-target32.ps1); set " + _WOW64_TARGET_VAR)
+    return ("target not built: " + TEST_WOW64_TARGET +
+            " (scripts/build-target32.ps1)")
+
+
+_WOW64_SKIP = _wow64_skip_reason()
 
 
 def _launch(dbg, target=None, run=False):
@@ -114,8 +137,7 @@ def _export_address(dbg, exe_path, base, name):
     raise AssertionError(f"export {name} not found in {exe_path}")
 
 
-@unittest.skipUnless(_HAS_TARGET and _wow64_available(),
-                     "environment: 32-bit target and 64-bit host")
+@unittest.skipUnless(_HAS_TARGET and _wow64_available(), _WOW64_SKIP)
 class TestWow64Registers(unittest.TestCase):
     def test_get_registers_returns_x86_names(self):
         from pydbg import Debugger
@@ -155,8 +177,7 @@ class TestWow64Registers(unittest.TestCase):
             teardown(dbg)
 
 
-@unittest.skipUnless(_HAS_TARGET and _wow64_available(),
-                     "environment: 32-bit target and 64-bit host")
+@unittest.skipUnless(_HAS_TARGET and _wow64_available(), _WOW64_SKIP)
 class TestWow64Assembler(unittest.TestCase):
     def test_assembler_follows_the_32_bit_target(self):
         """The assembler is built before any target exists, so it asks the
@@ -177,8 +198,7 @@ class TestWow64Assembler(unittest.TestCase):
             teardown(dbg)
 
 
-@unittest.skipUnless(_HAS_TARGET and _wow64_available(),
-                     "environment: 32-bit target and 64-bit host")
+@unittest.skipUnless(_HAS_TARGET and _wow64_available(), _WOW64_SKIP)
 class TestWow64SoftwareBreakpoint(unittest.TestCase):
     def test_run_auto_handles_wx86_breakpoint(self):
         from pydbg import Debugger
@@ -264,8 +284,7 @@ class TestWow64SoftwareBreakpoint(unittest.TestCase):
             teardown(dbg)
 
 
-@unittest.skipUnless(_HAS_TARGET and _wow64_available(),
-                     "environment: 32-bit target and 64-bit host")
+@unittest.skipUnless(_HAS_TARGET and _wow64_available(), _WOW64_SKIP)
 class TestWow64HardwareBreakpoint(unittest.TestCase):
     def test_dr0_execute_breakpoint(self):
         from pydbg import Debugger
@@ -309,8 +328,7 @@ class TestWow64HardwareBreakpoint(unittest.TestCase):
             teardown(dbg)
 
 
-@unittest.skipUnless(_HAS_TARGET and _wow64_available(),
-                     "environment: 32-bit target and 64-bit host")
+@unittest.skipUnless(_HAS_TARGET and _wow64_available(), _WOW64_SKIP)
 class TestWow64Modules(unittest.TestCase):
     def test_the_event_fallback_covers_what_psapi_cannot_see_yet(self):
         """The fallback on a real target, with no mock in the way.
@@ -376,8 +394,7 @@ class TestWow64Modules(unittest.TestCase):
             teardown(dbg)
 
 
-@unittest.skipUnless(_HAS_TARGET and _wow64_available(),
-                     "environment: 32-bit target and 64-bit host")
+@unittest.skipUnless(_HAS_TARGET and _wow64_available(), _WOW64_SKIP)
 class TestWow64Attach(unittest.TestCase):
     def test_attach_to_running_x86_target(self):
         from pydbg import Debugger

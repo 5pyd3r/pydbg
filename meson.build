@@ -1,6 +1,9 @@
 project('pydbg', 'c', 'cpp', 'cython',
   version: '0.1.0',
-  meson_version: '>=0.60',
+  # meson.options is only read from Meson 1.1 on; older Meson looks for
+  # meson_options.txt only, so a >=0.60 floor promised a configure step that
+  # cannot see our options at all.
+  meson_version: '>=1.1',
   default_options: [
     'c_std=c11',
     'cpp_std=c++17',
