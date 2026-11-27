@@ -10,15 +10,120 @@ instead of its type.
 This module is the single seam for those questions; the tracers keep their
 public behaviour and delegate here.
 
+It also owns the shell every tracer's `run()` shares: the `dbg.run()` call and
+the translation of how it ended into a stop reason, the `attach_trace()`
+handshake that puts a tracer in its debugger's teardown chain, and the cleanup
+warnings a `disarm()` reports. A tracer keeps what it arms, what it records and
+what it summarises; only "what a stop reason means" lives here, so that changes
+in one place.
+
 Importing it stays extension-free (ADR-0001): the busy-slot exception lives
 beside the hardware manager, which imports `_pydbg`, so that import happens
 inside `arm_free_slot()` — only a caller with a live target can reach it.
 """
 
-from ..exceptions import BreakpointError, PydbgError
+from ..core.status import ExitReason
+from ..exceptions import (
+    BreakpointError, ProcessError, PydbgError,
+    TimeoutError as PydbgTimeoutError,
+)
 
 # GetExitCodeProcess answers this while the process is still running.
 _STILL_ACTIVE = 259
+
+# Why a run stopped. These are exported so callers compare against a name and
+# not a string literal that can drift. Two of them mean the trace is partial.
+# They live here, beside the shell that translates them, because every tracer
+# can end with one: a change to what a stop reason means has one place to
+# change. `pydbg.trace.bbl` re-exports them under their published names.
+STOP_MAX_EVENTS = "max_events"
+STOP_TARGET_EXITED = "target_exited"
+STOP_IDLE_TIMEOUT = "idle_timeout"
+STOP_NO_BLOCKS = "no traceable blocks"
+STOP_NO_MODULE = "no module"
+STOP_NO_TARGET = "no target"
+
+# The reasons that mean "a budget cut this run short". `TraceSummary.truncated`
+# and `ProbeSummary.truncated` are derived from this set, so neither can
+# disagree with `reason`.
+TRUNCATED_REASONS = frozenset((STOP_MAX_EVENTS, STOP_IDLE_TIMEOUT))
+
+
+def attach_tracer(dbg, tracer):
+    """Join `dbg`'s teardown chain when it is a lifecycle owner (ADR-0004).
+
+    A real `Debugger` owns its tracers and disarms them on close(); a fake or
+    proxy without `attach_trace()` is simply not a lifecycle owner, and a
+    tracer must not require one to be constructed.
+    """
+    attach = getattr(dbg, "attach_trace", None)
+    if callable(attach):
+        attach(tracer)
+
+
+def run_target(dbg, on_event, max_idle_timeouts):
+    """Drive the target and name how the run loop ended.
+
+    Every tracer's `run()` makes the same call and the same attribution: a
+    timeout is a truncated stop rather than an exception the caller sees, and
+    the target exiting is named so the summary says why nothing can be
+    restored afterwards.
+
+    Returns:
+        A STOP_* constant for the outcomes this shell owns, or None when the
+        debugger stopped for a reason the tracer recorded itself (its callback
+        asked to stop) — a None must not overwrite that reason.
+    """
+    try:
+        status = dbg.run(on_event, max_idle_timeouts=max_idle_timeouts)
+    except PydbgTimeoutError:
+        return STOP_IDLE_TIMEOUT
+    if status is not None and status.reason is ExitReason.TARGET_EXITED:
+        return STOP_TARGET_EXITED
+    return None
+
+
+def remove_breakpoints(dbg, owned, recheck_removed=True):
+    """Remove the breakpoints a tracer owns; return the cleanup warnings.
+
+    `owned` is an iterable of (address, bp_id) pairs in the order they were
+    armed. A failed removal is not assumed harmless. When the target is gone
+    the bytes and debug registers went with it, so that is reported once as
+    "target exited during cleanup" and the remaining removals are abandoned —
+    every one would fail the same way. A live target's failed removal is
+    "breakpoint left".
+
+    `recheck_removed` re-asks `find_breakpoint()` for every address whose
+    removal did not raise; a record that survived is a real leftover. A tracer
+    that has never re-asked passes False, because re-asking changes what it
+    reports for a debugger that returns without removing.
+
+    Returns:
+        tuple[str, ...]: the distinct warnings, in encounter order.
+    """
+    owned = tuple(owned)
+    warnings = []
+    failed_addresses = set()
+    exited = False
+    for address, bp_id in owned:
+        try:
+            dbg.remove_breakpoint(bp_id)
+        except (BreakpointError, ProcessError):
+            if target_exited(dbg):
+                warnings.append("target exited during cleanup")
+                exited = True
+                break
+            failed_addresses.add(address)
+            warnings.append("breakpoint left")
+
+    if recheck_removed and not exited:
+        for address, _bp_id in owned:
+            if address in failed_addresses:
+                continue
+            if dbg.find_breakpoint(address) is not None:
+                warnings.append("breakpoint left")
+                break
+    return tuple(dict.fromkeys(warnings))
 
 
 def find_module(dbg, module):

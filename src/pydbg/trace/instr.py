@@ -36,15 +36,14 @@ from ..constants import (
     EXCEPTION_BREAKPOINT, EXCEPTION_SINGLE_STEP, STATUS_WX86_BREAKPOINT,
     STATUS_WX86_SINGLE_STEP,
 )
-from ..core.status import ExitReason
 from ..disasm import DisasmEngine
 from ..exceptions import (
     PydbgError, ThreadError, TimeoutError as PydbgTimeoutError,
 )
 from . import _shared
 from .bbl import (
-    STOP_IDLE_TIMEOUT, STOP_MAX_EVENTS, STOP_NO_MODULE, STOP_NO_TARGET,
-    STOP_TARGET_EXITED, TraceSummary,
+    STOP_MAX_EVENTS, STOP_NO_MODULE, STOP_NO_TARGET, STOP_TARGET_EXITED,
+    TraceSummary,
 )
 from .format import INSTR, TraceEvent
 
@@ -133,12 +132,7 @@ class InstructionTracer:
         self._engine_cache = None
         # Thread handle opened once per run(); see `run()` for why.
         self._h_thread = None
-        # Handed a Debugger, a tracer is part of that debugger's teardown
-        # chain (ADR-0004); a fake or proxy without attach_trace() is simply
-        # not a lifecycle owner.
-        attach = getattr(dbg, "attach_trace", None)
-        if callable(attach):
-            attach(self)
+        _shared.attach_tracer(dbg, self)
 
     # ── module resolution ──────────────────────────────────────
 
@@ -235,15 +229,10 @@ class InstructionTracer:
 
             self._set_tf()
             self.dbg.continue_event(pid, tid)
-            try:
-                status = self.dbg.run(self._on_event,
-                                      max_idle_timeouts=max_idle_timeouts)
-            except PydbgTimeoutError:
-                self._reason = STOP_IDLE_TIMEOUT
-            else:
-                if (status is not None
-                        and status.reason is ExitReason.TARGET_EXITED):
-                    self._reason = STOP_TARGET_EXITED
+            reason = _shared.run_target(
+                self.dbg, self._on_event, max_idle_timeouts)
+            if reason is not None:
+                self._reason = reason
             return self._summary(started)
         finally:
             self._close_thread(h_thread)
