@@ -27,6 +27,19 @@
 
 _核对：2026-11-28_
 
+## 注入（inject）
+
+- **WOW64 目标上的 APC 受 Windows 限制**：`QueueUserAPC` 跨位数不被支持（MS 文档：地址会不正确、
+  应用会崩溃）。实测 64 位宿主向 WOW64 线程投递时走 native dispatcher——`ret` 或 64 位编码能跑，
+  但 32 位专属编码（如 `A3 moffs32`）会被当成 64 位 moffs 解释并崩溃；把 `kernel32!Sleep` 当 APC
+  也会崩。
+  因此 `pydbg.inject.queue_apc` 只校验并下发 32 位地址；**能作为 APC 执行的函数体必须与两种位数都
+  兼容**（例如 `B8 imm32` + `C7 00 imm32`）。要执行 32 位专属代码，需在目标内注入 stub 由 32 位
+  上下文自己调用 `QueueUserAPC`——不在当前范围（见 `docs/analysis-coverage.md` §13.2）。
+  注入 DLL 与 shellcode 不受此限制。
+
+_核对：2026-11-28_
+
 ## 调试核心
 
 - `set_hw_breakpoint` 的 8 字节校验按目标进程架构；跨架构子进程需显式传 `pid`。

@@ -797,6 +797,10 @@ DebuggerCheck(name, detected, evidence)
   （`enum_modules(arch=32)`，见 §13.2 的模块表能力），再从目标的导出表解析。
   禁止在 64 位宿主里解析"目标要执行的函数地址"。
 - `queue_apc` 的 APC 函数地址同样必须是 32 位地址；`suspend_process` / `resume_process` 不需要改。
+  但 **APC 的函数体本身要与两种位数都兼容**：`QueueUserAPC` 跨位数不被 Windows 支持（MS 文档写明
+  地址会不正确、应用会崩溃），实测 64 位宿主投递到 WOW64 线程时走 native dispatcher，32 位专属编码
+  会被当 64 位解释并崩溃。库只做地址校验与下发；要执行 32 位专属代码，需在目标内注入 stub 由 32 位
+  上下文自己投递，不在本次范围（记录见 `KNOWN_ISSUES` §注入）。
 - 拒绝同样要有名字：目标架构未知、或 32 位模块表尚未出现（loader 断点边界）时抛 `InjectionError`，
   不返回"成功"。
 
