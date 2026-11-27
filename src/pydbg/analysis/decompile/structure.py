@@ -1,35 +1,33 @@
 """S4 -- turn a function's CFG into structured pseudo-C, or say why not.
 
 The input is the recovered IR (S1/S2) plus the CFG's successor tuples; the
-output is a small AST that `render` prints. Structuring is deliberately
+output is a small AST (`ast`) that `render` prints. Structuring is deliberately
 conservative: every construct below is emitted only when the graph has the
-canonical shape for it, and anything else falls back to the flat
-label/`goto` form P5 already produced. A confident-looking `if` over a graph
-that is not one would hide the very thing a decompiler is supposed to expose.
+canonical shape for it, and anything else falls back to the flat label/`goto`
+form P5 already produced. A confident-looking `if` over a graph that is not one
+would hide the very thing a decompiler is supposed to expose.
 
-What is recognised:
+This module owns the decision of how blocks nest. The facts it reads come from
+`graph` (successors, dominators, post-dominators, natural loops, irreducible
+regions) and `switch` (which indirect jumps are switches, and their cases);
+normalisation comes from `blocks`, and a condition's spelling from
+`conditions`.
 
-- **Dominators** by the Cooper-Harvey-Kennedy iterative algorithm (immediate
-  dominators over reverse postorder).
-- **Natural loops** from back edges -- an edge whose target dominates its
-  source. The header is the target. A loop is a ``while`` when its latch jumps
-  back unconditionally and the header tests at the top; it is a ``do-while``
-  when the latch itself is the conditional branch back to the header, because
-  then the test is at the bottom by construction.
+What is recognised here:
+
 - **if/else** from the nearest common post-dominator of the two successors.
   The fall-through successor is the *then* arm (that is how the layout reads),
   so the printed condition is the negation of the branch's: `jne L1` with the
   fall-through body first becomes `if (==)`.
 - **break/continue** for branches inside a loop that target its exit or its
   condition block instead of an enclosing merge.
-- **switch** only when a `SlotTable` from the analysis names a table whose
-  entries all land on blocks of this function *and* an immediate-dominator
-  chain of pure `cmp`+`jcc` bounds checks leads to the indirect jump. The case
-  labels are the table's slot indices, not reconstructed source values: the
-  analysis knows the table's order, not the original `case` constants.
-- **Irreducible regions** -- a strongly connected component with more than one
-  node that no natural loop covers -- are left flat (labels and `goto`) and
-  reported as ``irreducible``.
+- **while** when a natural loop's latch jumps back unconditionally and the
+  header tests at the top; **do-while** when the latch itself is the
+  conditional branch back to the header, because then the test is at the bottom
+  by construction. The loop set itself is `graph`'s answer.
+- **switch** when `switch` has a plan for the block: its case bodies are parsed
+  as sub-regions, and a `break` is added where C would otherwise fall into the
+  next label.
 
 Two honesty rules are carried over from P5 and are the reason for several
 details below:
@@ -42,23 +40,20 @@ details below:
   `eflags.*` condition. Condition folding is limited to comparisons whose
   operator is unambiguous (`==`, `!=` and the signed relations) and only when
   the `cmp` is the statement immediately before the branch in the same block.
-
-Blocks themselves are normalised first. `build_function_cfg` deliberately
-re-decodes across a later block's start (its blocks overlap), which is harmless
-for a flat listing and fatal for nesting: a loop header would appear twice. The
-normalisation splits a block at the next known start and turns its tail into a
-fall-through edge.
 """
 
 from dataclasses import dataclass
 
-from ..cfg import CFGBlock, FALL, INDIRECT, JCC, JMP
-from .expr import family
-from .ir import BinExpr, Branch, Cmp, Const, Reg, UnExpr
-
-# A virtual exit node for the post-dominator dataflow. Every block whose flow
-# leaves the function (a return, an unresolved indirect edge) points here.
-EXIT = -1
+from ..cfg import FALL, JMP
+from .ast import (
+    Break, Continue, DoWhile, Flat, If, Seq, Statements, Structured, Switch,
+    While,
+)
+from .blocks import _block_addresses, _block_end
+from .conditions import fold_compare, negate
+from .graph import GraphFacts
+from .ir import Branch, Cmp
+from .switch import SwitchRecognition
 
 # Recursion budget for the region parser. Each nesting level costs a `_region`
 # call made from `_build_if`/`_build_loop`/`_build_switch`, i.e. a few Python
@@ -68,171 +63,6 @@ EXIT = -1
 # keeps the worst case near 200 frames while leaving real functions structured;
 # past it the flat label/goto form and a warning are the honest answer.
 _MAX_REGION_DEPTH = 64
-
-# ── normalisation ──────────────────────────────────────────────
-
-
-def normalize_blocks(blocks):
-    """Split overlapping CFG blocks at known block starts.
-
-    `build_function_cfg` walks a run until a branch instead of stopping at a
-    start it has already discovered, so the block at the entry can contain the
-    instructions of a later block. That is fine for "which bytes are decoded"
-    and wrong for nesting, where the later block must own its instructions
-    once. The split keeps the union of instructions identical; the tail
-    becomes an explicit fall-through edge to the start it was cut at.
-    """
-    starts = set(blocks)
-    normalised = {}
-    for rva in sorted(blocks):
-        block = blocks[rva]
-        kept = []
-        split_at = None
-        for addr in block.instructions:
-            if addr != rva and addr in starts:
-                split_at = addr
-                break
-            kept.append(addr)
-        if split_at is None or not kept:
-            normalised[rva] = block
-        else:
-            normalised[rva] = CFGBlock(rva=rva, instructions=tuple(kept),
-                                       successors=((FALL, split_at),))
-    return normalised
-
-
-# ── AST ────────────────────────────────────────────────────────
-
-
-class Node:
-    """Marker base for the structured tree."""
-
-
-@dataclass(frozen=True)
-class Statements(Node):
-    """A block's statements, without any control-flow line of its own.
-
-    Used for a header whose branch a parent construct represents, and for the
-    last block of a region whose jump is implied by where the region ends.
-    'folded' names statement RVAs a parent condition already displays.
-    """
-
-    block: object
-    folded: tuple = ()
-
-
-@dataclass(frozen=True)
-class Flat(Node):
-    """A block rendered exactly as P5 did: statements then CFG edge lines."""
-
-    block: object
-    next_rva: int | None = None
-
-
-@dataclass(frozen=True)
-class Seq(Node):
-    items: tuple
-
-
-@dataclass(frozen=True)
-class If(Node):
-    header: Statements
-    condition: object
-    rvas: tuple
-    then: Seq
-    orelse: Seq | None = None
-
-
-@dataclass(frozen=True)
-class While(Node):
-    header: Statements
-    condition: object
-    rvas: tuple
-    body: Seq
-
-
-@dataclass(frozen=True)
-class DoWhile(Node):
-    body: Seq
-    condition: object
-    rvas: tuple
-
-
-@dataclass(frozen=True)
-class Switch(Node):
-    header: Statements
-    index: object
-    rvas: tuple
-    cases: tuple          # ((slot_index, Seq), ...) in table order
-    default: Seq | None = None
-
-
-@dataclass(frozen=True)
-class Break(Node):
-    rva: int
-
-
-@dataclass(frozen=True)
-class Continue(Node):
-    rva: int
-
-
-@dataclass(frozen=True)
-class Structured:
-    """What the structuring pass produces: a tree and what it could not do."""
-
-    nodes: tuple
-    warnings: tuple
-
-
-# ── condition knowledge ────────────────────────────────────────
-
-_INVERT = {"==": "!=", "!=": "==", "<": ">=", ">=": "<", ">": "<=", "<=": ">"}
-
-
-def negate(condition):
-    """The logical negation of a condition, as an expression."""
-    if isinstance(condition, BinExpr) and condition.op in _INVERT:
-        return BinExpr(_INVERT[condition.op], condition.left, condition.right)
-    if isinstance(condition, UnExpr) and condition.op == "!":
-        return condition.operand
-    return UnExpr("!", condition)
-
-
-def fold_compare(cmp_stmt, comparison):
-    """Fold a `cmp`/`test` statement into an `if`-style condition, or None.
-
-    'comparison' is the branch's C operator as the lift recorded it from the
-    condition table (`None` when the condition has no exact C spelling). Using
-    that field instead of comparing flag expressions keeps this pass from
-    re-deriving a second copy of the table, which would silently stop folding
-    whenever the first copy changed. A folded condition never says more than
-    the flags did: unsigned relations are not in the table at all.
-    """
-    if not isinstance(cmp_stmt, Cmp) or comparison is None:
-        return None
-    op = comparison
-    if cmp_stmt.op == "cmp":
-        return BinExpr(op, cmp_stmt.left, cmp_stmt.right)
-    if cmp_stmt.op == "test":
-        if op not in ("==", "!="):
-            return None
-        if cmp_stmt.left == cmp_stmt.right:
-            return BinExpr(op, cmp_stmt.left, Const(0))
-        return BinExpr(op, BinExpr("&", cmp_stmt.left, cmp_stmt.right),
-                       Const(0))
-    return None
-
-
-# ── graph facts ────────────────────────────────────────────────
-
-
-@dataclass
-class _Loop:
-    header: int
-    body: frozenset
-    latches: frozenset
-    done: bool = False
 
 
 @dataclass(frozen=True)
@@ -247,46 +77,7 @@ class _LoopContext:
     break_target: int | None
 
 
-@dataclass(frozen=True)
-class _SwitchPlan:
-    start: int
-    chain: tuple          # bounds-check blocks, top of the chain first
-    dispatch: int
-    index: object
-    rvas: tuple
-    cases: tuple          # ((slot_index, target_rva), ...)
-    default: int | None
-    merge: int | None
-
-
-def _slot_targets(table, image):
-    """(slot index, target RVA or None) for every slot a jump table names.
-
-    Both readers of a SlotTable -- switch recognition here and the extra-block
-    discovery in `jump_table_targets` -- must decode the slots the same way.
-    Sharing the loop is what keeps two copies of the stride arithmetic from
-    drifting; the target stays None when a slot does not hold an RVA.
-    """
-    for index in range(table.count):
-        value = image.read_pointer(table.base + index * table.stride)
-        yield index, None if value is None else image.va_to_rva(value)
-
-
-def _block_end(block):
-    """The RVA of a block's last statement (its first address when empty)."""
-    return block.stmts[-1].rva if block.stmts else block.rva
-
-
-def _block_addresses(block):
-    """Instruction RVAs of a block, for a CFGBlock or a lowered IRBlock."""
-    if hasattr(block, "instructions"):
-        return block.instructions
-    addresses = {stmt.rva for stmt in block.stmts}
-    addresses.update(stmt.rva for stmt in block.dead)
-    return tuple(sorted(addresses))
-
-
-class _Builder:
+class _Builder(GraphFacts, SwitchRecognition):
     def __init__(self, entry, blocks, successors, slot_tables=(), decoder=None,
                  image=None):
         self.entry = entry
@@ -308,64 +99,14 @@ class _Builder:
             addr: rva for rva in self.order
             for addr in _block_addresses(self.blocks[rva])
         }
-        self._compute_dominators()
-        self._compute_postdominators()
-        self.loops = self._natural_loops()
-        self.loop_at = {loop.header: loop for loop in self.loops}
-        self.force_flat = set()
-        self._find_irreducible()
+        self._compute_graph_facts()
         self.switch_plans = {}
         self.switch_consumed = set()
         self._find_switches()
         self.done = set()
         self.depth = 0                 # live `_region` nesting level
 
-    # ── successor queries ──────────────────────────────────────
-
-    def _succ_targets(self, rva):
-        return tuple(sorted({target
-                             for kind, target in self.successors.get(rva, ())
-                             if target is not None and target in self.blocks}))
-
-    def _post_succs(self, rva):
-        targets = sorted({target
-                          for kind, target in self.successors.get(rva, ())
-                          if target is not None and target in self.blocks})
-        return tuple(targets) or (EXIT,)
-
-    def _conditional(self, rva):
-        """(taken_target, fall_through) for a conditional branch block."""
-        taken = None
-        fall = None
-        for kind, target in self.successors.get(rva, ()):
-            if kind == JCC:
-                taken = target
-            elif kind == FALL:
-                fall = target
-        if taken is None:
-            return None
-        return (taken, fall)
-
-    def _jump_target(self, rva):
-        for kind, target in self.successors.get(rva, ()):
-            if kind == JMP:
-                return target
-        return None
-
-    def _fall(self, rva):
-        for kind, target in self.successors.get(rva, ()):
-            if kind == FALL:
-                return target
-        return None
-
-    def _branch_rva(self, block):
-        for stmt in reversed(block.stmts):
-            if isinstance(stmt, Branch):
-                return stmt.rva
-        return block.stmts[-1].rva if block.stmts else block.rva
-
-    def _has_indirect(self, rva):
-        return any(kind == INDIRECT for kind, _ in self.successors.get(rva, ()))
+    # ── loop context ───────────────────────────────────────────
 
     @staticmethod
     def _outside_loop(ctx, target):
@@ -381,393 +122,6 @@ class _Builder:
         if target in ctx.body:
             return False
         return target not in (ctx.break_target, ctx.continue_target, ctx.exit)
-
-    # ── dominators (Cooper-Harvey-Kennedy) ─────────────────────
-
-    def _compute_dominators(self):
-        order = []
-        seen = set()
-        stack = [(self.entry, iter(self._succ_targets(self.entry)))]
-        seen.add(self.entry)
-        while stack:
-            node, children = stack[-1]
-            for child in children:
-                if child not in seen:
-                    seen.add(child)
-                    stack.append((child, iter(self._succ_targets(child))))
-                    break
-            else:
-                order.append(node)
-                stack.pop()
-        order.reverse()                       # reverse postorder
-        self.rpo = order
-        # Postorder numbers: the entry is highest, so the intersect walk climbs
-        # by decreasing number.
-        dfn = {rva: len(order) - index for index, rva in enumerate(order)}
-
-        idom = {self.entry: self.entry}
-        for rva in order[1:]:
-            idom[rva] = None
-        changed = True
-        while changed:
-            changed = False
-            for rva in order[1:]:
-                preds = [pred for pred in self.preds[rva] if idom.get(pred)]
-                if not preds:
-                    continue
-                candidate = preds[0]
-                for pred in preds[1:]:
-                    candidate = self._intersect(candidate, pred, idom, dfn)
-                if idom.get(rva) != candidate:
-                    idom[rva] = candidate
-                    changed = True
-        for rva in self.order:
-            idom.setdefault(rva, rva)
-            if idom[rva] is None:
-                idom[rva] = rva          # unreachable: its own dominator
-        self.idom = idom
-
-    @staticmethod
-    def _intersect(left, right, idom, dfn):
-        while left != right:
-            while dfn[left] < dfn[right]:
-                left = idom[left]
-            while dfn[right] < dfn[left]:
-                right = idom[right]
-        return left
-
-    def _dominates(self, dominator, node):
-        """Whether 'dominator' dominates 'node' (a node dominates itself)."""
-        current = node
-        while True:
-            if current == dominator:
-                return True
-            parent = self.idom.get(current)
-            if parent is None or parent == current:
-                return False
-            current = parent
-
-    # ── post-dominators ────────────────────────────────────────
-
-    def _compute_postdominators(self):
-        universe = set(self.order) | {EXIT}
-        post = {rva: set(universe) for rva in self.order}
-        post[EXIT] = {EXIT}
-        changed = True
-        while changed:
-            changed = False
-            for rva in reversed(self.order):
-                common = set(universe)
-                for succ in self._post_succs(rva):
-                    common &= post.get(succ, {succ})
-                new = {rva} | common
-                if new != post[rva]:
-                    post[rva] = new
-                    changed = True
-        self.postdom = post
-
-        self.ipdom = {}
-        for rva in self.order:
-            candidates = post[rva] - {rva}
-            if EXIT in candidates:
-                self.ipdom[rva] = EXIT
-            elif candidates:
-                # The immediate post-dominator is the proper post-dominator
-                # with the largest set: ancestors get smaller as you climb.
-                self.ipdom[rva] = max(candidates,
-                                      key=lambda node: (len(post[node]), -node))
-            else:
-                self.ipdom[rva] = None
-        self.postdom_depth = {EXIT: 0}
-        for rva in self.order:
-            depth = 0
-            current = rva
-            seen = set()
-            while current != EXIT and current is not None and current not in seen:
-                seen.add(current)
-                current = self.ipdom.get(current)
-                depth += 1
-            self.postdom_depth[rva] = depth
-
-    def _common_postdom(self, nodes):
-        """Nearest common post-dominator inside the function, or None."""
-        nodes = [node for node in nodes if node is not None]
-        if not nodes:
-            return None
-        common = set(self.postdom.get(nodes[0], ()))
-        for node in nodes[1:]:
-            common &= self.postdom.get(node, set())
-        common.discard(EXIT)
-        if not common:
-            return None
-        return max(common, key=lambda node: (self.postdom_depth.get(node, -1),
-                                             -node))
-
-    # ── natural loops ──────────────────────────────────────────
-
-    def _natural_loops(self):
-        loops = {}
-        for rva in self.order:
-            for kind, target in self.successors.get(rva, ()):
-                if target is None or target not in self.blocks:
-                    continue
-                if not self._dominates(target, rva):
-                    continue
-                body = self._loop_body(target, rva)
-                if target in loops:
-                    loops[target].body |= body
-                    loops[target].latches |= {rva}
-                else:
-                    loops[target] = _Loop(header=target, body=frozenset(body),
-                                          latches=frozenset((rva,)))
-        return [loops[header] for header in sorted(loops)]
-
-    def _loop_body(self, header, latch):
-        """Header plus every block dominated by it that can reach the latch."""
-        body = {header}
-        stack = [latch]
-        while stack:
-            node = stack.pop()
-            if node in body:
-                continue
-            body.add(node)
-            for pred in self.preds.get(node, ()):
-                if pred in body:
-                    continue
-                if pred == header or self._dominates(header, pred):
-                    stack.append(pred)
-        return body
-
-    # ── irreducibility ─────────────────────────────────────────
-
-    def _find_irreducible(self):
-        covered = set()
-        for loop in self.loops:
-            covered |= loop.body
-        for component in self._strongly_connected():
-            if len(component) <= 1:
-                continue
-            if component <= covered:
-                continue
-            self.force_flat |= component
-            self.warnings.add("irreducible")
-
-    def _strongly_connected(self):
-        """Kosaraju's SCCs, iteratively and in a deterministic order."""
-        seen = set()
-        finish = []
-        for start in self.order:
-            if start in seen:
-                continue
-            seen.add(start)
-            stack = [(start, iter(self._succ_targets(start)))]
-            while stack:
-                node, children = stack[-1]
-                for child in children:
-                    if child not in seen:
-                        seen.add(child)
-                        stack.append((child, iter(self._succ_targets(child))))
-                        break
-                else:
-                    finish.append(node)
-                    stack.pop()
-
-        reverse = {rva: [] for rva in self.order}
-        for rva in self.order:
-            for target in self._succ_targets(rva):
-                reverse[target].append(rva)
-
-        components = []
-        assigned = set()
-        for node in reversed(finish):
-            if node in assigned:
-                continue
-            assigned.add(node)
-            component = []
-            stack = [node]
-            while stack:
-                current = stack.pop()
-                component.append(current)
-                for pred in reverse[current]:
-                    if pred not in assigned:
-                        assigned.add(pred)
-                        stack.append(pred)
-            components.append(set(component))
-        return components
-
-    # ── switch recognition ─────────────────────────────────────
-
-    def _find_switches(self):
-        considered = set()      # dispatch blocks a SlotTable named
-        for table in self.slot_tables:
-            referrer = getattr(table, "referrer", None)
-            if referrer is None:
-                continue
-            dispatch = self.owner_of_instruction.get(referrer)
-            if dispatch is None or not self._has_indirect(dispatch):
-                continue
-            considered.add(dispatch)
-            plan = self._make_switch_plan(table, dispatch)
-            if plan is None:
-                # `_make_switch_plan` records the more specific reason when
-                # it refuses a truncated table; "unmatched" would be wrong
-                # there, because the table does match the dispatch.
-                if not getattr(table, "truncated", False):
-                    self.warnings.add("unmatched jump table")
-                continue
-            if plan.start in self.switch_plans:
-                continue
-            self.switch_plans[plan.start] = plan
-            self.switch_consumed.update(plan.chain)
-            self.switch_consumed.add(plan.dispatch)
-        # A table-shaped indirect jump with no table behind it is still worth
-        # a warning: the flat `goto *...` is honest but the reader should know
-        # a switch was possible. A dispatch whose SlotTable was considered
-        # above has already been answered (or refused with its own warning).
-        for rva in self.order:
-            if (rva in considered or rva in self.switch_consumed
-                    or not self._has_indirect(rva)):
-                continue
-            if self._table_shaped(rva):
-                self.warnings.add("unmatched jump table")
-
-    def _table_shaped(self, rva):
-        if self.decoder is None:
-            return False
-        block = self.blocks[rva]
-        insn = self.decoder.decode_one(self._branch_rva(block))
-        if insn is None:
-            return False
-        return any(operand.is_table_mem for operand in insn.operands)
-
-    def _make_switch_plan(self, table, dispatch):
-        if self.decoder is None or self.image is None:
-            return None
-        if table.count < 2:
-            return None
-        if getattr(table, "truncated", False):
-            # model.SlotTable.truncated means the reader stopped at its entry
-            # budget: `count` is a lower bound on the cases, not the table's
-            # size. A switch built from it would print a prefix as if it were
-            # the whole case set ("512 entries" for "at least 512"), the same
-            # silent-completeness defect the model's own contract forbids.
-            # Keep the flat `goto *...` form and name the reason.
-            self.warnings.add("truncated jump table")
-            return None
-
-        cases = []
-        for index, target in _slot_targets(table, self.image):
-            if target is None or target not in self.blocks:
-                return None
-            cases.append((index, target))
-        if len({target for _, target in cases}) != len(cases):
-            # Two slots sharing one body: keep the flat form rather than
-            # invent a case label for it.
-            return None
-        # The dispatch instruction itself names the index register.
-        insn = self.decoder.decode_one(table.referrer)
-        if insn is None:
-            return None
-        index_name = None
-        for operand in insn.operands:
-            if operand.is_table_mem and operand.mem_index:
-                index_name = self.decoder.reg_name(operand.mem_index)
-                break
-        if index_name is None:
-            return None
-        # The dispatch block must contain nothing but its branch: skipping a
-        # statement here would silently drop an instruction's effect.
-        dispatch_block = self.blocks[dispatch]
-        if dispatch_block.dead or any(not isinstance(stmt, Branch)
-                                      for stmt in dispatch_block.stmts):
-            return None
-
-        case_set = {target for _, target in cases}
-        chain = []
-        current = dispatch
-        while True:
-            parent = self.idom.get(current, current)
-            if parent == current or parent in chain:
-                break
-            if not self._pure_bounds_check(parent, current):
-                break
-            chain.append(parent)
-            current = parent
-        if not chain:
-            return None
-        chain.reverse()
-
-        index_expr = None
-        default = None
-        rvas = []
-        for position, rva in enumerate(chain):
-            cmp_stmt = self._pure_compare_cmp(rva)
-            if cmp_stmt is None:
-                return None
-            if index_expr is None:
-                index_expr = self._index_operand(cmp_stmt)
-            expected_fall = (chain[position + 1] if position + 1 < len(chain)
-                             else dispatch)
-            conditional = self._conditional(rva)
-            if conditional is None or conditional[1] != expected_fall:
-                return None
-            taken = conditional[0]
-            if taken in case_set:
-                pass
-            elif taken in self.blocks and default is None and taken != dispatch:
-                default = taken
-            else:
-                return None
-            branch = self._branch_rva(self.blocks[rva])
-            rvas.extend((cmp_stmt.rva, branch))
-        if index_expr is None or not isinstance(index_expr, Reg):
-            return None
-        if family(index_expr.name) != family(index_name):
-            return None
-
-        merge = self._common_postdom(
-            tuple(target for _, target in cases)
-            + ((default,) if default is not None else ()))
-        if merge is not None and (merge in case_set or merge == dispatch):
-            return None
-        rvas.append(self._branch_rva(self.blocks[dispatch]))
-        return _SwitchPlan(start=chain[0], chain=tuple(chain),
-                           dispatch=dispatch, index=index_expr,
-                           rvas=tuple(rvas), cases=tuple(cases),
-                           default=default, merge=merge)
-
-    def _pure_compare_cmp(self, rva):
-        """The Cmp of a `cmp/branch` block with nothing else, or None.
-
-        `dead` must be empty too: a dead register write is still an instruction
-        and a switch that skipped it would leave its address out of the text.
-        """
-        block = self.blocks[rva]
-        stmts = block.stmts
-        if block.dead:
-            return None
-        if len(stmts) < 2 or not isinstance(stmts[-1], Branch):
-            return None
-        if stmts[-1].kind != JCC:
-            return None
-        if len(stmts) != 2 or not isinstance(stmts[0], Cmp):
-            return None
-        return stmts[0]
-
-    def _pure_bounds_check(self, rva, falls_to):
-        cmp_stmt = self._pure_compare_cmp(rva)
-        if cmp_stmt is None:
-            return False
-        conditional = self._conditional(rva)
-        return conditional is not None and conditional[1] == falls_to
-
-    @staticmethod
-    def _index_operand(cmp_stmt):
-        if isinstance(cmp_stmt.left, Reg):
-            return cmp_stmt.left
-        if isinstance(cmp_stmt.right, Reg):
-            return cmp_stmt.right
-        return None
 
     # ── conditions and statements ──────────────────────────────
 
@@ -1227,38 +581,3 @@ def build(entry, blocks, successors, slot_tables=(), decoder=None, image=None):
     builder = _Builder(entry, blocks, successors,
                        slot_tables=slot_tables, decoder=decoder, image=image)
     return builder.build()
-
-
-def jump_table_targets(blocks, successors, slot_tables, decoder=None,
-                       image=None):
-    """RVAs a jump table in this function names, for case blocks not yet in
-    the CFG.
-
-    `build_function_cfg` cannot follow an indirect edge, so a switch whose
-    cases are reached only through the table leaves them out of the CFG. The
-    table is the analysis's own statement of where they are, which makes them
-    part of this function rather than a guess. The caller builds blocks for
-    these addresses and structures the switch over them; the flat form is
-    still used when any target is missing from the rebuilt blocks.
-    """
-    if decoder is None or image is None:
-        return ()
-    owners = {}
-    for rva in sorted(blocks):
-        for addr in _block_addresses(blocks[rva]):
-            owners[addr] = rva
-    targets = set()
-    for table in slot_tables or ():
-        referrer = getattr(table, "referrer", None)
-        if referrer is None:
-            continue
-        dispatch = owners.get(referrer)
-        if dispatch is None:
-            continue
-        if not any(kind == INDIRECT
-                   for kind, _ in successors.get(dispatch, ())):
-            continue
-        for _, target in _slot_targets(table, image):
-            if target is not None and image.is_exec(target):
-                targets.add(target)
-    return tuple(sorted(targets))
