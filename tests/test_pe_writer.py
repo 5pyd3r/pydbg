@@ -151,6 +151,59 @@ class TestWritePEHeaderPatching(unittest.TestCase):
                          [('.text', 0x60000020), ('.rdata', 0x60000020)])
 
 
+class TestHostileHeaderFields(unittest.TestCase):
+    """Header fields are file input, not facts, when they size an allocation.
+
+    SizeOfHeaders feeds a bytearray/ljust and a section's VirtualSize feeds the
+    per-section copy; a forged 0xFFFFFF00 used to become a four-gigabyte
+    allocation or a MemoryError. Both are clamped to what the Source can
+    supply, and the clamp is reported rather than silent.
+    """
+
+    def test_forged_size_of_headers_is_clamped_to_the_source(self):
+        from pydbg.pe import PE, file_layout, write_pe
+
+        data = bytearray(loaded_layout_image()[0])
+        optional_offset = 0x80 + 4 + 20
+        struct.pack_into("<I", data, optional_offset + 60, 0xFFFFFF00)
+        image = bytes(data)
+        loaded = parse_loaded(image)
+
+        with self.assertWarnsRegex(UserWarning, "SizeOfHeaders"):
+            layout = file_layout(loaded)
+        # The section table is the smallest header the writer must keep.
+        self.assertEqual(layout.size_of_headers, 0x200)
+
+        with self.assertWarnsRegex(UserWarning, "SizeOfHeaders"):
+            written = write_pe(loaded, image)
+        self.assertLess(len(written), 0x1000)
+        # The written header records the clamped value, not the forgery.
+        self.assertEqual(PE(written).optional_header.size_of_headers, 0x200)
+
+    def test_forged_virtual_size_is_clamped_before_the_copy(self):
+        from pydbg.pe import file_layout, write_pe
+
+        data = bytearray(loaded_layout_image()[0])
+        size_of_optional_header = struct.unpack_from(
+            "<H", data, 0x80 + 4 + 16)[0]
+        sections_offset = 0x80 + 4 + 20 + size_of_optional_header
+        struct.pack_into("<I", data, sections_offset + 8, 0xFFFFFF00)
+        image = bytes(data)
+        loaded = parse_loaded(image)
+
+        with self.assertWarnsRegex(UserWarning, "VirtualSize"):
+            layout = file_layout(loaded)
+
+        # .text may claim only the bytes the source has from its RVA, and
+        # SizeOfImage is computed from that clamped extent.
+        self.assertEqual(layout.sections[0].size, len(image) - TEXT_RVA)
+        self.assertEqual(layout.size_of_image, 0x3000)
+
+        with self.assertWarnsRegex(UserWarning, "VirtualSize"):
+            written = write_pe(loaded, image)
+        self.assertLess(len(written), 0x8000)
+
+
 class TestFileLayout(unittest.TestCase):
     """The shared layout calculation that write_pe and rebuild_pe both use."""
 

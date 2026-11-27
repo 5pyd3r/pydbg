@@ -339,6 +339,41 @@ def build_pe_with_imports():
     return bytes(data)
 
 
+IMPORT_THUNK_RVA = 0x3000
+
+
+def build_shared_thunk_import_image(descriptors=4, thunks=4,
+                                    declared_size=None):
+    """A file whose import descriptors all point at one thunk array.
+
+    The amplification fixture: the descriptor count and the thunk count used to
+    be independent ceilings, so N descriptors x M thunks was the work a forged
+    table could ask for. The thunks are ordinal imports (high bit set) so no
+    name table is needed, and the section ends with the array, so the walk
+    stops at the end of the file when the array runs out.
+    """
+    from tests.pe_builder import PEBuilder
+
+    builder = PEBuilder()
+    builder.add_section(".text", b"\x90" * 0x10, 0x1000)
+    array_start = IMPORT_THUNK_RVA - 0x2000
+    rdata = bytearray(array_start + thunks * 8)
+    for index in range(descriptors):
+        # OriginalFirstThunk and FirstThunk both name the shared array; Name
+        # is zero, so dll_name is the empty string.
+        struct.pack_into("<IIIII", rdata, index * 20,
+                         IMPORT_THUNK_RVA, 0, 0, 0, IMPORT_THUNK_RVA)
+    thunk_array = b"".join(
+        struct.pack("<Q", 0x8000000000000000 | (index + 1))
+        for index in range(thunks))
+    rdata[array_start:array_start + len(thunk_array)] = thunk_array
+    builder.add_section(".rdata", bytes(rdata), 0x2000)
+    builder.add_dir(1, 0x2000,
+                    descriptors * 20 if declared_size is None
+                    else declared_size)
+    return builder.build()
+
+
 def build_minimal_pe32():
     """Build minimal synthetic PE32 bytes for testing."""
     # DOS header
@@ -727,6 +762,21 @@ class TestSourceTryRead(unittest.TestCase):
 
         self.assertIsNone(Broken().try_read(0, 16))
 
+    def test_negative_range_is_rejected(self):
+        """A negative offset or size used Python's negative indexing.
+
+        read(-1, 11) on a ten-byte buffer passed the upper-bound check and
+        returned b'9' from the tail; the range is out of bounds and must be
+        refused, not answered from the other end.
+        """
+        from pydbg.pe.source import BytesSource
+
+        src = BytesSource(b"0123456789")
+        for offset, size in ((-1, 11), (-4, 5), (0, -1), (5, -5)):
+            with self.assertRaises(ValueError):
+                src.read(offset, size)
+            self.assertIsNone(src.try_read(offset, size))
+
 
 class TestPEConstructionIsUnified(unittest.TestCase):
     """PE(data) and PE.from_file(path) must produce the same object.
@@ -883,6 +933,44 @@ class TestExportParsing(unittest.TestCase):
         pe = PE(data)
         self.assertEqual(pe.exports, [])
 
+    def test_forged_counts_stay_within_the_directory_size(self):
+        """NumberOfFunctions/NumberOfNames are file input used as loop bounds.
+
+        A forged 0xFFFFFFFF walked the function table to the end of the file
+        and then raised ValueError out of PE(); the directory's own Size is the
+        only count the file actually declares.
+        """
+        from pydbg.pe import PE
+
+        data = bytearray(build_pe_with_exports())
+        # IMAGE_EXPORT_DIRECTORY: NumberOfFunctions at +20, NumberOfNames at
+        # +24 (Characteristics/TimeDateStamp/versions/Name/Base precede them).
+        struct.pack_into("<I", data, 0x2400 + 20, 0xFFFFFFFF)
+        struct.pack_into("<I", data, 0x2400 + 24, 0xFFFFFFFF)
+
+        pe = PE(bytes(data))                      # must not raise out of PE()
+        # The directory declares 0x200 bytes, i.e. at most 128 RVA entries.
+        self.assertLessEqual(len(pe.exports), 0x200 // 4)
+        self.assertGreaterEqual(len(pe.exports), 1)
+        self.assertEqual(pe.exports[0].name, "MyExport")
+
+    def test_a_table_cut_inside_the_file_keeps_the_whole_readable_prefix(self):
+        """A file cut is not an error: whole entries before it survive.
+
+        The function table starts at file offset 0x2600; the cut at 0x2608
+        leaves two whole entries and then a partial one. The old per-entry
+        read() raised out of PE() instead of returning the readable prefix.
+        """
+        from pydbg.pe import PE
+
+        data = bytearray(build_pe_with_exports())
+        struct.pack_into("<I", data, 0x2400 + 20, 3)   # NumberOfFunctions
+
+        pe = PE(bytes(data)[:0x2608])
+
+        self.assertEqual([entry.rva for entry in pe.exports],
+                         [0x1000, 0x3300])
+
 
 class TestImportParsing(unittest.TestCase):
     """Tests for import directory parsing."""
@@ -904,6 +992,36 @@ class TestImportParsing(unittest.TestCase):
         data = build_minimal_pe32plus()
         pe = PE(data)
         self.assertEqual(pe.imports, [])
+
+    def test_descriptors_beyond_the_directory_size_are_not_walked(self):
+        """The descriptor count comes from the directory's own Size.
+
+        Four nonzero descriptors are present, but the directory claims one
+        20-byte slot; reading the other three used to walk past the declared
+        directory into whatever followed.
+        """
+        from pydbg.pe import PE
+
+        data = build_shared_thunk_import_image(descriptors=4, thunks=1,
+                                               declared_size=20)
+        self.assertEqual(len(PE(data).imports), 1)
+
+    def test_descriptors_sharing_a_thunk_array_stop_at_the_total_ceiling(self):
+        """N descriptors x M thunks is bounded for the whole directory.
+
+        Four descriptors all point at the same 65536-entry readable array.
+        Without the directory-wide ceiling that is 262144 imports; the walk
+        stops with the one array's worth.
+        """
+        from pydbg.pe import PE
+        from pydbg.pe.parser import MAX_IMPORTS_PER_DLL, MAX_IMPORTS_TOTAL
+
+        data = build_shared_thunk_import_image(
+            descriptors=4, thunks=MAX_IMPORTS_TOTAL)
+        imports = PE(data).imports
+
+        self.assertEqual(len(imports),
+                         min(MAX_IMPORTS_PER_DLL, MAX_IMPORTS_TOTAL))
 
 
 class TestValidation(unittest.TestCase):
