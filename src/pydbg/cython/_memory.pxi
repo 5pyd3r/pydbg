@@ -77,24 +77,42 @@ cpdef tuple read_process_memory_partial(uintptr_t h_process, uintptr_t addr,
     return (data, <size_t>bytes_read, err)
 
 
+# The byte count is returned as a C int, so a single write above INT_MAX
+# could not be reported back. Refusing such a request is the honest answer:
+# the old code narrowed len(data) to int before the call, so a >2 GiB buffer
+# reached WriteProcessMemory as a truncated or negative nSize instead of being
+# rejected. 0x7FFFFFFF is exactly the largest count the return type can hold.
+cdef Py_ssize_t _WRITE_MAX_BYTES = 0x7FFFFFFF
+
+
 cpdef int write_process_memory(uintptr_t h_process, uintptr_t addr, bytes data):
     """Write bytes to process memory at 'addr'.
 
-    Returns number of bytes written. Raises OSError on failure.
+    Returns number of bytes written. Raises OSError on failure, including a
+    request whose byte count would not fit the int returned here.
+
+    The length stays wide (Py_ssize_t) until it is handed to Win32 as SIZE_T;
+    _WRITE_MAX_BYTES is a policy set by the return type, not a Win32 limit.
     """
+    cdef Py_ssize_t length = len(data)
+    if length > _WRITE_MAX_BYTES:
+        raise OSError(
+            0, f"refusing a {length}-byte write: at most {_WRITE_MAX_BYTES} "
+               f"bytes fit in the int this function returns")
+
     cdef const char *buf = data
-    cdef int size = len(data)
     cdef SIZE_T bytes_written = 0
     cdef BOOL result = WriteProcessMemory(
         <HANDLE>h_process,
         <LPVOID>addr,
         buf,
-        <SIZE_T>size,
+        <SIZE_T>length,
         &bytes_written)
 
     if result == 0:
         raise OSError(GetLastError(), "WriteProcessMemory failed")
 
+    # 'length' is bounded above, so the count fits the declared int return.
     return <int>bytes_written
 
 
@@ -277,22 +295,63 @@ cpdef list enum_process_modules_ex(uintptr_t h_process, DWORD filter_flag):
     return _enum_process_modules(h_process, filter_flag)
 
 
+# Path buffers start at MAX_PATH (what the old fixed char[260] held) and grow
+# until GetModuleFileNameExA reports the whole path fit. 32768 bytes is the
+# extended-length limit: a \\?\ path is capped at 32767 characters plus the
+# NUL, and it keeps a pathological answer from growing without bound.
+cdef DWORD _MODULE_PATH_INITIAL = 260
+cdef DWORD _MODULE_PATH_CEILING = 32768
+
+
 cpdef str get_module_file_name_ex(uintptr_t h_process, uintptr_t h_module):
     """Get file name of a module in a process.
 
     Returns file path string. Raises OSError on failure.
+
+    GetModuleFileNameExA has no way to ask for the required size: when the
+    buffer is too small it truncates the path and returns the buffer size, so
+    the caller cannot tell a real path from a cut one. This grows the buffer
+    from MAX_PATH and treats a return equal to the capacity as truncation,
+    retrying until the whole path fits or the ceiling is reached -- the old
+    fixed 260-byte buffer silently handed callers a cut path.
     """
-    cdef char[260] filename
-    cdef DWORD len = GetModuleFileNameExA(
-        <HANDLE>h_process,
-        <HANDLE>h_module,
-        filename,
-        260)
+    cdef DWORD capacity = _MODULE_PATH_INITIAL
+    cdef char* buffer = NULL
+    cdef DWORD length
+    cdef bytes raw
 
-    if len == 0:
-        raise OSError(GetLastError(), "GetModuleFileNameExA failed")
+    while True:
+        buffer = <char*>malloc(capacity)
+        if buffer == NULL:
+            raise MemoryError("cannot allocate module path buffer")
 
-    return filename[:len].decode('mbcs', errors='replace')
+        length = GetModuleFileNameExA(
+            <HANDLE>h_process,
+            <HANDLE>h_module,
+            buffer,
+            capacity)
+
+        if length == 0:
+            free(buffer)
+            raise OSError(GetLastError(), "GetModuleFileNameExA failed")
+
+        if length < capacity:
+            # The returned length excludes the terminating NUL, so anything
+            # shorter than the buffer is a complete path.
+            raw = buffer[:length]
+            free(buffer)
+            return raw.decode('mbcs', errors='replace')
+
+        free(buffer)
+        buffer = NULL
+        if capacity >= _MODULE_PATH_CEILING:
+            raise OSError(
+                0, f"module path does not fit in the {_MODULE_PATH_CEILING}-"
+                   f"byte buffer ceiling (GetModuleFileNameExA would "
+                   f"truncate it)")
+        capacity *= 2
+        if capacity > _MODULE_PATH_CEILING:
+            capacity = _MODULE_PATH_CEILING
 
 
 cpdef dict virtual_alloc_ex(uintptr_t h_process, uintptr_t addr,

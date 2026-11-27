@@ -1,5 +1,8 @@
 """Tests for memory operations: read, write, query, modules, allocation."""
 
+import os
+import shutil
+import tempfile
 import unittest
 from types import SimpleNamespace
 from unittest import mock
@@ -122,6 +125,82 @@ class TestModuleEnum(unittest.TestCase):
         modules = _pydbg.enum_process_modules(self.h_proc)
         filename = _pydbg.get_module_file_name_ex(self.h_proc, modules[0]["handle"])
         self.assertTrue(len(filename) > 0)
+
+
+@unittest.skipUnless(_has_cython, "optional dependency: Cython extension")
+class TestLongModulePath(unittest.TestCase):
+    """A module path longer than MAX_PATH must come back whole, not cut at 260.
+
+    The old fixed char[260] buffer made GetModuleFileNameExA truncate the path
+    while still returning success, so the caller could not tell a real path
+    from a cut one. The helper now grows its buffer; this starts the target
+    from a >MAX_PATH directory and checks the full path survives.
+    """
+
+    # Each segment is long enough that a handful of them push the total well
+    # past MAX_PATH (260) even after the \\?\ prefix is stripped from the
+    # answer.
+    _SEGMENT = "pydbg-long-module-path-segment"
+
+    def setUp(self):
+        if not os.path.isfile(TEST_TARGET_PATH):
+            self.skipTest(f"target not built: {TEST_TARGET_PATH}")
+
+        root = tempfile.mkdtemp(prefix="pydbg-longpath-")
+        # rmtree needs the extended-length form too: the root path is short,
+        # but the descendants below it are what is being deleted.
+        self.addCleanup(shutil.rmtree, "\\\\?\\" + root, True)
+
+        deep = root
+        while len(deep) < 300:
+            deep = os.path.join(deep, self._SEGMENT)
+
+        # Past MAX_PATH, both the filesystem APIs and CreateProcessA need the
+        # \\?\ prefix. The helper's answer may keep or drop it, so the
+        # assertions look only at the total length and the suffix.
+        self.exe_path = "\\\\?\\" + os.path.join(deep, "long_path_target.exe")
+        try:
+            os.makedirs("\\\\?\\" + deep)
+            shutil.copyfile(TEST_TARGET_PATH, self.exe_path)
+        except OSError as exc:
+            self.skipTest(f"environment: long paths unavailable ({exc})")
+
+        self.pid = self.tid = self.h_proc = self.h_thr = None
+        try:
+            self.pid, self.tid, self.h_proc, self.h_thr = (
+                _pydbg.create_process(self.exe_path))
+        except OSError as exc:
+            self.skipTest(
+                f"environment: cannot debug from a long path ({exc})")
+
+        _pydbg.wait_for_debug_event(5000)
+        _pydbg.continue_debug_event(self.pid, self.tid)
+        for _ in range(20):
+            event = _pydbg.wait_for_debug_event(5000)
+            if event is None:
+                break
+            if event["event_name"] == "EXCEPTION":
+                break
+            _pydbg.continue_debug_event(event["pid"], event["tid"])
+
+    def tearDown(self):
+        if self.h_proc is None:
+            return
+        _pydbg.debug_active_process_stop(self.pid)
+        _pydbg.terminate_process(self.h_proc, 0)
+        _pydbg.close_handle(self.h_proc)
+        _pydbg.close_handle(self.h_thr)
+
+    def test_the_whole_path_survives(self):
+        modules = _pydbg.enum_process_modules(self.h_proc)
+        self.assertGreater(len(modules), 0)
+        filename = _pydbg.get_module_file_name_ex(
+            self.h_proc, modules[0]["handle"])
+        self.assertGreater(
+            len(filename), 260,
+            f"the module path was cut at MAX_PATH: {filename!r}")
+        self.assertTrue(
+            filename.lower().endswith("long_path_target.exe"), filename)
 
 
 # Named constants for readability (used by TestMemoryManagerCoverage).
