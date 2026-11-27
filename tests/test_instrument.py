@@ -5,7 +5,6 @@ import time
 import unittest
 
 from pydbg.exceptions import PydbgError
-from pydbg.instrument import Instrumenter
 from pydbg.instrument.codegen import _scan_externs
 from pydbg.instrument.templates import (
     InstrumentTemplates,
@@ -13,6 +12,17 @@ from pydbg.instrument.templates import (
     build_stub,
     build_trampoline,
 )
+
+# Importing Instrumenter pulls in MemoryManager, which imports the Cython
+# extension. Without it the whole module used to fail collection, hiding the
+# templates/codegen tests below; the import stays lazy for the classes that do
+# not need the extension, and the ones that do skip instead.
+try:
+    from pydbg.instrument import Instrumenter
+    _has_cython = True
+except ImportError:
+    Instrumenter = None
+    _has_cython = False
 
 
 class TestTemplates(unittest.TestCase):
@@ -199,6 +209,7 @@ class TestAllocNear(unittest.TestCase):
             _pydbg.virtual_free(h, first, 0, 0x8000)
 
 
+@unittest.skipUnless(_has_cython, "optional dependency: Cython extension")
 class TestInstrumenter(unittest.TestCase):
 
     def setUp(self):
@@ -320,8 +331,12 @@ def _backend_available():
 
 
 @unittest.skipUnless(
-    os.path.isfile(_TEST_TARGET) and _backend_available(),
-    "optional dependency: LLVM backend and instrument_target.exe")
+    os.path.isfile(_TEST_TARGET),
+    f"target not built: {_TEST_TARGET} missing (from "
+    f"TEST_INSTRUMENT_TARGET_PATH); run: meson compile -C build instrument_target")
+@unittest.skipUnless(
+    _backend_available(),
+    "optional dependency: LLVM backend (-Denable-llvm-instrument=true)")
 class TestInstrumentLive(unittest.TestCase):
 
     @property

@@ -11,6 +11,13 @@ import unittest
 from pydbg.analysis import cfg as cfg_module, report
 from tests.pe_builder import PEBuilder
 
+try:
+    from pydbg import _pydbg  # noqa: F401
+
+    _has_cython = True
+except ImportError:
+    _has_cython = False
+
 TEXT_RVA = 0x1000
 IMAGE_BASE = 0x400000
 
@@ -162,6 +169,7 @@ class TestReports(unittest.TestCase):
         self.assertIn("branch->", text)
 
 
+@unittest.skipUnless(_has_cython, "optional dependency: Cython extension")
 class TestLiveProcessSource(unittest.TestCase):
     """Analyzing a module inside a real process, through LoadedView."""
 
@@ -218,7 +226,9 @@ class TestLiveProcessSource(unittest.TestCase):
         from tests import TEST_TARGET_PATH
 
         if not os.path.exists(TEST_TARGET_PATH):
-            self.skipTest("target not built: no test target on disk")
+            self.skipTest(
+                f"target not built: {TEST_TARGET_PATH} missing (from "
+                f"TEST_TARGET_PATH); run: meson compile -C build simple_target")
 
         live = analyze_process(self.dbg._session, self.base)
         from_disk = analyze_file(TEST_TARGET_PATH)

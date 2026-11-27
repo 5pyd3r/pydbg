@@ -239,10 +239,20 @@ class TestRealImageProfiles(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        path = os.environ.get("TEST_TARGET_PATH")
-        if not path or not os.path.exists(path):
+        from tests import TEST_TARGET_PATH
+
+        path = TEST_TARGET_PATH
+        if not os.path.exists(path):
+            # An unset TEST_TARGET_PATH outside `meson test` is a harness
+            # configuration gap, not a missing build product; the fallback in
+            # tests/__init__.py is what this run used.
+            if not os.environ.get("TEST_TARGET_PATH"):
+                raise unittest.SkipTest(
+                    f"environment: TEST_TARGET_PATH is not set and the "
+                    f"fallback {path} does not exist; run under `meson test`")
             raise unittest.SkipTest(
-                f"target not built: no image at {path!r}")
+                f"target not built: {path} missing (from TEST_TARGET_PATH); "
+                f"run: meson compile -C build simple_target")
         from pydbg.analysis import analyze_file
         cls.result = analyze_file(path)
 

@@ -16,10 +16,8 @@ from pydbg.analysis import (
 )
 from pydbg.pe import PE
 
+from tests import TEST_TARGET_PATH
 from tests.pe_builder import PEBuilder, build_loaded_image_with_one_import
-
-TARGET_X64 = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                          "target", "simple_target_x64.exe")
 
 
 def widen_virtual_size(image, index, virtual_size):
@@ -314,18 +312,20 @@ class TestExtractStrings(unittest.TestCase):
     def test_a_built_image_yields_at_least_one_string(self):
         """The real-target acceptance check, without the real target.
 
-        tests/target/simple_target_x64.exe is not always built, so its test
-        is skipped; the same claim — a normal image's sections yield strings —
-        is made here against a PEBuilder image the suite always has.
+        The target named by TEST_TARGET_PATH is not always built, so the
+        real-image check below is skipped; the same claim — a normal image's
+        sections yield strings — is made here against a PEBuilder image the
+        suite always has.
         """
         self.assertGreaterEqual(len(extract_strings(self.build())), 1)
 
     @unittest.skipUnless(
-        os.path.exists(TARGET_X64),
-        "target not built: tests/target/simple_target_x64.exe")
+        os.path.exists(TEST_TARGET_PATH),
+        f"target not built: {TEST_TARGET_PATH} missing (from "
+        f"TEST_TARGET_PATH); run: meson compile -C build simple_target")
     def test_every_string_on_a_real_image_lands_in_a_section(self):
         """The RVA is usable only if it points back into the image."""
-        pe = PE.from_file(TARGET_X64)
+        pe = PE.from_file(TEST_TARGET_PATH)
         found = extract_strings(pe)
         self.assertGreaterEqual(len(found), 1)
         ranges = [(section.virtual_address,
