@@ -39,9 +39,12 @@ class IATHook:
         ptr_sz = self._ptr_size()
         key = (module_name, func_name)
         if key in self._hooks:
-            iat_addr, saved_original = self._hooks.pop(key)
+            iat_addr, saved_original = self._hooks[key]
             mem = self._get_memory()
+            # Write first and forget after: a failed write leaves the import
+            # redirected, and this record is the only way to retry it.
             mem.write(iat_addr, saved_original.to_bytes(ptr_sz, 'little'))
+            del self._hooks[key]
         elif original_addr is not None:
             mem = self._get_memory()
             modules = self._get_modules()
@@ -54,6 +57,13 @@ class IATHook:
                     f"Function '{func_name}' not found in IAT of '{module_name}'"
                 )
             mem.write(iat_addr, original_addr.to_bytes(ptr_sz, 'little'))
+        else:
+            # Nothing to write and no record to write it from is not success:
+            # the caller asked for an import to be put back, and nothing here
+            # proves it is.
+            raise PydbgError(
+                f"No IAT hook recorded for {module_name!r}!{func_name} and no "
+                f"original address was given")
 
     def find(self, module_name, func_name):
         mem = self._get_memory()

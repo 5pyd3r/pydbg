@@ -3,7 +3,7 @@
 import unittest
 from unittest import mock
 
-from tests import TEST_TARGET_PATH
+from tests import TEST_TARGET_PATH, extension_free_module
 
 try:
     from pydbg import _pydbg  # noqa: F401
@@ -11,16 +11,20 @@ try:
 except ImportError:
     _has_cython = False
 
-from pydbg.breakpoint.hardware import HardwareBreakpointManager
-from pydbg.breakpoint.software import SoftwareBreakpointManager
 from pydbg.breakpoint.model import Breakpoint
 from pydbg.core.session import DebugSession
 from pydbg.core.trace_registry import TraceRegistry
 from pydbg.exceptions import TeardownError
 from pydbg.hook.iat import IATHook
 from pydbg.hook.inline import InlineHook
-from pydbg.memory.manager import MemoryManager
+from pydbg.symbol.resolver import SymbolResolver
 from pydbg.thread.manager import ThreadManager
+
+# The managers below are imported inside the tests that use them: hardware,
+# software and memory all bind `_pydbg` at module import, so a top-level import
+# would make this file (and every extension-free test in it) uncollectable on a
+# machine without the compiled extension. `extension_free_module` supplies that
+# binding for the tests whose bookkeeping does not need the real one.
 
 # What a Debugger owns that close() has nothing to undo for, with the reason.
 # Every *other* public attribute of a Debugger is a manager that can write the
@@ -88,8 +92,10 @@ class TestManagerTeardown(unittest.TestCase):
     """Each manager undoes its own writes and reports the ones it could not."""
 
     def test_software_teardown_puts_every_byte_back(self):
+        software = extension_free_module("pydbg.breakpoint.software")
+
         session = DebugSession()
-        mgr = SoftwareBreakpointManager(session)
+        mgr = software.SoftwareBreakpointManager(session)
         session.breakpoints[1] = Breakpoint(kind="int3", addr=0x1000, original=b"\x90", h_process=123)
         session.breakpoints[2] = Breakpoint(kind="int3", addr=0x2000, original=b"\x55", h_process=123)
         session.breakpoints[3] = Breakpoint(kind="hw", addr=0x3000, slot=0, condition="x", length=1)
@@ -104,8 +110,10 @@ class TestManagerTeardown(unittest.TestCase):
         self.assertEqual(list(session.breakpoints), [3])
 
     def test_software_teardown_reports_and_keeps_walking(self):
+        software = extension_free_module("pydbg.breakpoint.software")
+
         session = DebugSession()
-        mgr = SoftwareBreakpointManager(session)
+        mgr = software.SoftwareBreakpointManager(session)
         session.breakpoints[1] = Breakpoint(kind="int3", addr=0x1000, original=b"\x90", h_process=123)
         session.breakpoints[2] = Breakpoint(kind="int3", addr=0x2000, original=b"\x55", h_process=123)
 
@@ -120,8 +128,10 @@ class TestManagerTeardown(unittest.TestCase):
         self.assertIn("0x1000", problems[0][0])
 
     def test_hardware_teardown_disarms_every_recorded_slot(self):
+        hardware = extension_free_module("pydbg.breakpoint.hardware")
+
         session = DebugSession()
-        mgr = HardwareBreakpointManager(session)
+        mgr = hardware.HardwareBreakpointManager(session)
         session.breakpoints[7] = Breakpoint(kind="hw", addr=0x1000, slot=2, condition="x", length=1)
         session.breakpoints[8] = Breakpoint(kind="int3", addr=0x2000, original=b"\x90", h_process=123)
 
@@ -173,6 +183,25 @@ class TestManagerTeardown(unittest.TestCase):
         self.assertEqual(sorted(restored), [0x9000, 0xA000])
         self.assertEqual(hook._hooks, {})
 
+    def test_symbol_teardown_reports_an_error_that_is_not_a_pydbg_error(self):
+        """ADR-0004 says teardown never raises, whatever cleanup throws.
+
+        SymCleanup is reached through the extension; catching only PydbgError
+        let any other type escape close() and skip the rest of the chain.
+        """
+        resolver = SymbolResolver(DebugSession())
+
+        def explode():
+            raise RuntimeError("dbghelp session is already gone")
+
+        resolver.cleanup = explode
+
+        problems = resolver.teardown()
+
+        self.assertEqual(len(problems), 1)
+        self.assertEqual(problems[0][0], "dbghelp session")
+        self.assertIn("dbghelp session is already gone", problems[0][1])
+
     def test_memory_teardown_owns_nothing_of_its_own(self):
         """Allocations belong to the instrumenters that asked for them.
 
@@ -182,12 +211,16 @@ class TestManagerTeardown(unittest.TestCase):
         method exists because the manager writes the target and must be in the
         teardown chain.
         """
-        mgr = MemoryManager(DebugSession())
+        memory = extension_free_module("pydbg.memory.manager")
+
+        mgr = memory.MemoryManager(DebugSession())
         self.assertEqual(mgr.teardown(), ())
 
     def test_memory_discard_forgets_nothing_because_it_records_nothing(self):
         """ADR-0004's other half: a killed target has no records to drop."""
-        mgr = MemoryManager(DebugSession())
+        memory = extension_free_module("pydbg.memory.manager")
+
+        mgr = memory.MemoryManager(DebugSession())
         self.assertIsNone(mgr.discard())
 
     def test_thread_teardown_owns_nothing_of_its_own(self):
@@ -280,6 +313,32 @@ class TestTraceRegistry(unittest.TestCase):
         self.assertEqual(registry.teardown(),
                          [("trace 0 (object)", "no teardown()")])
 
+    def test_a_second_teardown_does_not_run_an_undone_tracer_again(self):
+        """A tracer that let go is forgotten, so close() twice undoes once."""
+        registry = TraceRegistry()
+        first, second = _FakeTracer(), _FakeTracer()
+        registry.attach(first)
+        registry.attach(second)
+
+        self.assertEqual(registry.teardown(), [])
+        self.assertEqual(registry.teardown(), [])
+        self.assertEqual((first.teardowns, second.teardowns), (1, 1),
+                         "a second close() re-ran a tracer that was undone")
+
+    def test_a_tracer_whose_teardown_raised_stays_for_a_later_retry(self):
+        """It was not undone, so a later close() must still be able to try."""
+        registry = TraceRegistry()
+        broken = _FakeTracer(error=RuntimeError("exploded"))
+        registry.attach(broken)
+
+        self.assertEqual(len(registry.teardown()), 1)
+        self.assertEqual(len(registry), 1,
+                         "a tracer that could not let go was forgotten")
+
+        broken.error = None
+        self.assertEqual(registry.teardown(), [])
+        self.assertEqual(broken.teardowns, 2)
+
     def test_discard_never_restores_and_never_stops_the_walk(self):
         first = _FakeTracer(discard_error=RuntimeError("already gone"))
         second = _FakeTracer()
@@ -292,6 +351,8 @@ class TestTraceRegistry(unittest.TestCase):
         self.assertEqual((first.discards, second.discards), (1, 1))
         self.assertEqual((first.teardowns, second.teardowns), (0, 0),
                          "the terminate path restored something")
+        self.assertEqual(len(registry), 0,
+                         "discard kept tracers for a target that is gone")
 
 
 @unittest.skipUnless(_has_cython, "optional dependency: Cython extension")

@@ -835,6 +835,41 @@ class TestLifecycle(unittest.TestCase):
                          self.originals[BASE + 0x1100],
                          "the other block was still restored")
 
+    def test_an_install_that_aborts_keeps_what_already_landed(self):
+        """A failure that is not a per-block refusal must leave a record.
+
+        The install loop committed `_originals` only after the last block, so
+        a MemoryError/KeyboardInterrupt/TypeError escaping it left the earlier
+        detours in the target with nothing close() could restore.
+        """
+        calls = []
+
+        def install_or_abort(dbg, address, patch, original=None):
+            calls.append(address)
+            if len(calls) == 2:
+                raise TypeError("a plan the decoder should have refused")
+            dbg.write_memory(address, patch)
+            return bbl.InstalledPatch(address, patch, original)
+
+        with mock.patch.object(bbl, "install_patch", install_or_abort):
+            with self.assertRaises(TypeError):
+                self.instrumenter.install()
+
+        self.assertEqual(list(self.instrumenter._originals), [BASE + 0x1000],
+                         "the detour that landed was not recorded")
+        self.assertEqual(self.instrumenter._stub_region, STUB_REGION,
+                         "the stub region an installed detour jumps into was "
+                         "forgotten")
+        self.assertIsNotNone(self.instrumenter._buffer)
+
+        problems = self.instrumenter.teardown()
+
+        self.assertEqual(problems, [])
+        self.assertEqual(self.dbg.bytes_at(BASE + 0x1000, 5),
+                         self.originals[BASE + 0x1000])
+        self.assertEqual(self.dbg.memory.freed,
+                         [self.dbg.memory.allocations[0], STUB_REGION])
+
     def test_discard_forgets_without_touching_the_target(self):
         self.instrumenter.install()
         self.dbg.writes.clear()

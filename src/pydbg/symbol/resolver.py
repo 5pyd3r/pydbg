@@ -37,10 +37,15 @@ class SymbolResolver:
         self._initialized = False
 
     def teardown(self):
-        """End the dbghelp session. Returns [(what, why)] on failure."""
+        """End the dbghelp session. Returns [(what, why)] on failure.
+
+        Never raises (ADR-0004): close() still has to walk the rest of the
+        chain, and a cleanup can fail with something that is not a PydbgError
+        (an extension wrapper's own error type, a caller's stub).
+        """
         try:
             self.cleanup()
-        except PydbgError as exc:
+        except Exception as exc:
             return [("dbghelp session", str(exc))]
         return []
 

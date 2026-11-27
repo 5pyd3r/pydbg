@@ -458,49 +458,61 @@ class BblInstrumenter:
         installed = []
         originals = {}
         cursor = region
-        for plan in plans:
-            if plan.rva in refusals:
-                continue
-            try:
-                instructions = self._decode_rvas(
-                    self._analysis, plan.instruction_rvas)
-                address_base = decoder_address_base(
-                    plan.instruction_rvas, instructions)
-                prefix = take_prefix(
-                    instructions, plan.rva, address_base=address_base)
-                if not plan.relocatable:
-                    # Let relocate_prefix name the branch and its RVA; its
-                    # first check is the branch/return refusal. A plan that
-                    # says "not relocatable" for another reason still refuses.
-                    relocate_prefix(prefix, base, address_base=address_base)
-                    raise UnsupportedInstruction(
-                        plan.rva, '', 'the planned prefix cannot be relocated')
-                if sink is None or cursor is None:
-                    raise PydbgError(
-                        'the event buffer or stub region was not allocated')
-                stub_address = cursor
-                relocated = relocate_prefix(
-                    prefix, stub_address, address_base=address_base)
-                stub = build_stub(
-                    sink, plan.rva, len(plan.instruction_rvas), relocated,
-                    base + plan.rva + DETOUR_SIZE)
-                self.dbg.write_memory(stub_address, stub)
-                # The plan is in RVAs, the install in VAs: the window, the
-                # E9 and the record all speak absolute addresses.
-                absolute = base + plan.rva
-                original = bytes(self.dbg.read_memory(
-                    absolute, len(relocated)))
-                patch = build_abs_jmp(absolute, stub_address) + (
-                    b"\x90" * (len(relocated) - DETOUR_SIZE))
-                record = install_patch(
-                    self.dbg, absolute, patch, original=original)
-                warnings.extend(record.warnings)
-                installed.append(plan.rva)
-                originals[absolute] = record
-                cursor += len(stub)
-            except (PydbgError, OSError) as exc:
-                refusals[plan.rva] = str(exc) or exc.__class__.__name__
-                warnings.extend(getattr(exc, 'warnings', ()))
+        try:
+            for plan in plans:
+                if plan.rva in refusals:
+                    continue
+                try:
+                    instructions = self._decode_rvas(
+                        self._analysis, plan.instruction_rvas)
+                    address_base = decoder_address_base(
+                        plan.instruction_rvas, instructions)
+                    prefix = take_prefix(
+                        instructions, plan.rva, address_base=address_base)
+                    if not plan.relocatable:
+                        # Let relocate_prefix name the branch and its RVA; its
+                        # first check is the branch/return refusal. A plan that
+                        # says "not relocatable" for another reason still refuses.
+                        relocate_prefix(prefix, base, address_base=address_base)
+                        raise UnsupportedInstruction(
+                            plan.rva, '', 'the planned prefix cannot be relocated')
+                    if sink is None or cursor is None:
+                        raise PydbgError(
+                            'the event buffer or stub region was not allocated')
+                    stub_address = cursor
+                    relocated = relocate_prefix(
+                        prefix, stub_address, address_base=address_base)
+                    stub = build_stub(
+                        sink, plan.rva, len(plan.instruction_rvas), relocated,
+                        base + plan.rva + DETOUR_SIZE)
+                    self.dbg.write_memory(stub_address, stub)
+                    # The plan is in RVAs, the install in VAs: the window, the
+                    # E9 and the record all speak absolute addresses.
+                    absolute = base + plan.rva
+                    original = bytes(self.dbg.read_memory(
+                        absolute, len(relocated)))
+                    patch = build_abs_jmp(absolute, stub_address) + (
+                        b"\x90" * (len(relocated) - DETOUR_SIZE))
+                    record = install_patch(
+                        self.dbg, absolute, patch, original=original)
+                    warnings.extend(record.warnings)
+                    installed.append(plan.rva)
+                    originals[absolute] = record
+                    cursor += len(stub)
+                except (PydbgError, OSError) as exc:
+                    refusals[plan.rva] = str(exc) or exc.__class__.__name__
+                    warnings.extend(getattr(exc, 'warnings', ()))
+        finally:
+            # Record what landed before any failure can leave this method. A
+            # failure that is not one block's refusal -- MemoryError,
+            # KeyboardInterrupt, a TypeError from a bad plan -- used to escape
+            # with the detours written but unrecorded, so close() could not
+            # undo the target it had patched. The shared allocations stay
+            # reachable with them: installed detours jump into the stub region.
+            self._originals.update(originals)
+            if originals:
+                self._buffer = sink
+                self._stub_region = region
 
         if not installed and (sink is not None or region is not None):
             # Nothing points at the shared allocations, so releasing them now

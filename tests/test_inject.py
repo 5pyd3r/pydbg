@@ -559,6 +559,107 @@ class _FakeDebugger:
         self._session = _FakeSession()
 
 
+def _api_module():
+    """`pydbg.inject.api`, imported against a stub extension when absent.
+
+    The module imports `_pydbg` at its top, so without the compiled extension
+    it cannot be imported the normal way. The stub exists only while the module
+    executes; the test replaces `_pydbg` with its own fake afterwards, and the
+    module is not left cached for other tests.
+    """
+    try:
+        from pydbg.inject import api
+        return api
+    except ImportError:
+        pass
+
+    import importlib
+    import sys
+    import types
+    from unittest import mock
+
+    with mock.patch.dict(
+            sys.modules,
+            {"pydbg._pydbg": types.ModuleType("pydbg._pydbg")}):
+        module = importlib.import_module("pydbg.inject.api")
+    package = sys.modules["pydbg.inject"]
+    if getattr(package, "api", None) is module:
+        delattr(package, "api")
+    sys.modules.pop("pydbg.inject.api", None)
+    return module
+
+
+class _FakeApcMemory:
+    """Just enough target memory to watch the APC parameter buffer."""
+
+    def __init__(self):
+        self.allocations = []
+        self.freed = []
+        self.writes = []
+
+    def alloc_remote(self, size, protect=0x04):
+        address = 0x10000 + 0x1000 * len(self.allocations)
+        self.allocations.append(address)
+        return address
+
+    def write(self, address, data):
+        self.writes.append((address, bytes(data)))
+
+    def free_remote(self, address):
+        self.freed.append(address)
+
+
+class _FakeApcTarget:
+    """A Debugger whose session and memory are enough for queue_apc()."""
+
+    def __init__(self):
+        self._session = _FakeSession()
+        self.memory = _FakeApcMemory()
+
+
+class TestQueueApcFailureCleanup(unittest.TestCase):
+    """The parameter buffer must not outlive an APC that never queued.
+
+    A successful APC owns the bytes it receives (see the docstring), but an
+    APC that was never queued never runs, so the caller has no way to free the
+    buffer itself.
+    """
+
+    def test_a_failed_open_thread_frees_the_parameter_buffer(self):
+        from unittest import mock
+
+        api = _api_module()
+        target = _FakeApcTarget()
+        extension = mock.Mock()
+        extension.open_thread.side_effect = OSError(87, "no such thread")
+
+        with mock.patch.object(api, "_pydbg", extension):
+            with self.assertRaises(InjectionError):
+                api.queue_apc(target, 1234, 0x1000, data=b"\x2A\x00\x00\x00")
+
+        self.assertEqual(len(target.memory.allocations), 1)
+        self.assertEqual(target.memory.freed, target.memory.allocations,
+                         "the remote parameter buffer leaked")
+
+    def test_a_refused_queue_user_apc_frees_the_parameter_buffer_too(self):
+        from unittest import mock
+
+        api = _api_module()
+        target = _FakeApcTarget()
+        extension = mock.Mock()
+        extension.open_thread.return_value = 0x99
+        extension.queue_user_apc.side_effect = OSError(5, "access denied")
+
+        with mock.patch.object(api, "_pydbg", extension):
+            with self.assertRaises(InjectionError):
+                api.queue_apc(target, 1234, 0x1000, data=b"\x2A\x00\x00\x00")
+
+        self.assertEqual(target.memory.freed, target.memory.allocations,
+                         "the remote parameter buffer leaked")
+        self.assertEqual(extension.close_handle.call_count, 1,
+                         "the opened thread handle leaked too")
+
+
 @needs_cython
 class TestSuspendCountUnit(unittest.TestCase):
     """The count is distinct threads successfully suspended, not attempts."""
