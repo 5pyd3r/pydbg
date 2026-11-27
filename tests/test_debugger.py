@@ -12,6 +12,7 @@ except ImportError:
     _has_cython = False
 
 
+@unittest.skipUnless(_has_cython, "optional dependency: Cython extension")
 class TestDebugEvent(unittest.TestCase):
     """Tests for the DebugEvent wrapper class."""
 
@@ -84,6 +85,7 @@ class TestDebugEvent(unittest.TestCase):
         self.assertEqual(event.dll_path, "C:\\Windows\\System32\\ntdll.dll")
 
 
+@unittest.skipUnless(_has_cython, "optional dependency: Cython extension")
 class TestParseLoadedDll(unittest.TestCase):
     """Pe plan Task 10: a LOAD_DLL event must lead to a parsed PE."""
 
@@ -121,6 +123,7 @@ class TestParseLoadedDll(unittest.TestCase):
                 pass
 
 
+@unittest.skipUnless(_has_cython, "optional dependency: Cython extension")
 class TestDebuggerAPICompleteness(unittest.TestCase):
     """Tests for terminate_process and get_exit_code."""
 
@@ -157,6 +160,7 @@ class TestDebuggerAPICompleteness(unittest.TestCase):
         dbg.close_handle(dbg._session.thread_handle)
 
 
+@unittest.skipUnless(_has_cython, "optional dependency: Cython extension")
 class TestExceptionHelpers(unittest.TestCase):
     """Tests for exception_code_to_str."""
 
@@ -198,6 +202,7 @@ class TestExceptionHelpers(unittest.TestCase):
         self.assertEqual(info["access_addr"], 0xDEAD)
 
 
+@unittest.skipUnless(_has_cython, "optional dependency: Cython extension")
 class TestRemoveHwBreakpoint(unittest.TestCase):
     """Tests for hardware breakpoint removal."""
 
@@ -231,6 +236,7 @@ class TestRemoveHwBreakpoint(unittest.TestCase):
         dbg.close_handle(dbg._session.thread_handle)
 
 
+@unittest.skipUnless(_has_cython, "optional dependency: Cython extension")
 class TestRunLoop(unittest.TestCase):
     """Tests for the event-driven debug loop."""
 
@@ -252,6 +258,7 @@ class TestRunLoop(unittest.TestCase):
         self.assertIsInstance(status, ExitStatus)
 
 
+@unittest.skipUnless(_has_cython, "optional dependency: Cython extension")
 class TestThreadEnumeration(unittest.TestCase):
     """Tests for thread enumeration."""
 
@@ -305,6 +312,7 @@ class TestThreadEnumeration(unittest.TestCase):
         self.assertIsInstance(tids[0], int)
 
 
+@unittest.skipUnless(_has_cython, "optional dependency: Cython extension")
 class TestFindBreakpoint(unittest.TestCase):
     """Tests for find_breakpoint."""
 
@@ -402,6 +410,7 @@ class TestFailureIsVisible(unittest.TestCase):
     worse than a loud one: the caller cannot tell it apart from a hung target.
     """
 
+    @unittest.skipUnless(_has_cython, "optional dependency: Cython extension")
     def test_run_raises_on_prolonged_idle(self):
         """run() must give up when WaitForDebugEvent keeps timing out.
 
@@ -421,6 +430,7 @@ class TestFailureIsVisible(unittest.TestCase):
             with self.assertRaises(PydbgTimeoutError):
                 dbg.run(lambda e: None, timeout_ms=10, max_idle_timeouts=3)
 
+    @unittest.skipUnless(_has_cython, "optional dependency: Cython extension")
     def test_run_idle_cap_is_optional(self):
         """Without max_idle_timeouts, idling is tolerated (old behaviour)."""
         from unittest import mock
@@ -481,6 +491,7 @@ class TestFailureIsVisible(unittest.TestCase):
         finally:
             teardown(dbg)
 
+    @unittest.skipUnless(_has_cython, "optional dependency: Cython extension")
     def test_breakpoint_degraded_hit_is_recorded(self):
         """A hit whose IP cannot be rewound must say so, not just retry.
 
@@ -517,6 +528,7 @@ class TestFailureIsVisible(unittest.TestCase):
         rearm.assert_called_once()   # the breakpoint stays armed
         self.assertIsNotNone(mgr.last_error)
 
+    @unittest.skipUnless(_has_cython, "optional dependency: Cython extension")
     def test_run_raises_when_a_breakpoint_degrades(self):
         """run() must not carry on as if a degraded hit had been handled."""
         from unittest import mock
@@ -544,6 +556,7 @@ class TestFailureIsVisible(unittest.TestCase):
                 with self.assertRaises(BreakpointError):
                     dbg.run(lambda e: None, timeout_ms=10)
 
+    @unittest.skipUnless(_has_cython, "optional dependency: Cython extension")
     def test_handle_bp_manual_raises_on_a_degraded_hit(self):
         """The manual path used to answer True and leave the IP mid-instruction."""
         from unittest import mock
@@ -559,6 +572,7 @@ class TestFailureIsVisible(unittest.TestCase):
                 dbg.handle_bp_manual(4242, 0x401000)
 
 
+@unittest.skipUnless(_has_cython, "optional dependency: Cython extension")
 class TestAccessViolationPayload(unittest.TestCase):
     """The producer side of an access violation, not a hand-built event.
 
@@ -600,6 +614,7 @@ class TestAccessViolationPayload(unittest.TestCase):
                 pass
 
 
+@unittest.skipUnless(_has_cython, "optional dependency: Cython extension")
 class TestErrorContract(unittest.TestCase):
     """A failure the caller can act on, or nothing at all."""
 

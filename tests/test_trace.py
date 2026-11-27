@@ -13,6 +13,7 @@ except ImportError:
     _has_cython = False
 
 
+@unittest.skipUnless(_has_cython, "optional dependency: Cython extension")
 class TestStepTracer(unittest.TestCase):
 
     def test_is_step_event_true(self):

@@ -12,6 +12,7 @@ except ImportError:
     _has_cython = False
 
 
+@unittest.skipUnless(_has_cython, "optional dependency: Cython extension")
 class TestThreadContext(unittest.TestCase):
     """Test reading and writing thread context."""
 
@@ -57,6 +58,7 @@ class TestThreadContext(unittest.TestCase):
         _pydbg.close_handle(h)
 
 
+@unittest.skipUnless(_has_cython, "optional dependency: Cython extension")
 class TestDebuggerThreadAPI(unittest.TestCase):
     """Tests for high-level thread API."""
 

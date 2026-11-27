@@ -9,6 +9,16 @@ import subprocess
 import sys
 import unittest
 
+# The last in-process check imports the Debugger, whose module binds the
+# extension at import time. The subprocess checks above are the ones that must
+# hold *without* it; this flag only decides whether that one can run here.
+try:
+    from pydbg import _pydbg  # noqa: F401
+
+    _has_cython = True
+except ImportError:
+    _has_cython = False
+
 _EXTENSION_FREE_IMPORT = '''
 import sys
 import pydbg
@@ -100,6 +110,7 @@ class TestImportBoundary(unittest.TestCase):
         self.assertEqual(done.returncode, 0, done.stderr)
         self.assertIn("without the extension", done.stdout)
 
+    @unittest.skipUnless(_has_cython, "optional dependency: Cython extension")
     def test_the_debugger_is_still_reachable_lazily(self):
         from pydbg import Debugger
         self.assertTrue(callable(Debugger))
