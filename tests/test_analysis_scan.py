@@ -226,6 +226,11 @@ class TestAccounting(unittest.TestCase):
             "two gaps": (NOP * 2 + gap(2) + NOP * 2 + gap(2) + NOP * 2, 12),
             "gap at the end of the range":
                 (NOP * 4 + gap(4), 8),
+            # A decodable instruction that starts inside the range but needs
+            # bytes past it. It is not decoded, so its bytes must be a gap or
+            # the sum below comes up short.
+            "instruction crossing the end":
+                (NOP * 3 + b"\xb8\x01\x00\x00\x00", 4),
         }
         for name, (code, scanned) in cases.items():
             with self.subTest(case=name):
@@ -272,6 +277,61 @@ class TestAccounting(unittest.TestCase):
 
         self.assertEqual(scan.decoded, ())
         self.assertTrue(scan.is_complete())
+
+
+class TestStraddlingTail(unittest.TestCase):
+    """A section's last byte commonly begins a multi-byte instruction.
+
+    The scan refuses to decode that instruction, because its remaining bytes
+    are outside the range. Stopping there silently left those bytes in neither
+    the decoded count nor the gap list: the accounting invariant broke, and the
+    refusal said "0 undecodable run(s)" while bytes were missing.
+    """
+
+    def build(self):
+        """A .text whose last byte starts `mov eax, imm32`, then .data.
+
+        The .data section is what makes the instruction decodable at all: the
+        bytes after .text are readable (zero fill), so capstone sees a complete
+        instruction that runs past the section.
+        """
+        from pydbg.analysis import analyze_bytes
+
+        builder = PEBuilder(magic=0x10B, image_base=IMAGE_BASE,
+                            entry_rva=TEXT_RVA)
+        builder.add_section(".text", NOP * 4 + b"\xb8", TEXT_RVA)
+        builder.add_section(".data", b"\x00" * 0x10, 0x2000, 0xC0000040)
+        return analyze_bytes(builder.build())
+
+    def test_a_section_ending_mid_instruction_accounts_for_the_tail(self):
+        from pydbg.analysis.scan import scan_section
+
+        result = self.build()
+        scan = scan_section(result.image, result.decoder, ".text")
+
+        self.assertFalse(scan.is_complete())
+        self.assertEqual(scan.unaccounted_bytes(), 0)
+        self.assertEqual(scan.covered_bytes, 4)
+        self.assertEqual(len(scan.undecodable), 1)
+        self.assertEqual(scan.undecodable[0].rva, TEXT_RVA + 4)
+        self.assertEqual(scan.undecodable[0].size, 1)
+        self.assertIn("past the end", scan.undecodable[0].reason)
+
+    def test_the_refusal_names_the_straddling_tail(self):
+        from pydbg.analysis.scan import scan_section
+        from pydbg.exceptions import PydbgError
+
+        result = self.build()
+        scan = scan_section(result.image, result.decoder, ".text")
+
+        with self.assertRaises(PydbgError) as caught:
+            scan.instructions()
+        message = str(caught.exception)
+        # The two numbers that used to disagree with the bytes: the coverage
+        # ratio and the gap count.
+        self.assertIn("4/5 bytes decoded", message)
+        self.assertIn("1 undecodable run(s)", message)
+        self.assertIn("allow_incomplete=True", message)
 
 
 class TestEntryPoints(unittest.TestCase):

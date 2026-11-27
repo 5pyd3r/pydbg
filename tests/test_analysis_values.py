@@ -346,6 +346,47 @@ class TestGuardNarrowing(unittest.TestCase):
         self.assertEqual(value.kind.name, "SET")
         self.assertTrue(value.contains(0x40))
 
+    def test_an_empty_range_intersection_is_not_reported_as_no_writer(self):
+        """The two wrong directions, and the refusal that sits between them.
+
+        A guard that excludes every value the base established contradicts the
+        writer evidence. `NONE` said "no writer was seen", which is false, and
+        `contains()` then answered False for every value — "this path excludes
+        it" published as "impossible". Returning the base untouched is the
+        other wrong direction: values the guard forbids. Neither can be settled
+        from the bytes, so the answer must stay visibly undecided.
+        """
+        from pydbg.analysis import Bound, ValueSet, narrow_by_guards
+        body = _cmp_imm(0x29) + b"\x77\x02"
+        result = analyze(body)
+        narrowed = narrow_by_guards(result, ADDR,
+                                    base=ValueSet.of_range(0x40, 0x50))
+
+        self.assertNotEqual(narrowed.kind, Bound.NONE)
+        self.assertFalse(narrowed.is_decided())
+        with self.assertRaises(ValueError):
+            narrowed.contains(0x45)
+        self.assertTrue(narrowed.may_contain(0x45))
+        self.assertIn("guard", narrowed.render())
+
+    def test_an_empty_set_intersection_gets_the_same_refusal(self):
+        """The SET branch had the same hole under a different name.
+
+        `SET` with no values is still a decided "every value is impossible";
+        the guard conflict deserves the same visible undecided form the range
+        intersection gets.
+        """
+        from pydbg.analysis import Bound, ValueSet, narrow_by_guards
+        body = _cmp_imm(0x29) + b"\x77\x02"
+        result = analyze(body)
+        narrowed = narrow_by_guards(
+            result, ADDR,
+            base=ValueSet(kind=Bound.SET, values=frozenset((0x40,))))
+
+        self.assertFalse(narrowed.is_decided())
+        with self.assertRaises(ValueError):
+            narrowed.contains(0x40)
+
     def test_the_other_direction_bounds_from_below(self):
         """`jbe`'s fallthrough is `> limit`, so it excludes the low values.
 
@@ -444,6 +485,65 @@ class TestScopeIsReported(unittest.TestCase):
         self.assertEqual(value.values, frozenset((1,)))
         self.assertGreaterEqual(value.unresolved_writes, 1)
         self.assertIn("scope", value.render())
+
+    def test_a_narrowed_set_keeps_the_scope_it_applies_to(self):
+        """Narrowing the values must not silently narrow the question.
+
+        The SET and RANGE branches rebuilt the set without
+        `unresolved_writes`, while the empty-intersection branch kept it — the
+        same answer changed scope depending on whether the guard excluded
+        anything, and a caller could not see the further writes the narrowed
+        set says nothing about.
+        """
+        from pydbg.analysis import narrow_by_guards, value_set_of
+        body = (_store_imm(0) + _store_imm(0x40) + b"\x89\x43\x04"
+                + _cmp_imm(0x29) + b"\x77\x02")
+        result = analyze(body)
+        base = value_set_of(result, ADDR)
+        self.assertGreaterEqual(base.unresolved_writes, 1)
+
+        narrowed = narrow_by_guards(result, ADDR, base=base)
+
+        self.assertEqual(narrowed.values, frozenset((0,)))
+        self.assertEqual(narrowed.unresolved_writes, base.unresolved_writes)
+        self.assertIn("scope", narrowed.render())
+
+    def test_a_narrowed_range_keeps_the_scope_it_applies_to(self):
+        from pydbg.analysis import Bound, ValueSet, narrow_by_guards
+        body = _cmp_imm(0x29) + b"\x77\x02"
+        result = analyze(body)
+        base = ValueSet(kind=Bound.RANGE, lo=0, hi=0xFF, unresolved_writes=3)
+
+        narrowed = narrow_by_guards(result, ADDR, base=base)
+
+        self.assertEqual(narrowed.kind, Bound.RANGE)
+        self.assertEqual((narrowed.lo, narrowed.hi), (0, 0x29))
+        self.assertEqual(narrowed.unresolved_writes, 3)
+
+    def test_an_unbounded_rebuild_keeps_the_reason_that_makes_it_credible(self):
+        """`value_set_of` re-attaches the image-wide scope; it must not drop
+        the reason doing so.
+
+        An UNBOUNDED set without a reason is indistinguishable from "I gave
+        up", which is why the only constructor demands one. `writes_to`
+        produces no UNBOUNDED today, so the rebuild is exercised directly
+        rather than waiting for a producer that would make the defect reachable.
+        """
+        from types import SimpleNamespace
+        from unittest import mock
+
+        from pydbg.analysis import Bound, ValueSet, value_set_of
+        wide = ValueSet.unbounded("every writer admits any value",
+                                  ((0x10, "store of a parameter"),))
+        result = SimpleNamespace(decoder=None, image=None)
+
+        with mock.patch("pydbg.analysis.values.writes_to",
+                        return_value=((0x10, wide),)):
+            rebuilt = value_set_of(result, ADDR)
+
+        self.assertEqual(rebuilt.kind, Bound.UNBOUNDED)
+        self.assertEqual(rebuilt.reason, "every writer admits any value")
+        self.assertEqual(rebuilt.writers, wide.writers)
 
 
 if __name__ == "__main__":
