@@ -83,7 +83,7 @@ def run_target(dbg, on_event, max_idle_timeouts):
     return None
 
 
-def remove_breakpoints(dbg, owned, recheck_removed=True):
+def remove_breakpoints(dbg, owned):
     """Remove the breakpoints a tracer owns; return the cleanup warnings.
 
     `owned` is an iterable of (address, bp_id) pairs in the order they were
@@ -93,10 +93,12 @@ def remove_breakpoints(dbg, owned, recheck_removed=True):
     every one would fail the same way. A live target's failed removal is
     "breakpoint left".
 
-    `recheck_removed` re-asks `find_breakpoint()` for every address whose
-    removal did not raise; a record that survived is a real leftover. A tracer
-    that has never re-asked passes False, because re-asking changes what it
-    reports for a debugger that returns without removing.
+    A removal that returned without raising is asked for again: a record still
+    there after the call that claimed to remove it is a real leftover, not a
+    clean removal. The question is asked by breakpoint id, not by address
+    alone, because the four debug-register slots can hold the same address
+    (four probes of one entry) and another owner's record is not evidence
+    that this record survived.
 
     Returns:
         tuple[str, ...]: the distinct warnings, in encounter order.
@@ -116,11 +118,11 @@ def remove_breakpoints(dbg, owned, recheck_removed=True):
             failed_addresses.add(address)
             warnings.append("breakpoint left")
 
-    if recheck_removed and not exited:
-        for address, _bp_id in owned:
+    if not exited:
+        for address, bp_id in owned:
             if address in failed_addresses:
                 continue
-            if dbg.find_breakpoint(address) is not None:
+            if dbg.find_breakpoint(address) == bp_id:
                 warnings.append("breakpoint left")
                 break
     return tuple(dict.fromkeys(warnings))
