@@ -105,6 +105,12 @@ class MemoryWatch:
         # (~36 ms measured); caching the handle keeps a watch cheap enough to
         # observe a target that writes every 20 ms.
         self._h_threads = {}
+        # Handed a Debugger, a tracer is part of that debugger's teardown
+        # chain (ADR-0004); a fake or proxy without attach_trace() is simply
+        # not a lifecycle owner.
+        attach = getattr(dbg, "attach_trace", None)
+        if callable(attach):
+            attach(self)
 
     # ── arming ─────────────────────────────────────────────────
 
@@ -173,6 +179,36 @@ class MemoryWatch:
                     self.dbg.close_handle(h_thread)
                 except (PydbgError, OSError):
                     pass
+
+    def teardown(self):
+        """Undo the watch as one manager-contract step (ADR-0004).
+
+        `Debugger.close()` calls it through the `traces` registry. It is
+        `disarm()` under the name close() looks for: the same slot removal,
+        the same warnings, and the same idempotence.
+
+        Returns:
+            tuple[str, ...]: cleanup warnings ("breakpoint left",
+            "target exited during cleanup"), empty when the slot came back.
+        """
+        return tuple(self.disarm())
+
+    def discard(self):
+        """Forget the armed slot without touching the target (it is gone).
+
+        For `Debugger.terminate_process()`: the debug registers died with the
+        process, so there is no write to attempt, but the cached thread handles
+        this watch opened still belong to this process and are closed here.
+        """
+        self._bp_id = None
+        self._slot = None
+        self._reset()
+        handles, self._h_threads = self._h_threads, {}
+        for h_thread in handles.values():
+            try:
+                self.dbg.close_handle(h_thread)
+            except (PydbgError, OSError):
+                pass
 
     def _thread_handle(self, tid):
         """The thread's handle, opened on first use and cached per tid."""

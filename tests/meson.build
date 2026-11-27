@@ -10,6 +10,14 @@ instrument_target = executable(
   'target/instrument_target.c',
 )
 
+# 1e6 块循环目标（§13.5/§13.7）：main 的循环每轮调用一次 noinline 的 bump。
+# 只对 bump 所在块插桩，一次迭代就是一个 BLOCK 记录；同一循环也用来跑
+# 10^4 单步窗口 —— 热路径不调用导入函数，窗口不会因离开模块而提前结束。
+loop_target = executable(
+  'loop_target',
+  'target/loop_target.c',
+)
+
 # 记录自身 argv 的测试目标（用于 create_process(cmdline=...) 验证）
 argv_target = executable(
   'argv_target',
@@ -47,6 +55,15 @@ wedge_target = executable(
 av_target = executable(
   'av_target',
   'target/av_target.c',
+)
+
+# Phase 6 anti-debug target (spec §13.2). The sample performs the reads the
+# detector reports — IsDebuggerPresent, CheckRemoteDebuggerPresent, and the PEB
+# BeingDebugged / NtGlobalFlag fields — so pydbg.antidebug is checked against
+# an image that contains those checks, not against a synthetic fixture.
+antidebug_target = executable(
+  'antidebug_target',
+  'target/antidebug_target.c',
 )
 
 # Phase 5 PDB targets (spec §10.6(8)). /Zi makes the compiler write symbols and
@@ -97,6 +114,16 @@ dump_host = executable(
   link_with: dump_target,
 )
 
+# Phase 6 D10 stack-walk target (spec §13.3): a real call chain
+# main -> f1 -> f2 -> f3, with f3 sleeping so a debugger can capture a live
+# CONTEXT that holds at least three return addresses. A synthetic context
+# cannot prove StackWalker works: the previous live test walked a zeroed
+# buffer and only asserted "must not crash".
+stack_target = executable(
+  'stack_target',
+  'target/stack_target.c',
+)
+
 # Common environment: PYTHONPATH includes project root (for tests).
 # The editable install (pip install -e .) handles pydbg package discovery,
 # including the compiled Cython extension at the correct import path.
@@ -110,12 +137,15 @@ test_env.set('TEST_WOW64_TARGET_PATH',
 test_env.set('TEST_INSTRUMENT_TARGET_PATH', instrument_target.full_path())
 test_env.set('TEST_INSTRUMENT_TARGET32_PATH',
   meson.project_source_root() / 'tests' / 'target' / 'instrument_target32.exe')
+test_env.set('TEST_LOOP_TARGET_PATH', loop_target.full_path())
 test_env.set('TEST_ARGV_TARGET_PATH', argv_target.full_path())
 test_env.set('TEST_NESTED_TARGET_PATH', nested_target.full_path())
 test_env.set('TEST_WINDOW_TARGET_PATH', window_target.full_path())
 test_env.set('TEST_MODAL_TARGET_PATH', modal_target.full_path())
 test_env.set('TEST_WEDGE_TARGET_PATH', wedge_target.full_path())
 test_env.set('TEST_AV_TARGET_PATH', av_target.full_path())
+test_env.set('TEST_ANTIDEBUG_TARGET_PATH', antidebug_target.full_path())
+test_env.set('TEST_STACK_TARGET_PATH', stack_target.full_path())
 # /DEBUG leaves each .pdb next to its .exe, so the build dir already holds it.
 # Deriving the name from the built target keeps the two in step; a hard-coded
 # "pdb_target.pdb" would stop matching silently if the target were renamed.
@@ -125,6 +155,15 @@ test_env.set('TEST_PDB_PATH',
 test_env.set('TEST_PDB_CPP_TARGET_PATH', pdb_target_cpp.full_path())
 test_env.set('TEST_PDB_CPP_PDB_PATH',
   pdb_target_cpp.full_path().replace('.exe', '.pdb'))
+# P41's PE32 sample is built out of band by scripts/build-target32.ps1 (the
+# x86 toolchain is not part of the meson build), so these name the source-tree
+# artefacts instead of a build-dir target: the file exists only once that
+# script has run, and test_pdb32.py skips with "target not built:" when it has
+# not.
+test_env.set('TEST_PDB_TARGET32_PATH',
+  meson.project_source_root() / 'tests' / 'target' / 'pdb_target32.exe')
+test_env.set('TEST_PDB32_PATH',
+  meson.project_source_root() / 'tests' / 'target' / 'pdb_target32.pdb')
 test_env.set('TEST_CHILD_TARGET',
   meson.project_source_root() / 'tests' / 'target' / 'child_target32.exe')
 test_env.set('TEST_CHILD_TARGET_X64', child_target.full_path())

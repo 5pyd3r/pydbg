@@ -355,3 +355,25 @@ class MemoryManager:
             if nread < chunk:
                 gaps.append((cursor + nread, chunk - nread, err))
             cursor += chunk
+
+    def teardown(self):
+        """Undo nothing: every handle is the session's, every allocation the caller's.
+
+        This manager writes the target, so it belongs in the teardown chain
+        (ADR-0004), but it owns no artifact to release: `read`/`write` use the
+        session's process handle (released by `Debugger.close()`), and
+        `alloc_remote`/`alloc_near` hand the address back to the caller, which
+        frees it (`BblInstrumenter._release_setup`, the BBL event buffer).
+        Returning () is the honest answer, not a placeholder.
+        """
+        return ()
+
+    def discard(self):
+        """Forget nothing: this manager records nothing to forget.
+
+        `Debugger.terminate_process()` calls this on a killed target. Unlike
+        the managers that track what they installed, this one keeps no record
+        — reads/writes use the session's handle and allocations belong to the
+        caller — so there is nothing to drop.
+        """
+        return None

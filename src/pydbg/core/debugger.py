@@ -28,9 +28,11 @@ from ..module.resolver import ModuleResolver
 from ..symbol.resolver import SymbolResolver
 from ..thread.manager import ThreadManager
 from .event import DebugEvent
+from .policy import ExceptionPolicy
 from .process import ProcessManager, enumerate_processes
 from .session import DebugSession
 from .status import ExitReason, ExitStatus
+from .trace_registry import TraceRegistry
 from .windows import Windows
 from .window_probe import MessageLoopState
 
@@ -70,7 +72,22 @@ class _Dispatch:
 class Debugger:
     """Main debugger class. Procedural API for Win32 debugging."""
 
-    def __init__(self):
+    def __init__(self, exception_policy=None):
+        """Create a debugger.
+
+        Args:
+            exception_policy: ExceptionPolicy deciding the ContinueDebugEvent
+                status for exception events; None means the default policy,
+                which is the DBG_CONTINUE-for-everything behaviour this class
+                always had. See core.policy.
+        """
+        self.exception_policy = (
+            ExceptionPolicy() if exception_policy is None else exception_policy)
+        # The Win32 model pauses the target on exactly one event and resumes it
+        # with ContinueDebugEvent, so the event that is currently paused is the
+        # one a continue status applies to. wait_event() records it here;
+        # continue_event() reads it to let the policy answer.
+        self._pending_event = None
         self._session = DebugSession()
         self.process = ProcessManager(self._session)
         self.windows = Windows(self._session)
@@ -83,6 +100,9 @@ class Debugger:
         self.disasm = DisasmEngine(self._session)
         self.assembler = Assembler()
         self.step_tracer = StepTracer(self._session)
+        # Trace tracers are created by the caller, not here; once one is handed
+        # this debugger it registers itself and close() disarms it (ADR-0004).
+        self.traces = TraceRegistry()
         self.hook_iat = IATHook(self._session)
         self.hook_inline = InlineHook(self._session)
         self.instrumenter = Instrumenter(self._session)
@@ -110,6 +130,21 @@ class Debugger:
     def _close_foreign_handles(self):
         """Release every handle open_process() handed out. Never raises."""
         self.process.release_all()
+
+    def attach_trace(self, tracer):
+        """Register a trace tracer so close() disarms it (ADR-0004).
+
+        The four tracers call this themselves when they are constructed with a
+        Debugger, so this is the explicit form for a tracer that was built
+        elsewhere (or through a proxy) and for code that wants the intent in
+        one line:
+
+            tracer = dbg.attach_trace(BblTracer(dbg))
+
+        Returns the tracer unchanged; attaching the same object twice keeps one
+        entry, not two.
+        """
+        return self.traces.attach(tracer)
 
     # ── lifecycle ──────────────────────────────────────────────
 
@@ -203,11 +238,14 @@ class Debugger:
 
     # What close() undoes, in the order it undoes it. Hooks go first because
     # they redirect control flow into memory that later steps release; the
-    # INT3s go after the debug registers, because a single-step that still has
-    # a stale DR slot fires inside the code that was just restored.
+    # tracers own INT3s and debug-register slots inside the code those hooks
+    # detoured, so they come after the detours and before the breakpoint
+    # managers that clean up the debug registers and then the INT3s. The
+    # memory and thread managers come last: they own no handle today, but
+    # anything they ever open must be released after the managers that use it.
     _TEARDOWN_ORDER = (
         "hook_iat", "hook_inline", "instrumenter", "bbl_instrumenter",
-        "brk_hw", "brk_sw", "symbols",
+        "traces", "brk_hw", "brk_sw", "symbols", "memory", "thread",
     )
 
     def close(self):
@@ -318,6 +356,10 @@ class Debugger:
         main = pid is None or pid == self._session.pid
         if main:
             self._session.terminated = True
+            # The drain below continues with the raw extension call, so no
+            # pending event is left for a later continue_event() to apply a
+            # policy to.
+            self._pending_event = None
             for name in self._TEARDOWN_ORDER:
                 discard = getattr(getattr(self, name, None), "discard", None)
                 if discard is not None:
@@ -430,6 +472,7 @@ class Debugger:
             except OSError:
                 pass  # non-fatal; thread ops fail later if open failed
 
+        self._pending_event = event
         return event
 
     def get_child_processes(self):
@@ -535,24 +578,56 @@ class Debugger:
         if child is not None:
             child.exit_code = event.raw.get("exit_code")
 
-    def continue_event(self, pid=None, tid=None):
+    def continue_event(self, pid=None, tid=None, status=None):
         """Continue a paused debug event.
+
+        Args:
+            pid: Process the paused event belongs to; defaults to the target.
+            tid: Thread the paused event belongs to; defaults to the target's
+                default thread.
+            status: ContinueDebugEvent status. None (the default) lets
+                `exception_policy` answer for the paused exception event; the
+                default policy answers DBG_CONTINUE, which is what every
+                continue used to send. Non-exception events keep the old
+                two-argument call. An explicit status always wins over the
+                policy.
 
         Fails loudly unless the pid/tid pair is simply no longer a paused
         event (ERROR_INVALID_PARAMETER) — which is what continuing after a
         target, usually a child, has already exited looks like. Every other
         failure used to vanish here as well.
         """
+        target_pid = pid or self._session.pid
+        target_tid = tid or self._session.tid
+        if status is None:
+            status = self._policy_status(target_pid, target_tid)
         try:
-            _pydbg.continue_debug_event(
-                pid or self._session.pid, tid or self._session.tid
-            )
+            if status is None:
+                _pydbg.continue_debug_event(target_pid, target_tid)
+            else:
+                _pydbg.continue_debug_event(target_pid, target_tid, status)
         except OSError as e:
             if getattr(e, "errno", None) == 87:      # ERROR_INVALID_PARAMETER
+                self._pending_event = None
                 return
             raise ProcessError(
-                f"ContinueDebugEvent(pid={pid or self._session.pid}, "
-                f"tid={tid or self._session.tid}): {e}") from e
+                f"ContinueDebugEvent(pid={target_pid}, "
+                f"tid={target_tid}): {e}") from e
+        self._pending_event = None
+
+    def _policy_status(self, pid, tid):
+        """The policy's answer for the event currently paused, if it applies.
+
+        None means the caller is not continuing an exception event the policy
+        saw: either the paused event is not an exception, or it belongs to a
+        different (pid, tid) pair.
+        """
+        event = self._pending_event
+        if event is None or event.type != "EXCEPTION":
+            return None
+        if (event.pid, event.tid) != (pid, tid):
+            return None
+        return self.exception_policy.continue_status(event)
 
     def _dispatch_exception(self, event):
         """Run the breakpoint/single-step lifecycle for one EXCEPTION event.

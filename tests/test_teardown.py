@@ -15,9 +15,73 @@ from pydbg.breakpoint.hardware import HardwareBreakpointManager
 from pydbg.breakpoint.software import SoftwareBreakpointManager
 from pydbg.breakpoint.model import Breakpoint
 from pydbg.core.session import DebugSession
+from pydbg.core.trace_registry import TraceRegistry
 from pydbg.exceptions import TeardownError
 from pydbg.hook.iat import IATHook
 from pydbg.hook.inline import InlineHook
+from pydbg.memory.manager import MemoryManager
+from pydbg.thread.manager import ThreadManager
+
+# What a Debugger owns that close() has nothing to undo for, with the reason.
+# Every *other* public attribute of a Debugger is a manager that can write the
+# target, so it must be in `_TEARDOWN_ORDER` and must have a teardown(). The
+# reasons are here so the next manager gets classified deliberately: a new name
+# that is neither registered nor listed makes the enumeration test red.
+_READ_ONLY_MANAGERS = {
+    "exception_policy": "a policy value object, not a manager",
+    "process": "opens and releases process handles; _release_handles closes them",
+    "windows": "enumerates the target's windows, writes nothing",
+    "modules": "reads the module table",
+    "disasm": "decodes bytes in the host",
+    "assembler": "assembles in the host, never in the target",
+    "stack_walker": "walks a context the caller already captured",
+    "step_tracer": (
+        "sets TF on a caller-owned thread handle; the pending step is session "
+        "state that brk_sw.discard() clears"),
+}
+
+
+def _teardown_problems(dbg):
+    """Everything wrong with how `dbg` registers its target writers.
+
+    Returns a list of human-readable problems, empty when every manager that
+    can write the target is registered and undoable. Kept as one function so
+    the pass/fail test and the monkeypatch proofs exercise the same check.
+    """
+    order = tuple(dbg._TEARDOWN_ORDER)
+    problems = []
+    for name, manager in vars(dbg).items():
+        if name.startswith("_") or name in _READ_ONLY_MANAGERS:
+            continue
+        if name not in order:
+            problems.append(
+                f"{name} ({type(manager).__name__}) writes the target but is "
+                f"missing from _TEARDOWN_ORDER")
+    for name in order:
+        manager = getattr(dbg, name, None)
+        if manager is None:
+            problems.append(
+                f"_TEARDOWN_ORDER names {name!r}, but Debugger has no such "
+                f"attribute")
+            continue
+        if not callable(getattr(manager, "teardown", None)):
+            problems.append(
+                f"{name} ({type(manager).__name__}) is in _TEARDOWN_ORDER but "
+                f"has no callable teardown()")
+        if not callable(getattr(manager, "discard", None)):
+            problems.append(
+                f"{name} ({type(manager).__name__}) is in _TEARDOWN_ORDER but "
+                f"has no callable discard()")
+    for name, reason in _READ_ONLY_MANAGERS.items():
+        if not hasattr(dbg, name):
+            problems.append(
+                f"{name} is declared read-only ({reason}), but Debugger has "
+                f"no such attribute")
+        if name in order:
+            problems.append(
+                f"{name} is declared read-only ({reason}) but is in "
+                f"_TEARDOWN_ORDER")
+    return problems
 
 
 class TestManagerTeardown(unittest.TestCase):
@@ -109,6 +173,256 @@ class TestManagerTeardown(unittest.TestCase):
         self.assertEqual(sorted(restored), [0x9000, 0xA000])
         self.assertEqual(hook._hooks, {})
 
+    def test_memory_teardown_owns_nothing_of_its_own(self):
+        """Allocations belong to the instrumenters that asked for them.
+
+        `alloc_remote`/`alloc_near` hand an address back by design and the
+        caller frees it (`BblInstrumenter._release_setup`, the event buffer);
+        this manager opens no handle either, so the honest answer is (). The
+        method exists because the manager writes the target and must be in the
+        teardown chain.
+        """
+        mgr = MemoryManager(DebugSession())
+        self.assertEqual(mgr.teardown(), ())
+
+    def test_memory_discard_forgets_nothing_because_it_records_nothing(self):
+        """ADR-0004's other half: a killed target has no records to drop."""
+        mgr = MemoryManager(DebugSession())
+        self.assertIsNone(mgr.discard())
+
+    def test_thread_teardown_owns_nothing_of_its_own(self):
+        """Thread handles are opened and closed by their callers.
+
+        `open()` returns the handle and the caller closes it; suspend/resume
+        act on a caller-owned handle. So there is nothing this manager opened
+        to release, and teardown answers ().
+        """
+        mgr = ThreadManager(DebugSession())
+        self.assertEqual(mgr.teardown(), ())
+
+    def test_thread_discard_forgets_nothing_because_it_records_nothing(self):
+        """ADR-0004's other half: a killed target has no records to drop."""
+        mgr = ThreadManager(DebugSession())
+        self.assertIsNone(mgr.discard())
+
+
+class _FakeTracer:
+    """A tracer-shaped object: only the ADR-0004 contract close() needs."""
+
+    def __init__(self, warnings=(), error=None, discard_error=None):
+        self.warnings = warnings
+        self.error = error
+        self.discard_error = discard_error
+        self.teardowns = 0
+        self.discards = 0
+
+    def teardown(self):
+        self.teardowns += 1
+        if self.error is not None:
+            raise self.error
+        return self.warnings
+
+    def discard(self):
+        self.discards += 1
+        if self.discard_error is not None:
+            raise self.discard_error
+
+
+class TestTraceRegistry(unittest.TestCase):
+    """The Debugger-owned list of tracers, undone as one teardown step.
+
+    A tracer is caller-owned, so `close()` only learns about it through this
+    registry. Its teardown returns the tracers' cleanup warnings as the
+    `(what, why)` problems the rest of the chain uses.
+    """
+
+    def test_attach_keeps_each_tracer_once_and_in_order(self):
+        registry = TraceRegistry()
+        first, second = _FakeTracer(), _FakeTracer()
+
+        self.assertIs(registry.attach(first), first)
+        registry.attach(second)
+        registry.attach(first)      # already registered: not attached twice
+
+        self.assertEqual(len(registry), 2)
+        self.assertEqual(list(registry), [first, second])
+
+    def test_teardown_names_the_tracer_that_reported_a_warning(self):
+        registry = TraceRegistry()
+        tracer = _FakeTracer(warnings=("breakpoint left",))
+        registry.attach(tracer)
+
+        self.assertEqual(registry.teardown(),
+                         [(f"trace 0 ({type(tracer).__name__})",
+                           "breakpoint left")])
+
+    def test_one_broken_teardown_does_not_hide_the_others(self):
+        first = _FakeTracer(error=RuntimeError("exploded"))
+        second = _FakeTracer(warnings=("breakpoint left",))
+        registry = TraceRegistry()
+        registry.attach(first)
+        registry.attach(second)
+
+        problems = registry.teardown()
+
+        self.assertEqual(problems[0],
+                         (f"trace 0 ({type(first).__name__})", "exploded"))
+        self.assertEqual(problems[1],
+                         (f"trace 1 ({type(second).__name__})",
+                          "breakpoint left"))
+        self.assertEqual((first.teardowns, second.teardowns), (1, 1),
+                         "a raising teardown stopped the walk")
+
+    def test_an_attached_object_without_teardown_is_reported(self):
+        registry = TraceRegistry()
+        registry.attach(object())
+
+        self.assertEqual(registry.teardown(),
+                         [("trace 0 (object)", "no teardown()")])
+
+    def test_discard_never_restores_and_never_stops_the_walk(self):
+        first = _FakeTracer(discard_error=RuntimeError("already gone"))
+        second = _FakeTracer()
+        registry = TraceRegistry()
+        registry.attach(first)
+        registry.attach(second)
+
+        registry.discard()
+
+        self.assertEqual((first.discards, second.discards), (1, 1))
+        self.assertEqual((first.teardowns, second.teardowns), (0, 0),
+                         "the terminate path restored something")
+
+
+@unittest.skipUnless(_has_cython, "optional dependency: Cython extension")
+class TestTeardownRegistration(unittest.TestCase):
+    """A new target-writing manager cannot skip the teardown chain silently.
+
+    `Debugger.close()` walks `_TEARDOWN_ORDER` and skips a name whose object has
+    no `teardown`, so a manager that is never listed is never undone and nothing
+    says so. This test is the membership check the tuple cannot perform on
+    itself: every manager the Debugger owns is either registered for teardown or
+    declared read-only above.
+    """
+
+    def _debugger(self):
+        from pydbg import Debugger
+
+        return Debugger()
+
+    def test_every_target_writer_is_registered_and_undoable(self):
+        dbg = self._debugger()
+        try:
+            problems = _teardown_problems(dbg)
+        finally:
+            dbg.close()      # an unattached Debugger must still close cleanly
+        self.assertEqual(problems, [], "\n".join(problems))
+
+    def test_the_check_goes_red_when_a_writer_drops_out_of_the_order(self):
+        from pydbg import Debugger
+
+        dbg = self._debugger()
+        try:
+            reduced = tuple(n for n in dbg._TEARDOWN_ORDER if n != "brk_hw")
+            with mock.patch.object(Debugger, "_TEARDOWN_ORDER", reduced):
+                problems = _teardown_problems(dbg)
+        finally:
+            dbg.close()
+        self.assertTrue(
+            any("brk_hw" in p and "_TEARDOWN_ORDER" in p for p in problems),
+            f"a missing registration was not reported: {problems}")
+
+    def test_the_check_goes_red_when_a_registered_manager_has_no_teardown(self):
+        dbg = self._debugger()
+        try:
+            with mock.patch.object(type(dbg.traces), "teardown", None):
+                problems = _teardown_problems(dbg)
+        finally:
+            dbg.close()
+        self.assertTrue(
+            any("traces" in p and "teardown" in p for p in problems),
+            f"a missing teardown was not reported: {problems}")
+
+    def test_the_check_goes_red_when_a_registered_manager_has_no_discard(self):
+        """ADR-0004 has two halves: restore, and forget when it is too late."""
+        dbg = self._debugger()
+        try:
+            with mock.patch.object(type(dbg.traces), "discard", None):
+                problems = _teardown_problems(dbg)
+        finally:
+            dbg.close()
+        self.assertTrue(
+            any("traces" in p and "discard" in p for p in problems),
+            f"a missing discard was not reported: {problems}")
+
+    def test_the_check_goes_red_for_a_manager_added_to_the_debugger(self):
+        """The regression the test exists for: a new writer, never registered."""
+        dbg = self._debugger()
+        dbg.modules_cache = mock.Mock()      # a new manager, present only now
+        try:
+            problems = _teardown_problems(dbg)
+        finally:
+            del dbg.modules_cache
+            dbg.close()
+        self.assertTrue(
+            any("modules_cache" in p and "_TEARDOWN_ORDER" in p
+                for p in problems),
+            f"a newly added manager was not reported: {problems}")
+
+
+@unittest.skipUnless(_has_cython, "optional dependency: Cython extension")
+class TestDebuggerTraceRegistry(unittest.TestCase):
+    """The Debugger owns the tracers, so close() disarms them before it lets go."""
+
+    def test_traces_sits_between_the_detours_and_the_breakpoints(self):
+        from pydbg import Debugger
+
+        order = Debugger._TEARDOWN_ORDER
+        self.assertLess(order.index("bbl_instrumenter"), order.index("traces"),
+                        "a detour was left pointing into restored code")
+        self.assertLess(order.index("traces"), order.index("brk_hw"),
+                        "a trace slot was cleared after the debug registers")
+
+    def test_a_tracer_handed_a_debugger_registers_itself(self):
+        from pydbg import Debugger
+        from pydbg.trace import (
+            BblTracer, FunctionProbe, InstructionTracer, MemoryWatch,
+        )
+
+        dbg = Debugger()
+        try:
+            tracers = [
+                BblTracer(dbg),
+                InstructionTracer(dbg),
+                MemoryWatch(dbg, 0x1000),
+                FunctionProbe(dbg, 0x1000),
+            ]
+            self.assertEqual(list(dbg.traces), tracers)
+        finally:
+            dbg.close()
+
+    def test_attach_trace_registers_and_returns_the_tracer(self):
+        from pydbg import Debugger
+
+        dbg = Debugger()
+        tracer = _FakeTracer()
+        try:
+            self.assertIs(dbg.attach_trace(tracer), tracer)
+            dbg.attach_trace(tracer)    # attaching twice is a no-op
+            self.assertEqual(list(dbg.traces), [tracer])
+        finally:
+            dbg.close()
+
+    def test_close_reports_a_tracer_warning_as_a_teardown_problem(self):
+        from pydbg import Debugger
+
+        dbg = Debugger()
+        dbg.attach_trace(_FakeTracer(warnings=("breakpoint left",)))
+        with self.assertRaises(TeardownError) as ctx:
+            dbg.close()
+        self.assertIn(f"trace 0 ({_FakeTracer.__name__}): breakpoint left",
+                      str(ctx.exception))
+
 
 @unittest.skipUnless(_has_cython, "optional dependency: Cython extension")
 class TestClose(unittest.TestCase):
@@ -119,6 +433,84 @@ class TestClose(unittest.TestCase):
         dbg = Debugger()
         pid, tid = dbg.create_process(TEST_TARGET_PATH)
         return dbg, pid, tid
+
+    def test_close_without_a_target_is_a_noop(self):
+        """Every manager's teardown has to answer an empty state with ()."""
+        from pydbg import Debugger
+
+        dbg = Debugger()
+        dbg.close()
+        dbg.close()
+        self.assertIsNone(dbg._session.process_handle)
+
+    def test_close_disarms_an_armed_bbl_tracer_before_letting_go(self):
+        """A caller-owned tracer is undone by close(), not left in the target.
+
+        The probe runs just before the handles are released — the last moment
+        the target is still readable — so the bytes must be back and no
+        breakpoint record may still claim to be armed.
+        """
+        from pydbg.trace import BblTracer
+        from tests.helpers import create_debugger
+
+        dbg, pid, tid = create_debugger()
+        tracer = BblTracer(dbg)
+        self.assertGreater(tracer.plan(), 0)
+        self.assertGreater(tracer.arm(), 0)
+        armed_ids = dict(tracer._armed_ids)
+        originals = {addr: dbg._session.breakpoints[bp_id].original
+                     for addr, bp_id in armed_ids.items()}
+        first = next(iter(originals))
+        self.assertEqual(dbg.read_memory(first, 1), b"\xCC",
+                         "the tracer did not write the INT3 it recorded")
+
+        seen = {}
+        release = dbg._release_handles
+
+        def probe():
+            seen["bytes"] = {addr: dbg.read_memory(addr, 1)
+                             for addr in originals}
+            seen["breakpoints"] = dbg.verify_breakpoints()
+            seen["armed"] = dict(tracer._armed_ids)
+            release()
+
+        dbg._release_handles = probe
+        dbg.close()
+
+        self.assertEqual(seen["armed"], {},
+                         "close() left the tracer thinking it is armed")
+        self.assertEqual(seen["breakpoints"], [])
+        self.assertEqual(seen["bytes"], originals,
+                         "the bytes close() restored are not the originals")
+
+    def test_close_disarms_an_armed_memory_watch_before_letting_go(self):
+        """The same contract for the hardware half: the slot is freed."""
+        from pydbg.trace import MemoryWatch
+        from tests.helpers import create_debugger
+
+        dbg, pid, tid = create_debugger()
+        addr = dbg.memory.alloc_remote(0x1000)
+        watch = MemoryWatch(dbg, addr, 4)
+        watch.arm()
+        self.assertIsNotNone(dbg.find_breakpoint(addr),
+                             "the watch did not arm the slot it recorded")
+
+        seen = {}
+        release = dbg._release_handles
+
+        def probe():
+            seen["bp_id"] = watch._bp_id
+            seen["slot"] = watch._slot
+            seen["found"] = dbg.find_breakpoint(addr)
+            release()
+
+        dbg._release_handles = probe
+        dbg.close()
+
+        self.assertIsNone(seen["bp_id"])
+        self.assertIsNone(seen["slot"])
+        self.assertIsNone(seen["found"],
+                          "close() left the watch's debug-register slot armed")
 
     def test_close_undoes_in_the_documented_order(self):
         from pydbg import Debugger

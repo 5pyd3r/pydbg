@@ -266,5 +266,67 @@ class TestFunctionProbeHonestStops(_LiveProbeTestCase):
         self.assertFalse(summary.truncated)
 
 
+class _FakeCleanupDebugger:
+    """The calls disarm()/discard() make, so cleanup needs no target."""
+
+    def __init__(self):
+        self._session = type("Session", (), {"tid": 8})()
+        self.breakpoints = {}       # bp_id -> addr
+        self.removed = []
+        self.closed = []
+
+    def add(self, bp_id, addr):
+        self.breakpoints[bp_id] = addr
+
+    def remove_breakpoint(self, bp_id):
+        self.removed.append(bp_id)
+        self.breakpoints.pop(bp_id, None)
+
+    def find_breakpoint(self, addr):
+        return next((bid for bid, a in self.breakpoints.items() if a == addr),
+                    None)
+
+    def close_handle(self, h):
+        self.closed.append(h)
+
+    def get_exit_code(self):
+        return 259                  # STILL_ACTIVE
+
+
+class TestFunctionProbeTeardown(unittest.TestCase):
+    """The probe answers the teardown contract close() walks (ADR-0004)."""
+
+    def armed(self):
+        dbg = _FakeCleanupDebugger()
+        probe = FunctionProbe(dbg, 0x1000)
+        probe._bp_id = 7
+        probe._slot = 2
+        probe._h_thread = 0x55
+        dbg.add(7, 0x1000)
+        return probe, dbg
+
+    def test_teardown_disarms_and_closes_its_thread_handle(self):
+        probe, dbg = self.armed()
+
+        self.assertEqual(probe.teardown(), ())
+        self.assertEqual(dbg.removed, [7])
+        self.assertEqual(dbg.closed, [0x55])
+        self.assertIsNone(probe.hook_id)
+        self.assertEqual(probe.teardown(), (), "teardown is idempotent")
+
+    def test_discard_forgets_the_slot_without_touching_the_target(self):
+        probe, dbg = self.armed()
+
+        probe.discard()
+
+        self.assertEqual(dbg.removed, [])
+        self.assertEqual(dbg.breakpoints, {7: 0x1000},
+                         "discard wrote to a target it was told is gone")
+        self.assertIsNone(probe.hook_id)
+        self.assertIsNone(probe._slot)
+        self.assertIsNone(probe._h_thread)
+        probe.discard()         # idempotent
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -2,16 +2,17 @@
 
 from libc.stdlib cimport malloc, free
 from _win32types cimport (
-    HANDLE, DWORD, BOOL, LPVOID,
+    HANDLE, DWORD, BOOL, LPVOID, SIZE_T, ULONG_PTR,
     OpenThread, GetThreadContext, SetThreadContext,
     Wow64GetThreadContext, Wow64SetThreadContext, WOW64_CONTEXT_ALL,
     SuspendThread, ResumeThread, GetThreadId, GetLastError,
-    CloseHandle,
+    CloseHandle, PAPCFUNC, QueueUserAPC,
     THREAD_ALL_ACCESS, CONTEXT_ALL,
     CONTEXT_DEBUG_REGISTERS, CONTEXT_INTEGER, CONTEXT_CONTROL,
     CreateToolhelp32Snapshot, Thread32First, Thread32Next,
     THREADENTRY32, TH32CS_SNAPTHREAD,
     pydbg_ctx_sizeof, pydbg_ctx_init,
+    pydbg_ctx_arch_sizeof,
     pydbg_ctx_get_ip, pydbg_ctx_set_ip,
     pydbg_ctx_get_sp, pydbg_ctx_set_sp,
     pydbg_ctx_get_bp, pydbg_ctx_set_bp,
@@ -106,6 +107,53 @@ cpdef dict get_thread_context(unsigned long long h_thread, int machine=64):
     return out
 
 
+cpdef bytes get_thread_context_bytes(unsigned long long h_thread, int machine=64):
+    """Capture a thread's raw CONTEXT bytes.
+
+    machine: 32 = WOW64_CONTEXT (716 bytes), 64 = native x64 CONTEXT
+    (1232 bytes). This is the buffer StackWalk64 consumes; the dict-shaped
+    get_thread_context() above stays the register API. Raises OSError on
+    failure.
+    """
+    cdef int ctx_size = pydbg_ctx_sizeof()
+    cdef void* ctx = malloc(ctx_size)
+    if ctx == NULL:
+        raise MemoryError("Failed to allocate CONTEXT")
+    cdef BOOL result
+    if machine == 32:
+        pydbg_ctx_init(ctx, machine, WOW64_CONTEXT_ALL)
+        result = Wow64GetThreadContext(<HANDLE><LPVOID>h_thread, ctx)
+    else:
+        pydbg_ctx_init(ctx, machine, CONTEXT_ALL)
+        result = GetThreadContext(<HANDLE><LPVOID>h_thread, ctx)
+    if result == 0:
+        free(ctx)
+        raise OSError(GetLastError(), "GetThreadContext failed")
+    cdef char* raw = <char*>ctx
+    cdef bytes data = raw[:pydbg_ctx_arch_sizeof(machine)]
+    free(ctx)
+    return data
+
+
+cpdef tuple context_frame_bytes(int machine, object context_bytes):
+    """(ip, sp, fp) read from raw CONTEXT bytes, without touching a thread.
+
+    StackWalker starts from the context it was handed rather than from
+    whatever the thread's registers hold now. Raises ValueError when the
+    buffer is shorter than the architecture's CONTEXT.
+    """
+    cdef bytes data = bytes(context_bytes)
+    cdef int need = pydbg_ctx_arch_sizeof(machine)
+    if len(data) < need:
+        raise ValueError(
+            "CONTEXT for machine %d is %d bytes, got %d"
+            % (machine, need, len(data)))
+    cdef char* raw = data
+    return (pydbg_ctx_get_ip(<void*>raw, machine),
+            pydbg_ctx_get_sp(<void*>raw, machine),
+            pydbg_ctx_get_bp(<void*>raw, machine))
+
+
 cpdef int set_thread_context(unsigned long long h_thread, dict context, int machine=64) except? -1:
     """Set thread register context.
 
@@ -187,6 +235,25 @@ cpdef int resume_thread(unsigned long long h_thread):
     if result == <DWORD>-1:
         raise OSError(GetLastError(), "ResumeThread failed")
     return <int>result
+
+
+cpdef int queue_user_apc(unsigned long long h_thread, unsigned long long addr,
+                         unsigned long long data=0):
+    """Queue a user-mode APC to 'h_thread' at 'addr', with 'data' as parameter.
+
+    The target thread must enter an alertable wait before the routine runs
+    (SleepEx / WaitForSingleObjectEx(..., TRUE) / MsgWaitForMultipleObjectsEx
+    with MWMO_ALERTABLE); queueing does not interrupt a non-alertable wait.
+
+    Returns 1 on success. Raises OSError on failure.
+    """
+    cdef DWORD result = QueueUserAPC(
+        <PAPCFUNC>addr,
+        <HANDLE><LPVOID>h_thread,
+        <ULONG_PTR>data)
+    if result == 0:
+        raise OSError(GetLastError(), "QueueUserAPC failed")
+    return 1
 
 
 cpdef int close_thread(unsigned long long h_handle):

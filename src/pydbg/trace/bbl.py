@@ -169,6 +169,12 @@ class BblTracer:
         self._seen = set()
         self._reason = None
         self._warnings = []
+        # Handed a Debugger, a tracer is part of that debugger's teardown
+        # chain (ADR-0004); a fake or proxy without attach_trace() is simply
+        # not a lifecycle owner.
+        attach = getattr(dbg, "attach_trace", None)
+        if callable(attach):
+            attach(self)
 
     # ── planning ───────────────────────────────────────────────
 
@@ -319,6 +325,33 @@ class BblTracer:
                     warnings.append("breakpoint left")
                     break
         return tuple(dict.fromkeys(warnings))
+
+    def teardown(self):
+        """Undo this tracer's INT3s as one manager-contract step (ADR-0004).
+
+        `Debugger.close()` calls it through the `traces` registry. It is
+        `disarm()` under the name close() looks for: the same cleanup, the same
+        warnings, and the same idempotence — a second call owns nothing.
+
+        Returns:
+            tuple[str, ...]: cleanup warnings ("breakpoint left",
+            "target exited during cleanup"), empty when everything came back.
+        """
+        return tuple(self.disarm())
+
+    def discard(self):
+        """Forget the armed records without touching the target (it is gone).
+
+        For `Debugger.terminate_process()`: the target's bytes are gone with
+        it, so there is nothing to restore, but the records must not outlive
+        the target and keep claiming the INT3s are armed. The plan stays cached
+        — a later `arm()` on a dead target fails instead of writing — the same
+        choice `BblInstrumenter.discard()` makes.
+        """
+        self._armed_ids = {}
+        self._addresses = {}
+        self._arming_warnings = []
+        self._reset()
 
     # ── running ────────────────────────────────────────────────
 

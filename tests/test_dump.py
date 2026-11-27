@@ -159,11 +159,13 @@ class TestStackWalkerCoverage(unittest.TestCase):
         session = DebugSession()
         sw = StackWalker(session)
         regs = regs or {"rip": 0x1000, "rsp": 0x2000, "rbp": 0x3000}
+        # 0x4d0 is sizeof(CONTEXT) on x64: walk() reads the frame pointers out
+        # of the bytes it was handed, so a short buffer is not a CONTEXT.
         with mock.patch("pydbg._pydbg.stack_walk_frame",
                         side_effect=frames) as m:
             with mock.patch("pydbg.thread.manager.ThreadManager") as mock_tm:
                 mock_tm.return_value.get_context.return_value = regs
-                result = sw.walk(0x1234, b"\x00" * 0x100, max_frames=max_frames)
+                result = sw.walk(0x1234, b"\x00" * 0x4d0, max_frames=max_frames)
         return result, m
 
     @unittest.skipUnless(_has_cython, "optional dependency: Cython extension")
@@ -224,7 +226,8 @@ class TestStackWalkerCoverage(unittest.TestCase):
         from pydbg.dump.stackwalk import StackWalker
 
         class FakeWalker(StackWalker):
-            def walk(self, h_thread, context_bytes, max_frames=64):
+            def walk(self, h_thread, context_bytes, max_frames=64,
+                     machine=None):
                 return [
                     {"frame_ip": 0x1000, "frame_sp": 0x2000, "frame_fp": 0x3000},
                     {"frame_ip": 0, "frame_sp": 0, "frame_fp": 0},

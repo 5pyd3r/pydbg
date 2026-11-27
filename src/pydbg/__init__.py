@@ -16,6 +16,8 @@ Everything that needs the extension is resolved on first use through
 import struct as _struct
 
 from .constants import (
+    DBG_CONTINUE,
+    DBG_EXCEPTION_NOT_HANDLED,
     EXCEPTION_ACCESS_VIOLATION,
     EXCEPTION_BREAKPOINT,
     EXCEPTION_EXECUTE_FAULT,
@@ -28,6 +30,7 @@ from .constants import (
 )
 from .exceptions import (
     BreakpointError,
+    InjectionError,
     MemError,
     ProcessError,
     PydbgError,
@@ -48,6 +51,7 @@ HOST_ARCH = _struct.calcsize("P") * 8  # 64 under the x64-only build policy
 # package import time.
 _LAZY = {
     "Debugger": ".core.debugger",
+    "ExceptionPolicy": ".core.policy",
     "DebugEvent": ".core.event",
     "ChildProcessInfo": ".core.session",
     "ExitReason": ".core.status",
@@ -75,6 +79,20 @@ _LAZY = {
     "InstrumentInfo": ".instrument",
     "InstrumentTemplates": ".instrument",
     "BblInstrumenter": ".instrument",
+    # The injection package and its extension-free types; the functions are
+    # lazy inside it, so `pydbg.inject.inject_dll` needs `_pydbg` only on call.
+    "inject": ".inject",
+    "InjectionReport": ".inject",
+    "inject_dll": ".inject",
+    "inject_shellcode": ".inject",
+    "queue_apc": ".inject",
+    "suspend_process": ".inject",
+    "resume_process": ".inject",
+    # Read-only anti-debug detection (spec §13.2). The module itself is
+    # exported too, so `pydbg.antidebug.detect(dbg)` works after either
+    # `import pydbg` + attribute access or `from pydbg import antidebug`.
+    "antidebug": ".antidebug",
+    "DebuggerCheck": ".antidebug",
 }
 
 
@@ -85,7 +103,13 @@ def __getattr__(name):
         raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
     import importlib
 
-    value = getattr(importlib.import_module(module_name, __name__), name)
+    module = importlib.import_module(module_name, __name__)
+    # A key that names a submodule resolves to the module itself rather than
+    # to an attribute of it: _LAZY maps `antidebug`/`inject` to those modules.
+    if name == module_name.rsplit(".", 1)[-1]:
+        value = module
+    else:
+        value = getattr(module, name)
     globals()[name] = value          # resolve once; later lookups skip __getattr__
     return value
 
@@ -96,6 +120,9 @@ def __dir__():
 
 __all__ = [
     "Debugger",
+    "ExceptionPolicy",
+    "DBG_CONTINUE",
+    "DBG_EXCEPTION_NOT_HANDLED",
     "HOST_ARCH",
     "ChildProcessInfo",
     "enumerate_processes",
@@ -116,6 +143,7 @@ __all__ = [
     "ProcessError",
     "MemError",
     "ThreadError",
+    "InjectionError",
     "BreakpointError",
     "TimeoutError",
     "TeardownError",
@@ -144,4 +172,13 @@ __all__ = [
     "InstrumentInfo",
     "InstrumentTemplates",
     "BblInstrumenter",
+    "inject",
+    "InjectionReport",
+    "inject_dll",
+    "inject_shellcode",
+    "queue_apc",
+    "suspend_process",
+    "resume_process",
+    "antidebug",
+    "DebuggerCheck",
 ]
