@@ -290,16 +290,23 @@ def queue_apc(dbg, thread_id, addr, data=b""):
             raise
 
     try:
-        handle = _pydbg.open_thread(thread_id, _THREAD_SET_CONTEXT)
-    except OSError as exc:
-        _translate("apc", exc)
-    try:
+        try:
+            handle = _pydbg.open_thread(thread_id, _THREAD_SET_CONTEXT)
+        except OSError as exc:
+            _translate("apc", exc)
         try:
             return int(_pydbg.queue_user_apc(handle, addr, parameter))
         except OSError as exc:
             _translate("apc", exc)
-    finally:
-        _close_quietly(handle)
+        finally:
+            _close_quietly(handle)
+    except InjectionError:
+        # The APC that would have owned the parameter never ran, so the caller
+        # has no way to reach the buffer: free it instead of leaking the one
+        # allocation whose lifetime the success path deliberately leaves open.
+        if parameter:
+            _free_quietly(dbg, parameter)
+        raise
 
 
 def _thread_ids(session):

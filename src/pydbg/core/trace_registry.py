@@ -54,17 +54,24 @@ class TraceRegistry:
         (`tuple[str, ...]`); each becomes a problem attributed to that tracer.
         A `(what, why)` pair is passed through unchanged, so a tracer that
         adopts the managers' exact shape needs no adaptation here.
+
+        A tracer that let go is forgotten, so a second `close()` does not
+        re-run it. One whose `teardown()` raised stays in the list: it was not
+        undone, and a later close() has to be able to retry it.
         """
         problems = []
+        remaining = []
         for index, tracer in enumerate(tuple(self._attached)):
             what = f"trace {index} ({type(tracer).__name__})"
             teardown = getattr(tracer, "teardown", None)
             if not callable(teardown):
+                remaining.append(tracer)      # nothing undid this object
                 problems.append((what, "no teardown()"))
                 continue
             try:
                 warnings = teardown() or ()
             except Exception as exc:      # a tracer must not abort the chain
+                remaining.append(tracer)      # keep it for a later retry
                 problems.append((what, str(exc)))
                 continue
             for warning in warnings:
@@ -72,6 +79,7 @@ class TraceRegistry:
                     problems.append(warning)
                 else:
                     problems.append((what, str(warning)))
+        self._attached = remaining
         return problems
 
     def discard(self):
@@ -90,3 +98,5 @@ class TraceRegistry:
                 discard()
             except Exception:
                 pass
+        # The target is gone, so nothing in the list is retryable.
+        self._attached.clear()

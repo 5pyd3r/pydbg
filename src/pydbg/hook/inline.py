@@ -41,17 +41,28 @@ class InlineHook:
         if trampoline_addr == 0:
             raise PydbgError("Failed to allocate trampoline memory")
 
-        jmp_back_code = self._build_abs_jmp(
-            trampoline_addr + len(original_bytes),
-            target_addr + len(original_bytes),
-        )
-        trampoline_code = original_bytes + jmp_back_code
-        mem.write(trampoline_addr, trampoline_code)
+        try:
+            jmp_back_code = self._build_abs_jmp(
+                trampoline_addr + len(original_bytes),
+                target_addr + len(original_bytes),
+            )
+            trampoline_code = original_bytes + jmp_back_code
+            mem.write(trampoline_addr, trampoline_code)
 
-        jmp_code = self._build_abs_jmp(target_addr, hook_addr)
-        if len(jmp_code) != 5:
-            raise PydbgError(f"Expected 5-byte JMP, got {len(jmp_code)} bytes")
-        mem.write(target_addr, jmp_code)
+            jmp_code = self._build_abs_jmp(target_addr, hook_addr)
+            if len(jmp_code) != 5:
+                raise PydbgError(
+                    f"Expected 5-byte JMP, got {len(jmp_code)} bytes")
+            mem.write(target_addr, jmp_code)
+        except Exception as exc:
+            # No detour landed in the target, so the page allocated for one is
+            # pure leak: release it before reporting what stopped set(). If the
+            # release fails as well, both failures are named.
+            try:
+                self._free(mem, trampoline_addr, trampoline_size)
+            except PydbgError as free_error:
+                raise PydbgError(f"{exc}; {free_error}") from exc
+            raise
 
         trampoline = Trampoline(
             addr=trampoline_addr,
@@ -76,8 +87,10 @@ class InlineHook:
                 f"trampoline at 0x{trampoline.addr:X} is not installed; "
                 "restore() only accepts a Trampoline returned by set()")
         mem.write(target_addr, trampoline.original_code)
-        del self._hooks[target_addr]
         self._free(mem, trampoline.addr, trampoline.size)
+        # The record leaves last: if the restore or the release failed, the
+        # object this record describes is still there to retry or report.
+        del self._hooks[target_addr]
 
     def teardown(self):
         """Restore every detoured function and free its trampoline.

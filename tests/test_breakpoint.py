@@ -2,7 +2,7 @@
 
 import unittest
 
-from tests import TEST_TARGET_PATH, IP_REG
+from tests import IP_REG, TEST_TARGET_PATH, extension_free_module
 
 try:
     from pydbg import _pydbg
@@ -12,6 +12,7 @@ except ImportError:
     _has_cython = False
 
 
+@unittest.skipUnless(_has_cython, "optional dependency: Cython extension")
 class TestHardwareBreakpoint(unittest.TestCase):
     """Test setting and clearing hardware breakpoints."""
 
@@ -92,6 +93,53 @@ class TestHardwareSlotBusy(unittest.TestCase):
                       "the message must keep naming the slot")
 
 
+class TestHardwareDisarmScope(unittest.TestCase):
+    """An un-cleared Dr slot on a live thread must not look like a corpse."""
+
+    @staticmethod
+    def _armed():
+        from pydbg.breakpoint.model import Breakpoint
+        from pydbg.core.session import DebugSession
+
+        hardware = extension_free_module("pydbg.breakpoint.hardware")
+        session = DebugSession()
+        session.breakpoints[4] = Breakpoint(
+            kind="hw", addr=0x401000, slot=1, scope=7,
+            condition="x", length=1)
+        return hardware.HardwareBreakpointManager(session), hardware
+
+    def test_a_live_thread_that_cannot_be_opened_is_reported(self):
+        """Only ERROR_INVALID_PARAMETER means the thread (and its DRs) is gone."""
+        from unittest import mock
+
+        mgr, hardware = self._armed()
+        extension = mock.Mock()
+        extension.open_thread.side_effect = OSError(5, "access denied")
+
+        with mock.patch.object(hardware, "_pydbg", extension):
+            problems = mgr.teardown()
+
+        self.assertEqual(len(problems), 1, problems)
+        what, why = problems[0]
+        self.assertIn("hardware breakpoint 4", what)
+        self.assertIn("slot 1", what)
+        self.assertIn("access denied", why,
+                      "a live thread's armed slot was swallowed")
+
+    def test_a_vanished_thread_is_not_a_problem(self):
+        """The thread and its debug registers are gone with it."""
+        from unittest import mock
+
+        mgr, hardware = self._armed()
+        extension = mock.Mock()
+        extension.open_thread.side_effect = OSError(
+            87, "The parameter is incorrect")
+
+        with mock.patch.object(hardware, "_pydbg", extension):
+            self.assertEqual(mgr.teardown(), [])
+
+
+@unittest.skipUnless(_has_cython, "optional dependency: Cython extension")
 class TestDebuggerBreakpointAPI(unittest.TestCase):
     """Tests for high-level breakpoint API."""
 
@@ -186,6 +234,7 @@ class TestDebuggerBreakpointAPI(unittest.TestCase):
         self.assertIsNone(dbg._session.thread_handle)
 
 
+@unittest.skipUnless(_has_cython, "optional dependency: Cython extension")
 class TestBreakpointLifecycle(unittest.TestCase):
     """Tests for automatic breakpoint lifecycle management."""
 
@@ -313,6 +362,7 @@ class TestSoftwareBreakpointManagerFixes(unittest.TestCase):
         from pydbg.breakpoint.software import SoftwareBreakpointManager
         return SoftwareBreakpointManager(DebugSession())
 
+    @unittest.skipUnless(_has_cython, "optional dependency: Cython extension")
     def test_every_write_sequence_restores_protection_after_a_failure(self):
         """A failed write must not leave the page writable.
 
@@ -349,6 +399,7 @@ class TestSoftwareBreakpointManagerFixes(unittest.TestCase):
                     protect.call_count, 2,
                     f"{name}: protection was not restored after the failure")
 
+    @unittest.skipUnless(_has_cython, "optional dependency: Cython extension")
     def test_a_failed_restore_is_reported_with_the_write_error(self):
         """Both failures are named; dropping either hides one of them."""
         from unittest import mock
@@ -372,6 +423,7 @@ class TestSoftwareBreakpointManagerFixes(unittest.TestCase):
         self.assertIn("denied", message)
         self.assertIn("restoring protection also failed", message)
 
+    @unittest.skipUnless(_has_cython, "optional dependency: Cython extension")
     def test_a_restore_failure_after_a_successful_write_is_reported(self):
         """The byte landed; the page did not go back. That must not be silent."""
         from unittest import mock
@@ -395,6 +447,7 @@ class TestSoftwareBreakpointManagerFixes(unittest.TestCase):
         self.assertIn("restoring protection failed", message)
         self.assertNotIn("denied", message)
 
+    @unittest.skipUnless(_has_cython, "optional dependency: Cython extension")
     def test_remove_does_not_pop_on_type_mismatch(self):
         """remove() must not mutate breakpoints dict when type is wrong."""
         from pydbg.breakpoint.model import Breakpoint
@@ -409,6 +462,37 @@ class TestSoftwareBreakpointManagerFixes(unittest.TestCase):
             mgr.remove(7)
         self.assertIn(7, session.breakpoints)  # must NOT have been popped
 
+    def test_remove_keeps_the_record_when_the_byte_cannot_be_restored(self):
+        """A failed restore leaves the INT3 in the target.
+
+        The record is the only way teardown() can find it again, so remove()
+        must not delete it first and then fail the write.
+        """
+        from unittest import mock
+        from pydbg.breakpoint.model import Breakpoint
+        from pydbg.core.session import DebugSession
+        from pydbg.exceptions import BreakpointError
+
+        software = extension_free_module("pydbg.breakpoint.software")
+        session = DebugSession()
+        session.breakpoints[5] = Breakpoint(
+            kind="int3", addr=0x401000, original=b"\x90", h_process=123)
+        mgr = software.SoftwareBreakpointManager(session)
+        extension = mock.Mock()
+        extension.virtual_protect_ex.return_value = 0x20
+        extension.write_process_memory.side_effect = OSError(5, "denied")
+
+        with mock.patch.object(software, "_pydbg", extension):
+            with self.assertRaises(BreakpointError) as caught:
+                mgr.remove(5)
+
+        message = str(caught.exception)
+        self.assertIn("Breakpoint 5", message)
+        self.assertIn("0x401000", message)
+        self.assertIn(5, session.breakpoints,
+                      "a failed restore forgot the INT3 it left behind")
+
+    @unittest.skipUnless(_has_cython, "optional dependency: Cython extension")
     def test_remove_not_found_raises(self):
         """remove() of an unknown id raises without mutating the dict."""
         from pydbg.core.session import DebugSession
@@ -421,6 +505,7 @@ class TestSoftwareBreakpointManagerFixes(unittest.TestCase):
             mgr.remove(999)
         self.assertEqual(session.breakpoints, {})
 
+    @unittest.skipUnless(_has_cython, "optional dependency: Cython extension")
     def test_hw_remove_does_not_pop_on_type_mismatch(self):
         """HardwareBreakpointManager.remove must not pop on type mismatch."""
         from pydbg.breakpoint.model import Breakpoint

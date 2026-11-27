@@ -83,14 +83,23 @@ class SoftwareBreakpointManager:
             raise BreakpointError(
                 f"Breakpoint {bp_id} is not a software breakpoint (type={bp.kind})"
             )
-        del self._s.breakpoints[bp_id]
-        self.lost.discard(bp_id)
-
         h_process = bp.h_process or self._s.process_handle
+        # Restore the original byte before dropping the record. That record is
+        # the only thing that can find an INT3 still in the target, so a failed
+        # write must leave it in place for teardown() to retry -- the old order
+        # deleted it first and then made the INT3 permanent.
+        #
         # Restoring the original byte is right even if the target overwrote it
         # in the meantime: the caller asked for the breakpoint to be gone, and
         # the byte we put back is the one we displaced.
-        self._restore_byte_handle(h_process, bp.addr, bp.original)
+        try:
+            self._restore_byte_handle(h_process, bp.addr, bp.original)
+        except (BreakpointError, OSError) as exc:
+            raise BreakpointError(
+                f"Breakpoint {bp_id} at 0x{bp.addr:X} could not be removed: "
+                f"{exc}") from exc
+        del self._s.breakpoints[bp_id]
+        self.lost.discard(bp_id)
 
     def set_handle(self, h_process, addr):
         """Set INT3 breakpoint using explicit process handle.

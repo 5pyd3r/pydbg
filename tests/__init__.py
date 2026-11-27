@@ -5,6 +5,40 @@ _TEST_DIR = os.path.dirname(os.path.abspath(__file__))
 _DEFAULT_TARGET = os.path.join(_TEST_DIR, 'target', 'simple_target.exe')
 TEST_TARGET_PATH = os.environ.get('TEST_TARGET_PATH', _DEFAULT_TARGET)
 
+
+def extension_free_module(name):
+    """Import a manager module that binds `_pydbg` at module import.
+
+    `pydbg.breakpoint.software`/`hardware` and `pydbg.memory.manager` do
+    `from .. import _pydbg` at the top, so on a machine without the compiled
+    extension the module cannot be imported at all and a pure unit test of its
+    bookkeeping cannot run. A stand-in holds the name during that one import;
+    the test replaces it with its own fake before calling anything. On a
+    machine that has the extension this is a plain import.
+
+    The stand-in import is removed from sys.modules afterwards: a later import
+    must fail exactly as it did before rather than silently receive a module
+    whose `_pydbg` is a test double.
+    """
+    import importlib
+    import sys
+    from unittest import mock
+
+    try:
+        return importlib.import_module(name)
+    except ImportError:
+        pass
+
+    with mock.patch.dict(sys.modules, {"pydbg._pydbg": mock.MagicMock()}):
+        module = importlib.import_module(name)
+    package_name, _, leaf = name.rpartition(".")
+    package = sys.modules.get(package_name)
+    if package is not None and getattr(package, leaf, None) is module:
+        delattr(package, leaf)
+    sys.modules.pop(name, None)
+    return module
+
+
 # Target that records its own argv to a file, for create_process(cmdline=...).
 _DEFAULT_ARGV_TARGET = os.path.join(_TEST_DIR, 'target', 'argv_target.exe')
 TEST_ARGV_TARGET_PATH = os.environ.get('TEST_ARGV_TARGET_PATH', _DEFAULT_ARGV_TARGET)

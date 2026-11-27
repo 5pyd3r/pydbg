@@ -10,6 +10,10 @@ from .. import _pydbg
 from ..exceptions import BreakpointError
 from .model import Breakpoint
 
+# OpenThread answers this for a tid whose thread has finished. Every other
+# failure (access denied, handle table full) names a live thread.
+_ERROR_INVALID_PARAMETER = 87
+
 
 class BreakpointSlotBusy(BreakpointError):
     """A debug-register slot (Dr0-3) already belongs to another breakpoint.
@@ -120,8 +124,17 @@ class HardwareBreakpointManager:
         for th_tid in tids:
             try:
                 h = _pydbg.open_thread(th_tid)
-            except OSError:
-                continue  # thread already gone; its DRs are gone with it
+            except OSError as exc:
+                code = getattr(exc, "winerror", None) or getattr(
+                    exc, "errno", None)
+                if code == _ERROR_INVALID_PARAMETER:
+                    continue  # thread already gone; its DRs are gone with it
+                # Any other failure leaves a Dr slot armed on a live thread.
+                # Treating it as a dead thread used to make remove()/teardown()
+                # report success over a slot nobody cleared.
+                raise BreakpointError(
+                    f"open_thread({th_tid}) to clear slot {slot}: {exc}"
+                ) from exc
             try:
                 self._disarm_thread(h, slot, self._machine_for_tid(th_tid))
             finally:

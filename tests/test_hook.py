@@ -11,6 +11,22 @@ except ImportError:
     _has_cython = False
 
 
+def _patch_memory_manager(memory):
+    """Stand in for the manager `InlineHook` imports at call time.
+
+    `set()`/`restore()` import `pydbg.memory.manager` inside the method, and
+    that module needs the compiled extension. A stand-in in sys.modules lets
+    that import resolve without the extension; on a machine that has it, the
+    real module is put back when the patch exits.
+    """
+    import sys
+    import types
+    from unittest import mock
+
+    module = types.SimpleNamespace(MemoryManager=lambda session: memory)
+    return mock.patch.dict(sys.modules, {"pydbg.memory.manager": module})
+
+
 class TestTrampoline(unittest.TestCase):
 
     def test_dataclass_fields(self):
@@ -40,6 +56,40 @@ class TestIATHook(unittest.TestCase):
         hook._hooks[('kernel32.dll', 'CreateFileW')] = (0x1000, 0x7ffe0000)
         hooks = hook.list_hooks()
         self.assertIn(('kernel32.dll', 'CreateFileW'), hooks)
+
+    def test_restore_keeps_the_record_when_the_write_fails(self):
+        """A failed write leaves the import redirected; only the record retries."""
+        from unittest import mock
+        from pydbg.core.session import DebugSession
+        from pydbg.exceptions import MemError
+
+        hook = IATHook(DebugSession())
+        key = ('kernel32.dll', 'Sleep')
+        hook._hooks[key] = (0x5000, 0x1234)
+        memory = mock.Mock()
+        memory.write.side_effect = MemError(
+            "WriteProcessMemory at 0x5000: denied")
+        hook._get_memory = lambda: memory
+
+        with self.assertRaises(MemError):
+            hook.restore(*key)
+
+        self.assertIn(key, hook._hooks,
+                      "a failed write forgot the hook it left redirected")
+
+    def test_restore_without_a_record_reports_instead_of_succeeding(self):
+        """Returning quietly claimed a restore that never happened."""
+        from pydbg.core.session import DebugSession
+        from pydbg.exceptions import PydbgError
+
+        hook = IATHook(DebugSession())
+
+        with self.assertRaises(PydbgError) as caught:
+            hook.restore('kernel32.dll', 'Sleep')
+
+        message = str(caught.exception)
+        self.assertIn("kernel32.dll", message)
+        self.assertIn("Sleep", message)
 
     def test_find_module_case_insensitive(self):
         from pydbg.core.session import DebugSession
@@ -222,6 +272,7 @@ class TestInlineHookLive(unittest.TestCase):
 class TestInlineHookErrors(unittest.TestCase):
     """Deterministic error paths for InlineHook.set/restore."""
 
+    @unittest.skipUnless(_has_cython, "optional dependency: Cython extension")
     def test_set_short_code_raises(self):
         from unittest import mock
         from pydbg.core.session import DebugSession
@@ -234,6 +285,7 @@ class TestInlineHookErrors(unittest.TestCase):
                 with self.assertRaises(PydbgError):
                     hook.set(0x400000, 0x500000)
 
+    @unittest.skipUnless(_has_cython, "optional dependency: Cython extension")
     def test_set_alloc_failure_raises(self):
         from unittest import mock
         from pydbg.core.session import DebugSession
@@ -247,6 +299,7 @@ class TestInlineHookErrors(unittest.TestCase):
                 with self.assertRaises(PydbgError):
                     hook.set(0x400000, 0x500000)
 
+    @unittest.skipUnless(_has_cython, "optional dependency: Cython extension")
     def test_restore_unknown_trampoline_raises(self):
         """Silently returning left the E9 detour in place.
 
@@ -261,6 +314,56 @@ class TestInlineHookErrors(unittest.TestCase):
         with self.assertRaises(PydbgError):
             hook.restore(tramp)
         self.assertEqual(hook._hooks, {})
+
+    def test_restore_keeps_the_record_when_the_write_fails(self):
+        """The E9 is still in the target; only the record can find it again."""
+        from unittest import mock
+        from pydbg.core.session import DebugSession
+        from pydbg.exceptions import MemError
+
+        hook = InlineHook(DebugSession())
+        trampoline = Trampoline(addr=0x2000, size=16,
+                                original_code=b"\x90" * 5)
+        hook._hooks[0x1000] = trampoline
+        memory = mock.Mock()
+        memory.write.side_effect = MemError(
+            "WriteProcessMemory at 0x1000: denied")
+        freed = []
+        hook._free = lambda mem, addr, size: freed.append(addr)
+
+        with _patch_memory_manager(memory):
+            with self.assertRaises(MemError):
+                hook.restore(trampoline)
+
+        self.assertIs(hook._hooks[0x1000], trampoline,
+                      "a failed restore forgot the detour it left in place")
+        self.assertEqual(freed, [], "the trampoline is still in use")
+
+    def test_set_releases_the_trampoline_when_the_detour_cannot_be_written(self):
+        """A page allocated for a detour that never landed is a leak."""
+        from unittest import mock
+        from pydbg.core.session import DebugSession
+        from pydbg.exceptions import MemError
+
+        hook = InlineHook(DebugSession())
+        memory = mock.Mock()
+
+        def write(address, data):
+            if address == 0x400000:
+                raise MemError("WriteProcessMemory at 0x400000: denied")
+
+        memory.write.side_effect = write
+        freed = []
+        hook._read_min_5_bytes = lambda mem, engine, addr: b"\x90" * 5
+        hook._alloc = lambda mem, size: 0x2000
+        hook._free = lambda mem, addr, size: freed.append((addr, size))
+
+        with _patch_memory_manager(memory):
+            with self.assertRaises(MemError):
+                hook.set(0x400000, 0x500000)
+
+        self.assertEqual(freed, [(0x2000, 10)],
+                         "the trampoline allocated for the failed set leaked")
 
 
 if __name__ == '__main__':
