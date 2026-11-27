@@ -178,6 +178,11 @@ test_env.set('TEST_SPAWN_CHILD',
 # finds the DLL in its own directory.
 test_env.set('TEST_DUMP_DLL_PATH', dump_target.full_path())
 test_env.set('TEST_DUMP_HOST_PATH', dump_host.full_path())
+# WOW64 injection acceptance (spec §13.2/§13.8 item 7). Both artefacts come
+# from scripts/build-target32.ps1 like the other 32-bit targets above; naming
+# them through target32_dir keeps the directory defined in one place.
+test_env.set('TEST_INJECT_HOST32_PATH', target32_dir / 'inject_host32.exe')
+test_env.set('TEST_INJECT_DLL32_PATH', target32_dir / 'inject_target32.dll')
 
 # One meson test for the whole suite. pytest discovers tests/test_*.py by name,
 # so a new test file is picked up without being registered here. The previous
