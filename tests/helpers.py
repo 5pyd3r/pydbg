@@ -105,9 +105,12 @@ def export_address(dbg, path, name):
     raise AssertionError(f"export {name} not found in {path}")
 
 
-def entry_point(dbg, attempts=40):
+def entry_point(dbg, attempts=40, image=None):
     """Absolute address of the target PE entry point — a guaranteed-executed
     code address (reliable breakpoint/hook target).
+
+    `image` names the module to match when the debuggee is not the default
+    target (a 32-bit target, say); it is passed through to `module_base`.
 
     `create_debugger()` returns at the FIRST debug event, which on Windows is
     the loader's breakpoint — before the target image is necessarily mapped and
@@ -118,7 +121,7 @@ def entry_point(dbg, attempts=40):
     last = None
     for _ in range(attempts):
         try:
-            base = module_base(dbg)
+            base = module_base(dbg, image)
             dos = dbg.read_memory(base, 0x40)
             if dos[:2] != b"MZ":
                 raise AssertionError(f"no MZ signature at 0x{base:X}")

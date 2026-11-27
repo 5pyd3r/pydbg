@@ -471,6 +471,86 @@ class TestInstall(unittest.TestCase):
         self.assertEqual(len(self.dbg.patches()), 2)
 
 
+# A 32-bit module. Its addresses must fit the stub's u32 immediates, which is
+# why this fixture cannot reuse the x64 BASE above.
+BASE32 = 0x400000
+MODULE32 = (BASE32, 0x10000)
+STUB32_REGION = 0x800000
+
+
+class _Wow64Debugger(FakeDebugger):
+    """A fake whose target is a WOW64 process: session 32, context EIP."""
+
+    def __init__(self, threads):
+        super().__init__(threads)
+        self._session = SimpleNamespace(target_arch=32)
+
+    def get_registers(self, handle):
+        thread = self.by_handle[handle]
+        if thread.context_error is not None:
+            raise thread.context_error
+        return {"eip": thread.rip}
+
+
+@needs_keystone
+class TestInstallOnWow64(unittest.TestCase):
+    """install() encodes for arch 32 when that is what the session says.
+
+    The live acceptance needs WOW64 and a built target; this keeps the branch
+    that *chooses* the 32-bit encoding covered on any machine.
+    """
+
+    def setUp(self):
+        self.thread = FakeThread(9)
+        self.dbg = _Wow64Debugger([self.thread])
+        self.dbg.put(BASE32 + 0x1000, b"\x90" * 6 + b"\xC3")
+        self.result = make_result(
+            nops(0x1000, 6) + [insn(0x1006, 1, "ret", is_ret=True)], [0x1000])
+
+        patcher = mock.patch.object(
+            bbl, "alloc_near",
+            side_effect=lambda dbg, near, size: STUB32_REGION)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_the_detour_and_the_stub_are_encoded_for_32_bits(self):
+        instrumenter = bbl.BblInstrumenter(
+            self.dbg, module=MODULE32, result=self.result)
+
+        report = instrumenter.install()
+
+        self.assertEqual(report.installed, (0x1000,), report.refused)
+        stub_address, stub = self.dbg.writes[0]
+        patch_address, patch = self.dbg.writes[1]
+        self.assertEqual(stub_address, STUB32_REGION)
+        self.assertEqual((patch_address, patch[0]), (BASE32 + 0x1000, 0xE9))
+        self.assertEqual(len(patch), 5, "one prefix, one E9")
+
+        # 88-byte x86 prologue, the five NOP bytes it moved, and the ten-byte
+        # absolute jump back (the x64 stub would be 112 + 5 + 14).
+        self.assertEqual(len(stub), 88 + 5 + 10)
+        self.assertEqual(stub[88:93], b"\x90" * 5)
+        jump_at = 88 + 5
+        self.assertEqual(stub[jump_at:jump_at + 2], b"\xff\x25")
+        self.assertEqual(
+            struct.unpack("<I", stub[jump_at + 2:jump_at + 6])[0],
+            STUB32_REGION + jump_at + 6,
+            "the 32-bit return jump's disp32 names its inline pointer")
+        self.assertEqual(
+            struct.unpack("<I", stub[jump_at + 6:jump_at + 10])[0],
+            BASE32 + 0x1000 + 5)
+
+    def test_uninstall_restores_the_bytes_on_the_32_bit_path(self):
+        instrumenter = bbl.BblInstrumenter(
+            self.dbg, module=MODULE32, result=self.result)
+        instrumenter.install()
+        self.dbg.writes.clear()
+
+        self.assertEqual(instrumenter.uninstall(), ())
+        self.assertEqual(self.dbg.writes,
+                         [(BASE32 + 0x1000, b"\x90" * 5)])
+
+
 @needs_keystone
 class TestInstallSetupFailures(unittest.TestCase):
     """A shared-resource failure becomes one reason per block, not an abort."""

@@ -24,6 +24,7 @@ from pydbg.instrument import stub as stub_module
 from pydbg.disasm.engine import (
     OP_IMM,
     OP_MEM,
+    OP_REG,
     REG_RIP,
     DisasmEngine,
     Instruction,
@@ -37,6 +38,8 @@ from pydbg.instrument.bbl import (
     build_stub,
     prefix_is_relocatable,
     relocate_prefix,
+    stub_jump_size,
+    stub_prologue_size,
     take_prefix,
 )
 
@@ -61,12 +64,22 @@ needs_keystone = unittest.skipUnless(
 _ENGINES = {}
 
 
+def _engine(mode):
+    """One cached capstone wrapper per mode: the bytes decide the width."""
+    engine = _ENGINES.get(mode)
+    if engine is None:
+        engine = _ENGINES[mode] = DisasmEngine(mode=mode)
+    return engine
+
+
 def decode(data, address=BLOCK):
     """Decode bytes with capstone, through the same wrapper production uses."""
-    engine = _ENGINES.get("x64")
-    if engine is None:
-        engine = _ENGINES["x64"] = DisasmEngine(mode="x64")
-    return tuple(engine.disasm(address, data))
+    return tuple(_engine("x64").disasm(address, data))
+
+
+def decode_x86(data, address=BLOCK):
+    """The 32-bit counterpart, for the WOW64 stub's bytes."""
+    return tuple(_engine("x86").disasm(address, data))
 
 
 def rip_operand(insn):
@@ -82,9 +95,9 @@ def rip_target(insn):
     return insn.address + insn.size + rip_operand(insn).mem_disp
 
 
-def reg_name(reg_id):
+def reg_name(reg_id, mode="x64"):
     """capstone's name for a register id, so assertions read like the listing."""
-    return _ENGINES["x64"].reg_name(reg_id)
+    return _engine(mode).reg_name(reg_id)
 
 
 @dataclass(frozen=True)
@@ -545,6 +558,151 @@ class TestBuildStub(unittest.TestCase):
 
         self.assertEqual(len(low), len(high))
         self.assertEqual(len(high), STUB_PROLOGUE_SIZE + len(prefix) + 14)
+
+
+# 32-bit stub values. Every one has to fit u32: that is the width of the
+# stub's immediates, of its return jump's inline pointer, and of EIP.
+BLOCK32 = 0x401000
+STUB32 = 0x500000
+RESUME32 = 0x401015
+SINK32 = Sink(address=0x600000, head_address=0x600000 - 12,
+              capacity=4096, slot_size=RECORD_SIZE)
+
+# The two lengths the 32-bit stub is built to, spelled out here rather than
+# imported so the contract is checked against a declared number, not itself.
+X86_PROLOGUE_SIZE = 88
+X86_JUMP_SIZE = 10
+
+
+@needs_keystone
+class TestBuildStubX86(unittest.TestCase):
+    """The WOW64 stub: shorter prologue, absolute pointer, 32-bit widths.
+
+    A 32-bit target has no `movabs` and no RIP-relative addressing, so the
+    prologue uses `mov r32, imm32` and the record's 64-bit fields are two
+    32-bit stores; the jump back names an absolute inline pointer (spec
+    §12.1's three boundary differences).
+    """
+
+    def prefix(self):
+        # push ebp; mov ebp, esp; sub esp, 0x20 -- six bytes, and no
+        # RIP-relative operand exists in 32-bit mode to rewrite.
+        raw = bytes.fromhex("5589e583ec20")
+        return relocate_prefix(decode_x86(raw, BLOCK32), STUB32, arch=32)
+
+    def stub(self):
+        return build_stub(SINK32, BLOCK_RVA, COUNT, self.prefix(), RESUME32,
+                          arch=32, stub_address=STUB32)
+
+    def test_it_is_the_32_bit_prologue_then_the_prefix_then_a_ten_byte_jump(self):
+        relocated = self.prefix()
+        stub = self.stub()
+
+        self.assertEqual(stub_prologue_size(32), X86_PROLOGUE_SIZE)
+        self.assertEqual(stub_jump_size(32), X86_JUMP_SIZE)
+        self.assertEqual(len(stub),
+                         X86_PROLOGUE_SIZE + len(relocated) + X86_JUMP_SIZE)
+        self.assertEqual(stub[X86_PROLOGUE_SIZE:X86_PROLOGUE_SIZE + len(relocated)],
+                         relocated,
+                         "32-bit mode has no RIP-relative operand to rewrite")
+
+    def test_the_return_jump_reads_an_absolute_pointer_next_to_itself(self):
+        relocated = self.prefix()
+        stub = self.stub()
+        jump_at = X86_PROLOGUE_SIZE + len(relocated)
+        tail = stub[jump_at:]
+
+        self.assertEqual(tail[:2], b"\xff\x25")
+        pointer = struct.unpack("<I", tail[2:6])[0]
+        self.assertEqual(
+            pointer, STUB32 + jump_at + 6,
+            "the disp32 must name the inline target: without RIP-relative "
+            "addressing the memory operand is absolute")
+        self.assertEqual(struct.unpack("<I", tail[6:10])[0], RESUME32)
+
+        (jump,) = decode_x86(tail[:6], STUB32 + jump_at)
+        self.assertEqual(jump.mnemonic, "jmp")
+        memories = [op for op in jump.operands if op.kind == OP_MEM]
+        self.assertEqual(len(memories), 1)
+        self.assertTrue(memories[0].is_absolute_mem)
+        self.assertEqual(memories[0].mem_disp, pointer)
+
+    def test_it_writes_exactly_one_v1_block_record(self):
+        """Replay the dword stores into a slot and unpack it as v1 does."""
+        slot = bytearray(RECORD_SIZE)
+        for insn in decode_x86(self.stub()[:X86_PROLOGUE_SIZE], STUB32):
+            memories = [op for op in insn.operands if op.kind == OP_MEM]
+            if len(memories) != 1:
+                continue
+            if reg_name(memories[0].mem_base, "x86") != "ecx":
+                continue
+            immediates = [op for op in insn.operands if op.kind == OP_IMM]
+            registers = [op for op in insn.operands if op.kind == OP_REG]
+            if immediates:
+                value = immediates[0].imm
+            else:
+                self.assertEqual(
+                    [reg_name(op.reg, "x86") for op in registers], ["edx"],
+                    "a field without an immediate comes from the zeroed edx")
+                value = 0
+            width = memories[0].size
+            offset = memories[0].mem_disp
+            self.assertGreaterEqual(offset, 0)
+            self.assertLessEqual(offset + width, RECORD_SIZE,
+                                 "the stub writes past the slot")
+            slot[offset:offset + width] = (
+                value & ((1 << (8 * width)) - 1)).to_bytes(width, "little")
+
+        self.assertEqual(V1_RECORD.unpack(bytes(slot)),
+                         (1, 0, BLOCK_RVA, 0, COUNT, 0))
+
+    def test_the_slot_comes_from_a_locked_increment_of_the_head_counter(self):
+        decoded = decode_x86(self.stub()[:X86_PROLOGUE_SIZE], STUB32)
+        xadds = [insn for insn in decoded
+                 if insn.mnemonic.split()[-1] == "xadd"]
+        self.assertEqual(len(xadds), 1)
+        xadd = xadds[0]
+
+        self.assertEqual(xadd.raw_bytes[0], 0xF0)        # the lock prefix
+        memories = [op for op in xadd.operands if op.kind == OP_MEM]
+        self.assertEqual([reg_name(op.mem_base, "x86") for op in memories],
+                         ["ebx"])
+        self.assertEqual([reg_name(op.reg, "x86") for op in xadd.operands
+                          if op.kind == OP_REG], ["eax"])
+        self.assertEqual(len([i for i in decoded if i.mnemonic == "and"]), 1)
+        self.assertEqual(len([i for i in decoded if i.mnemonic == "imul"]), 1)
+
+    def test_values_that_do_not_fit_32_bits_are_refused(self):
+        """A truncated immediate would point the stub at the wrong memory."""
+        relocated = self.prefix()
+        cases = {
+            "resume above u32": dict(
+                sink=SINK32, resume=1 << 32, stub_address=STUB32),
+            "head above u32": dict(
+                sink=Sink(SINK32.address, 1 << 32, SINK32.capacity,
+                          SINK32.slot_size),
+                resume=RESUME32, stub_address=STUB32),
+            "slot area above u32": dict(
+                sink=Sink(1 << 32, SINK32.head_address, SINK32.capacity,
+                          SINK32.slot_size),
+                resume=RESUME32, stub_address=STUB32),
+            "stub address above u32": dict(
+                sink=SINK32, resume=RESUME32, stub_address=1 << 32),
+        }
+        for name, case in cases.items():
+            with self.subTest(field=name):
+                with self.assertRaises(PydbgError):
+                    build_stub(case["sink"], BLOCK_RVA, COUNT, relocated,
+                               case["resume"], arch=32,
+                               stub_address=case["stub_address"])
+
+    def test_without_its_address_a_32_bit_stub_is_refused(self):
+        """The return jump cannot inline its pointer without the stub's address."""
+        with self.assertRaises(PydbgError) as caught:
+            build_stub(SINK32, BLOCK_RVA, COUNT, self.prefix(), RESUME32,
+                       arch=32)
+
+        self.assertIn("own address", str(caught.exception))
 
 
 if __name__ == "__main__":
