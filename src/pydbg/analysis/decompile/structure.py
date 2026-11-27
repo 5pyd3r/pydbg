@@ -60,6 +60,15 @@ from .ir import BinExpr, Branch, Cmp, Const, Reg, UnExpr
 # leaves the function (a return, an unresolved indirect edge) points here.
 EXIT = -1
 
+# Recursion budget for the region parser. Each nesting level costs a `_region`
+# call made from `_build_if`/`_build_loop`/`_build_switch`, i.e. a few Python
+# frames per level; the interpreter's default limit is about 1000, and a few
+# hundred nested constructs therefore raise RecursionError out of the public
+# `decompile_function`, whose failures are supposed to be return values. 64
+# keeps the worst case near 200 frames while leaving real functions structured;
+# past it the flat label/goto form and a warning are the honest answer.
+_MAX_REGION_DEPTH = 64
+
 # ── normalisation ──────────────────────────────────────────────
 
 
@@ -309,6 +318,7 @@ class _Builder:
         self.switch_consumed = set()
         self._find_switches()
         self.done = set()
+        self.depth = 0                 # live `_region` nesting level
 
     # ── successor queries ──────────────────────────────────────
 
@@ -588,6 +598,7 @@ class _Builder:
     # ── switch recognition ─────────────────────────────────────
 
     def _find_switches(self):
+        considered = set()      # dispatch blocks a SlotTable named
         for table in self.slot_tables:
             referrer = getattr(table, "referrer", None)
             if referrer is None:
@@ -595,9 +606,14 @@ class _Builder:
             dispatch = self.owner_of_instruction.get(referrer)
             if dispatch is None or not self._has_indirect(dispatch):
                 continue
+            considered.add(dispatch)
             plan = self._make_switch_plan(table, dispatch)
             if plan is None:
-                self.warnings.add("unmatched jump table")
+                # `_make_switch_plan` records the more specific reason when
+                # it refuses a truncated table; "unmatched" would be wrong
+                # there, because the table does match the dispatch.
+                if not getattr(table, "truncated", False):
+                    self.warnings.add("unmatched jump table")
                 continue
             if plan.start in self.switch_plans:
                 continue
@@ -606,9 +622,11 @@ class _Builder:
             self.switch_consumed.add(plan.dispatch)
         # A table-shaped indirect jump with no table behind it is still worth
         # a warning: the flat `goto *...` is honest but the reader should know
-        # a switch was possible.
+        # a switch was possible. A dispatch whose SlotTable was considered
+        # above has already been answered (or refused with its own warning).
         for rva in self.order:
-            if rva in self.switch_consumed or not self._has_indirect(rva):
+            if (rva in considered or rva in self.switch_consumed
+                    or not self._has_indirect(rva)):
                 continue
             if self._table_shaped(rva):
                 self.warnings.add("unmatched jump table")
@@ -626,6 +644,15 @@ class _Builder:
         if self.decoder is None or self.image is None:
             return None
         if table.count < 2:
+            return None
+        if getattr(table, "truncated", False):
+            # model.SlotTable.truncated means the reader stopped at its entry
+            # budget: `count` is a lower bound on the cases, not the table's
+            # size. A switch built from it would print a prefix as if it were
+            # the whole case set ("512 entries" for "at least 512"), the same
+            # silent-completeness defect the model's own contract forbids.
+            # Keep the flat `goto *...` form and name the reason.
+            self.warnings.add("truncated jump table")
             return None
 
         cases = []
@@ -774,6 +801,54 @@ class _Builder:
                           warnings=tuple(sorted(self.warnings)))
 
     def _region(self, start, stop, ctx):
+        """Bounded entry point for the recursive region parser.
+
+        The budget is per call stack, not per block: `_region_body` recurses
+        through `_build_if` and the loop forms once per nesting level, so an
+        unbounded walk would escape `decompile_function` as RecursionError
+        instead of the warning its contract promises.
+        """
+        if self.depth >= _MAX_REGION_DEPTH:
+            self.warnings.add("region depth limit")
+            return self._flat_region(start, stop)
+        self.depth += 1
+        try:
+            return self._region_body(start, stop, ctx)
+        finally:
+            self.depth -= 1
+
+    def _flat_region(self, start, stop):
+        """Flat label/goto form for a region past the depth budget.
+
+        Iterative by construction: this is the path that must not consume any
+        more stack, so it cannot call `_region` again. It follows the chain the
+        structured walk would have followed and lets the renderer print the
+        edges, which is the P5 form `_region_body` already falls back to for
+        shapes it does not recognise.
+        """
+        items = []
+        cur = start
+        while cur is not None and cur in self.blocks:
+            if cur in stop or cur in self.done:
+                break
+            block = self.blocks[cur]
+            conditional = self._conditional(cur)
+            jump = self._jump_target(cur)
+            if conditional is not None:
+                after = conditional[1]
+                items.append(Flat(block,
+                                  after if after in self.blocks else None))
+            elif jump is not None:
+                after = jump
+                items.append(Flat(block, jump if jump in self.blocks else None))
+            else:
+                after = self._fall(cur)
+                items.append(Flat(block, None))
+            self.done.add(cur)
+            cur = after
+        return tuple(items), cur, ()
+
+    def _region_body(self, start, stop, ctx):
         """Structure from 'start' until a block in 'stop' or a dead end.
 
         Returns (items, next_block, elided_branch_rvas). The elided branches

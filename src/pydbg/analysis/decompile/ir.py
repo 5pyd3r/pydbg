@@ -238,7 +238,14 @@ class Ret(Stmt):
 
 @dataclass(frozen=True)
 class Opaque(Stmt):
-    """An instruction outside the model, kept with its original spelling."""
+    """An instruction outside the model, kept with its original spelling.
+
+    'rva' is an offset from the image base even when the instruction lies
+    outside the image: the IR has one address space, and every consumer prints
+    or reports these numbers as RVAs (`// @0x...`, `DecompiledFunction.
+    unhandled`). Storing a VA here would shift that one entry by the image
+    base. The text says when the instruction is outside the image.
+    """
 
     rva: int
     text: str
@@ -707,7 +714,14 @@ def lower_instruction(decoder, image, insn):
     """
     rva = image.va_to_rva(insn.address)
     if rva is None:
-        return (Opaque(rva=insn.address,
+        # The instruction is outside the image, so no mapped RVA exists; store
+        # its offset from the image base rather than the VA. Everything that
+        # reads `Stmt.rva` -- the `// @0x...` annotation, `DecompiledFunction.
+        # unhandled`, `_block_addresses` -- is documented to speak RVAs
+        # (docs/architecture.md: internals are RVA, VA conversion happens only
+        # at boundaries), and a field holding either address space would be
+        # off by the image base exactly when the reader cannot tell.
+        return (Opaque(rva=insn.address - image.image_base,
                        text=f"instruction outside the image: {insn.mnemonic} "
                             f"{insn.op_str}",
                        mnemonic=insn.mnemonic),)

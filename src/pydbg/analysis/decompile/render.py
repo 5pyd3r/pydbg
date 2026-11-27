@@ -114,7 +114,11 @@ def render_expr(expr, parent_prec=0, side="left"):
             precedence == parent_prec and side == "right"
             and expr.op in _NON_ASSOCIATIVE)
         return f"({text})" if bracketed else text
-    return "?"
+    # A node outside the expression tree this renderer knows. A bare "?" is
+    # the same silent gap the whole module exists to avoid: it reads as a
+    # value the analysis had, not as a form that was not rendered. The C
+    # comment marker keeps the line's own address annotation at the end.
+    return f"/* unhandled: expression {type(expr).__name__} */"
 
 
 def _render_mem(mem):
@@ -147,6 +151,20 @@ def _render_mem(mem):
 
     prefix = f"{mem.segment}:" if mem.segment else ""
     return f"{prefix}[{text}]"
+
+
+# Statements `_statement_lines` prints itself. `Branch` and `Ret` are handled
+# separately by `_edge_lines` (a construct or a block edge owns them, and
+# printing them here as well would duplicate the instruction). Between the two
+# paths every statement kind the IR defines has a form; `is_rendered` is the
+# single answer the completeness check in `decompile_function` uses.
+_STATEMENT_FORMS = (Assign, BinOp, UnOp, Load, Store, Cmp, Call, Nop, Opaque)
+
+
+def is_rendered(stmt):
+    """Whether the renderer has a form for 'stmt', edge forms included."""
+    return isinstance(stmt, (Branch, Ret)) or isinstance(
+        stmt, _STATEMENT_FORMS)
 
 
 def _statement_lines(stmt, indent="  "):
@@ -182,7 +200,15 @@ def _statement_lines(stmt, indent="  "):
         return [f"{indent}nop;  {at}"]
     if isinstance(stmt, Opaque):
         return [f"{indent}// unhandled: {stmt.text}  {_at_comment(stmt.rva)}"]
-    return []
+    if isinstance(stmt, (Branch, Ret)):
+        # Not a gap: `_edge_lines` or the enclosing construct prints this
+        # control transfer, and printing it here too would duplicate it.
+        return []
+    # A statement kind outside the IR forms this renderer knows. Returning []
+    # would delete the line while `complete` could still be True -- the silent
+    # loss the module forbids -- so state the gap and keep the address.
+    return [f"{indent}// unhandled: statement {type(stmt).__name__}  "
+            f"{_at_comment(stmt.rva)}"]
 
 
 def _terminator(block):
