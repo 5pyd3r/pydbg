@@ -85,7 +85,11 @@ cpdef int set_hw_breakpoint(unsigned long long h_thread, int slot, unsigned long
     dr7 |= <unsigned long long>(1 << (slot * 2))
 
     pydbg_ctx_set_dr(ctx, machine, 7, dr7)
-    pydbg_ctx_set_dr(ctx, machine, 6, 0)
+    # Dr6 holds one hit-status bit per slot, and the four slots are shared
+    # between hardware breakpoints, MemoryWatch and FunctionProbe: zeroing the
+    # register here would erase the other slots' pending hits.
+    cdef unsigned long long dr6 = pydbg_ctx_get_dr(ctx, machine, 6)
+    pydbg_ctx_set_dr(ctx, machine, 6, dr6 & ~<unsigned long long>(1 << slot))
 
     cdef int set_result
     if machine == 32:

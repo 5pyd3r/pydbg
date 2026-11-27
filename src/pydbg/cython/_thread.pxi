@@ -287,14 +287,17 @@ cpdef list enumerate_threads(int pid):
     cdef list threads = []
 
     cdef BOOL ok = Thread32First(snap, &te)
-    while ok:
-        if te.th32OwnerProcessID == <DWORD>pid:
-            threads.append({
-                'tid': te.th32ThreadID,
-                'owner_pid': te.th32OwnerProcessID,
-                'base_priority': te.tpBasePri,
-            })
-        ok = Thread32Next(snap, &te)
-
-    CloseHandle(snap)
+    # List building can raise; the snapshot handle must also go back on that
+    # path, not just when the walk runs to completion.
+    try:
+        while ok:
+            if te.th32OwnerProcessID == <DWORD>pid:
+                threads.append({
+                    'tid': te.th32ThreadID,
+                    'owner_pid': te.th32OwnerProcessID,
+                    'base_priority': te.tpBasePri,
+                })
+            ok = Thread32Next(snap, &te)
+    finally:
+        CloseHandle(snap)
     return threads
