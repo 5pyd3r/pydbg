@@ -348,13 +348,13 @@ class TestForeignProcessReads(unittest.TestCase):
         addr = ctypes.addressof(buf)
 
         self.dbg.read_memory(addr, 1, pid=pid)        # cached read-only
-        self.assertEqual(self.dbg._session.foreign_access[pid],
-                         self.dbg._READ_ACCESS)
+        opened = self.dbg._session.foreign_handles[pid]
+        self.assertEqual(opened.access, self.dbg._READ_ACCESS)
         with self.assertRaises(ProcessError):
             self.dbg.write_memory(addr, b"\x00", pid=pid)
 
         self.dbg.process.open(pid, PROCESS_ALL_ACCESS)
-        self.assertEqual(self.dbg._session.foreign_access[pid],
+        self.assertEqual(self.dbg._session.foreign_handles[pid].access,
                          PROCESS_ALL_ACCESS)
         self.dbg.write_memory(addr, b"\x00", pid=pid)
         self.assertEqual(buf.raw[:1], b"\x00")
@@ -363,9 +363,10 @@ class TestForeignProcessReads(unittest.TestCase):
         pid = os.getpid()
         self.dbg.process.open(pid)
         self.assertIn(pid, self.dbg._session.foreign_handles)
+        self.assertEqual(self.dbg._session.foreign_handles[pid].access,
+                         self.dbg._READ_ACCESS)
         self.dbg.process.close(pid)
         self.assertNotIn(pid, self.dbg._session.foreign_handles)
-        self.assertNotIn(pid, self.dbg._session.foreign_access)
         self.dbg.process.close(pid)                   # nothing to close
 
 
@@ -600,7 +601,6 @@ class TestNestedDebugging(unittest.TestCase):
 
         self.dbg.detach()
         self.assertEqual(self.dbg._session.foreign_handles, {})
-        self.assertEqual(self.dbg._session.foreign_access, {})
 
     def test_the_childs_memory_is_readable_through_pydbg(self):
         """The read that previously needed ctypes OpenProcess + RPM."""
