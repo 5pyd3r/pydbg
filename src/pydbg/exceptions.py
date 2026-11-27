@@ -17,9 +17,10 @@ class ThreadError(PydbgError):
 class InjectionError(PydbgError):
     """An injection primitive failed.
 
-    The message names the stage that failed (path/resolve/alloc/write/thread/
-    apc/threads/target) and the Win32 error code, because "injection failed"
-    alone cannot tell a refused allocation from a refused CreateRemoteThread.
+    The message names the stage that failed (path/resolve/arch/alloc/write/
+    thread/apc/threads/target) and the Win32 error code, because "injection
+    failed" alone cannot tell a refused allocation from a refused
+    CreateRemoteThread.
     """
 
 

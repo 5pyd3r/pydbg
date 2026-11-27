@@ -131,19 +131,26 @@ class MemoryManager:
     # missing half, and it belongs here so callers never reach for `_pydbg`
     # themselves (and tests can stand in one object).
 
-    def alloc_remote(self, size, protect=_PAGE_READWRITE):
+    def alloc_remote(self, size, protect=_PAGE_READWRITE, hint=0):
         """Allocate `size` bytes in the target; return the base address.
 
         Committed and reserved in one call (VirtualAllocEx), zero-filled by
         Windows. Arbitrary placement is intentional: the buffer is reached by
         absolute address in the stub, so it needs no ±2GB neighbourhood.
 
+        'hint' is VirtualAllocEx's lpAddress: 0 lets Windows choose, a
+        non-zero value asks for that base and fails if it is occupied. A WOW64
+        target can only address memory below 4 GiB, so its injection path
+        passes a low hint rather than trusting a 64-bit allocator's choice; the
+        answer is still checked by the caller, which is the one that knows the
+        target's architecture.
+
         Raises:
             MemError: VirtualAllocEx refused, or answered without an address.
         """
         try:
             result = _pydbg.virtual_alloc_ex(
-                self._s.process_handle, 0, size, _MEM_COMMIT_RESERVE, protect)
+                self._s.process_handle, hint, size, _MEM_COMMIT_RESERVE, protect)
         except OSError as e:
             raise MemError(f"VirtualAllocEx({size}) failed: {e}") from e
         address = result.get('base_address', 0)
