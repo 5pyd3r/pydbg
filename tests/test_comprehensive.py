@@ -499,15 +499,21 @@ class TestSymbolResolver(unittest.TestCase):
         sr.cleanup()  # should not raise
         self.assertFalse(sr._initialized)
 
+    @unittest.skipUnless(_has_cython, "optional dependency: Cython extension")
     def test_set_options_delegates(self):
-        """set_options should not raise even without process."""
+        """set_options forwards its argument and returns the previous value."""
+        from unittest import mock
         from pydbg.core.session import DebugSession
         from pydbg.symbol.resolver import SymbolResolver
 
         session = DebugSession()
         sr = SymbolResolver(session)
-        if _has_cython:
-            sr.set_options(0x2)  # SYMOPT_UNDNAME
+        with mock.patch("pydbg._pydbg.sym_set_options",
+                        return_value=0x2) as sym_set_options:
+            previous = sr.set_options(0x4)  # SYMOPT_DEFERRED_LOADS
+        sym_set_options.assert_called_once_with(0x4)
+        self.assertEqual(previous, 0x2,
+                         "set_options must return the previous options value")
 
 
 # ═══════════════════════════════════════════════════════════════════

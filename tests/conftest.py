@@ -1,17 +1,18 @@
 """Shared pytest fixtures for pydbg tests, plus the rule that a skip is never silent."""
 
-import os
 import struct
 import pytest
+
+# tests/__init__.py owns the default target path and its environment override.
+# A second copy here defaulted to the bare relative name "simple_target.exe",
+# so the `target_path` fixture named a file that resolved against the CWD.
+from tests import TEST_TARGET_PATH
 
 # Architecture constants
 HOST_ARCH = struct.calcsize("P") * 8
 IP_REG = "rip" if HOST_ARCH == 64 else "eip"
 SP_REG = "rsp" if HOST_ARCH == 64 else "esp"
 GP_REG = "rax" if HOST_ARCH == 64 else "eax"
-
-# Test target path
-TEST_TARGET_PATH = os.environ.get("TEST_TARGET_PATH", "simple_target.exe")
 
 
 @pytest.fixture
@@ -152,7 +153,7 @@ def _skip_reason(report):
 
 
 def pytest_runtest_logreport(report):
-    if not report.skipped or hasattr(report, "wasxfail"):
+    if not report.skipped:
         return
     reason = _skip_reason(report)
     if not reason.startswith(SKIP_FAMILIES):

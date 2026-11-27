@@ -218,7 +218,9 @@ class TestLiveProcessSource(unittest.TestCase):
         from tests import TEST_TARGET_PATH
 
         if not os.path.exists(TEST_TARGET_PATH):
-            self.skipTest("target not built: no test target on disk")
+            self.skipTest(
+                f"target not built: {TEST_TARGET_PATH} missing (from "
+                f"TEST_TARGET_PATH); run: meson compile -C build simple_target")
 
         live = analyze_process(self.dbg._session, self.base)
         from_disk = analyze_file(TEST_TARGET_PATH)

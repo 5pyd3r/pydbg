@@ -10,10 +10,14 @@ except ImportError:
     _has_cython = False
 
 
+@unittest.skipUnless(_has_cython, "optional dependency: Cython extension")
 class TestSymbolResolverCoverage(unittest.TestCase):
-    """Live happy paths + best-effort dbghelp calls."""
+    """Live happy paths + best-effort dbghelp calls.
 
-    @unittest.skipUnless(_has_cython, "optional dependency: Cython extension")
+    Every test here needs the extension, so the skip is declared on the class:
+    that is where unittest reads __unittest_skip__, before setUp/tearDown run.
+    """
+
     def setUp(self):
         from tests.helpers import create_debugger
         self.dbg, self.pid, self.tid = create_debugger()
