@@ -16,8 +16,14 @@ The three halves live in their own modules and are re-exported here, so callers
 
 What is left here is the orchestration: `BlockPlan`, `InstallReport`,
 `BblInstrumenter`, and the near-allocation policy for the stub region. A plan
-is a record in RVAs; `install()` converts once, at the boundary where the RIP
-window, the E9 and the stub addresses are absolute.
+is a record in RVAs; `install()` converts once, at the boundary where the
+instruction-pointer window, the E9 and the stub addresses are absolute.
+
+The target's architecture comes from its session (`patch.target_arch`), never
+from the host: a 64-bit host debugging a WOW64 target needs 32-bit prologues,
+a four-byte jump-back pointer and an EIP window check (spec §12.1). `plan()` is
+architecture-independent — the decoder gets its mode from the image's PE header
+— so a 32-bit target is planned exactly like an x64 one.
 
 This module never imports `_pydbg`: the near allocation goes through
 `MemoryManager.alloc_near`, and the extension is only reached by a caller with
@@ -36,6 +42,7 @@ from .patch import (
     InstalledPatch,
     TargetBusy,
     install_patch,
+    target_arch,
     uninstall_patch,
 )
 from .relocate import (
@@ -44,6 +51,7 @@ from .relocate import (
     decoder_address_base,
     prefix_is_relocatable,
     relocate_prefix,
+    stub_prologue_size,
     take_prefix,
 )
 from .stub import (
@@ -52,15 +60,17 @@ from .stub import (
     STUB_PROLOGUE_SIZE,
     build_stub,
     keystone,
+    stub_jump_size,
 )
 
 # Re-exported so the module split does not change an import that already works;
 # `__all__` is what tells a linter these are re-exports, not dead imports.
 __all__ = [
     'BblInstrumenter', 'BlockPlan', 'DETOUR_SIZE', 'InstallReport',
-    'InstalledPatch', 'RECORD_SIZE', 'STUB_PROLOGUE_SIZE', 'TargetBusy',
-    'UnsupportedInstruction', 'alloc_near', 'build_stub', 'install_patch',
-    'keystone', 'prefix_is_relocatable', 'relocate_prefix', 'take_prefix',
+    'InstalledPatch', 'RECORD_SIZE', 'STUB_JUMP_SIZE', 'STUB_PROLOGUE_SIZE',
+    'TargetBusy', 'UnsupportedInstruction', 'alloc_near', 'build_stub',
+    'install_patch', 'keystone', 'prefix_is_relocatable', 'relocate_prefix',
+    'stub_jump_size', 'stub_prologue_size', 'take_prefix', 'target_arch',
     'uninstall_patch',
 ]
 
@@ -180,7 +190,10 @@ class BblInstrumenter:
     when a thread is parked inside one, because freeing the stub region under a
     live detour would turn a refused cleanup into a crash.
 
-    Only x64 is supported (spec §12.1): the thread window check needs RIP.
+    Both x64 and 32-bit (WOW64) targets are supported (spec §12.5 item 6). The
+    architecture is read from `dbg`'s session at install time, so the same
+    instrumenter works on either; only the stub's prologue, the jump-back width
+    and the thread-window register name differ (§12.1).
     """
 
     def __init__(self, dbg, module=None, *, result=None, blocks=None,
@@ -386,8 +399,8 @@ class BblInstrumenter:
         silently skipped.
 
         The plan speaks RVAs; the install is in VAs (`base + plan.rva`), because
-        the RIP window, the E9 destination and the stub it points at are all
-        absolute.
+        the instruction-pointer window, the E9 destination and the stub it
+        points at are all absolute.
 
         For each block, the displaced prefix is first copied out of the target
         (`read_memory`) and then overwritten with `E9 rel32` plus NOP padding
@@ -397,6 +410,11 @@ class BblInstrumenter:
         padding matters: the stub resumes at `block + 5` (the record's shape),
         so the pad bytes are what carry execution across whatever remains of a
         multi-byte displaced instruction to `block + prefix_size`.
+
+        The target's architecture is read here, once, from the session. It sizes
+        each stub (the x86 prologue and jump-back are shorter), tells
+        `relocate_prefix` where the moved bytes land, and is handed to
+        `build_stub` so the 32-bit return jump can name its inline pointer.
 
         Calling it twice returns the first report and writes nothing; call
         `uninstall()` between installs.
@@ -420,6 +438,7 @@ class BblInstrumenter:
                     f"no module base address for rva 0x{plan.rva:X}")
             return self._finish_report(plans, (), (), refusals)
 
+        arch = target_arch(self.dbg)
         candidates = [plan for plan in plans if plan.relocatable]
         sink = None
         region = None
@@ -442,8 +461,8 @@ class BblInstrumenter:
                             f"cannot allocate the event buffer: {exc}")
                     return self._finish_report(plans, (), (), refusals)
 
-                stub_size = sum(STUB_PROLOGUE_SIZE + plan.prefix_size
-                                + STUB_JUMP_SIZE
+                stub_size = sum(stub_prologue_size(arch) + plan.prefix_size
+                                + stub_jump_size(arch)
                                 for plan in candidates)
                 try:
                     region = alloc_near(self.dbg, base, stub_size)
@@ -473,7 +492,8 @@ class BblInstrumenter:
                         # Let relocate_prefix name the branch and its RVA; its
                         # first check is the branch/return refusal. A plan that
                         # says "not relocatable" for another reason still refuses.
-                        relocate_prefix(prefix, base, address_base=address_base)
+                        relocate_prefix(prefix, base, address_base=address_base,
+                                        arch=arch)
                         raise UnsupportedInstruction(
                             plan.rva, '', 'the planned prefix cannot be relocated')
                     if sink is None or cursor is None:
@@ -481,10 +501,12 @@ class BblInstrumenter:
                             'the event buffer or stub region was not allocated')
                     stub_address = cursor
                     relocated = relocate_prefix(
-                        prefix, stub_address, address_base=address_base)
+                        prefix, stub_address, address_base=address_base,
+                        arch=arch)
                     stub = build_stub(
                         sink, plan.rva, len(plan.instruction_rvas), relocated,
-                        base + plan.rva + DETOUR_SIZE)
+                        base + plan.rva + DETOUR_SIZE, arch=arch,
+                        stub_address=stub_address)
                     self.dbg.write_memory(stub_address, stub)
                     # The plan is in RVAs, the install in VAs: the window, the
                     # E9 and the record all speak absolute addresses.

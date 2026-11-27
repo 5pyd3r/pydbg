@@ -3,8 +3,10 @@
 The target is live: between "the block plan says this block is ours" and "the
 bytes are written", another thread can be executing inside those same bytes, and
 a torn instruction is not recoverable. The protocol is the one spec §12.4 names:
-suspend every target thread, check each RIP, then write -- and resume every
-thread that was suspended on every path, refusal included.
+suspend every target thread, check each instruction pointer, then write -- and
+resume every thread that was suspended on every path, refusal included. The
+instruction pointer is RIP on x64 and EIP on a 32-bit (WOW64) target, and the
+architecture comes from the target's session, never from the host.
 
 `install_patch` hands back an `InstalledPatch` record and `uninstall_patch`
 consumes it. The record, not state hidden on the debugger, is what says which
@@ -12,7 +14,8 @@ bytes are ours: installing over a changed pre-image is refused, and a patch
 whose bytes changed under us is reported on uninstall, never overwritten.
 
 Everything reaches the target through the debugger facade the caller passes;
-this module never imports `_pydbg`.
+this module never imports `_pydbg`. Reading `session.target_arch` is an
+attribute lookup on a plain object, so a fake with no session still works.
 """
 
 from dataclasses import dataclass
@@ -27,6 +30,27 @@ _PAGE_EXECUTE_READWRITE = 0x40
 # "still installed" differently from "restored" keys on this, because the bytes
 # may still be a detour that points into the stub region.
 BYTES_CHANGED = "bytes changed under us"
+
+# What each architecture's thread context calls the instruction pointer. A
+# WOW64 context carries EIP and no RIP; an x64 context the reverse. Getting
+# this wrong is a silent refusal of every block, not a wrong write.
+_IP_NAMES = {32: 'eip', 64: 'rip'}
+
+
+def target_arch(dbg):
+    """The debuggee's architecture (32 or 64), from the debugger's session.
+
+    The session is the single source of truth for a process's architecture
+    (`Session.target_arch`); the host's pointer width is never the answer, since
+    a 64-bit host debugging a WOW64 target must check EIP. A stand-in without a
+    session has no target to ask -- that is the unit tests' debugger-shaped
+    fake, which uses the x64 contract, so 64 is the fallback rather than a
+    guess about the machine.
+    """
+    session = getattr(dbg, '_session', None)
+    arch = getattr(session, 'target_arch', None)
+    return arch if arch in (32, 64) else 64
+
 
 # What one install wrote and displaced. The record travels from
 # `install_patch` to `uninstall_patch`, so uninstall needs no hidden state on
@@ -57,17 +81,19 @@ class InstalledPatch:
 class TargetBusy(PydbgError):
     """The patch window is not safe to rewrite right now.
 
-    Refusing is the point: a thread whose RIP is inside the bytes about to
-    change would execute a torn instruction, and stepping it out of the way is
-    guesswork the spec refuses. The same answer covers a thread that cannot be
-    suspended or whose context cannot be read -- without its RIP there is no
-    way to prove the window is clear -- and a pre-image the target no longer
-    has, because the bytes belong to someone else.
+    Refusing is the point: a thread whose instruction pointer is inside the
+    bytes about to change would execute a torn instruction, and stepping it out
+    of the way is guesswork the spec refuses. The same answer covers a thread
+    that cannot be suspended or whose context cannot be read -- without its
+    instruction pointer there is no way to prove the window is clear -- and a
+    pre-image the target no longer has, because the bytes belong to someone
+    else.
 
     Attributes:
         address: the patch address the caller asked for. It is an absolute
-            target address, because that is what RIP is; a block plan speaks
-            RVAs, and the caller converts once, at the install boundary.
+            target address, because that is what the instruction pointer is; a
+            block plan speaks RVAs, and the caller converts once, at the
+            install boundary.
         tid: the thread responsible, when one is known.
         warnings: cleanup failures collected while unwinding, so a caller that
             catches this still gets an honest report of unresolved resumes.
@@ -127,12 +153,16 @@ def _suspend_all(dbg, address, suspended):
         suspended.append((tid, handle))
 
 
-def _check_window(dbg, address, size, suspended):
-    """Refuse when a suspended thread's RIP is inside `[address, address+size)`.
+def _check_window(dbg, address, size, suspended, arch):
+    """Refuse when a suspended thread's instruction pointer is in the window.
 
-    Every thread is suspended before any context is read, so a thread cannot
-    move into the window between its own check and the write.
+    The pointer is RIP for a 64-bit target and EIP for a 32-bit one; `arch`
+    decides which name the context must carry. It is read from the session once
+    per patch, not from the host, and every thread is suspended before any
+    context is read, so a thread cannot move into the window between its own
+    check and the write.
     """
+    ip_name = _IP_NAMES[arch]
     end = address + size
     for tid, handle in suspended:
         try:
@@ -141,15 +171,16 @@ def _check_window(dbg, address, size, suspended):
             raise TargetBusy(
                 f"target busy: cannot read the context of tid={tid}: {exc}",
                 address=address, tid=tid)
-        rip = context.get('rip')
-        if rip is None:
-            # x64 only (§12.1): a context without RIP cannot be proved clear.
+        ip = context.get(ip_name)
+        if ip is None:
+            # A context without the target's instruction pointer cannot be
+            # proved clear: refusing is the only honest answer.
             raise TargetBusy(
-                f"target busy: tid={tid} has no RIP to check",
+                f"target busy: tid={tid} has no {ip_name.upper()} to check",
                 address=address, tid=tid)
-        if address <= rip < end:
+        if address <= ip < end:
             raise TargetBusy(
-                f"target busy: thread {tid} is at 0x{rip:X}, inside "
+                f"target busy: thread {tid} is at 0x{ip:X}, inside "
                 f"[0x{address:X}, 0x{end:X})", address=address, tid=tid)
 
 
@@ -207,14 +238,16 @@ def _run_suspended(dbg, address, size, action):
 
     The resume sits in a `finally` *inside* the outer `except`, so it runs on
     every path; the outer handler then attaches the cleanup warnings to a
-    `TargetBusy` before re-raising it with its original traceback.
+    `TargetBusy` before re-raising it with its original traceback. The
+    architecture is resolved here once, from the target, and passed to the
+    window check.
     """
     warnings = []
     suspended = []
     try:
         try:
             _suspend_all(dbg, address, suspended)
-            _check_window(dbg, address, size, suspended)
+            _check_window(dbg, address, size, suspended, target_arch(dbg))
             warning = action()
             if warning is not None:
                 warnings.append(warning)
@@ -231,7 +264,7 @@ def install_patch(dbg, address, patch, *, original):
 
     `address` is the block's absolute address in the target (module base plus
     the block RVA): a block plan speaks RVAs, an install is a VA, because the
-    RIP window it opens is absolute.
+    instruction-pointer window it opens is absolute.
 
     `original` is the pre-image the caller expects: the bytes this patch is
     allowed to replace. The bytes are read back under the suspended window and
@@ -296,8 +329,9 @@ def uninstall_patch(dbg, installed):
     thread suspension.
 
     When the bytes still match, the restore runs through the same
-    suspend-all/check-RIP/write/resume protocol as `install_patch`, because a
-    thread can be executing inside the bytes about to be restored.
+    suspend-all/check-instruction-pointer/write/resume protocol as
+    `install_patch`, because a thread can be executing inside the bytes about to
+    be restored.
 
     Returns:
         tuple[str, ...]: cleanup warnings, empty on a clean restore. A changed

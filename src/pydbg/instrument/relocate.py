@@ -5,10 +5,13 @@ bytes are one long instruction or a few short ones, and they have to keep their
 meaning at their new address:
 
 - a RIP-relative operand's `disp32` is relative to the end of *that*
-  instruction, so it must be rewritten for the stub (spec §12.3);
+  instruction, so it must be rewritten for the stub (spec §12.3). On a 32-bit
+  target there is no RIP-relative addressing at all, so the prefix moves as a
+  byte-for-byte copy;
 - a relative branch cannot be moved without rewriting its displacement, and the
   spec refuses rel8/rel32 rewriting outright — so a prefix containing one is
-  refused rather than copied wrong (§12.6).
+  refused rather than copied wrong (§12.6). The criterion is the same on both
+  architectures: it is a property of the instruction, not of its operand form.
 
 Everything here is a pure function of decoded instructions and addresses: no
 process memory, no threads, no debugger, no `_pydbg`. The plan speaks RVAs
@@ -19,15 +22,28 @@ keeps using the decoder's addresses and every refusal still names an RVA.
 
 from ..exceptions import PydbgError
 
-# Bytes a detour overwrites: one near JMP (E9 rel32).
+# Bytes a detour overwrites: one near JMP (E9 rel32). The encoding is five
+# bytes in both 32- and 64-bit mode, so the prefix a plan takes is the same on
+# the two architectures.
 DETOUR_SIZE = 5
 
-# Where the relocated prefix starts inside a stub. The relocation math below
-# addresses the moved instruction as `stub_address + STUB_PROLOGUE_SIZE + ...`,
-# so this is a contract with `stub.build_stub`, which asserts its assembled
-# prologue is exactly this long. It lives here because the relocation is the
-# half that needs the number; `stub.py` re-exports it.
-STUB_PROLOGUE_SIZE = 112
+# Where the relocated prefix starts inside a stub: the assembled prologue's
+# exact length, per architecture. The relocation math below addresses the moved
+# instruction as `stub_address + stub_prologue_size(arch) + ...`, so this is a
+# contract with `stub.build_stub`, which asserts its assembled prologue is
+# exactly this long. It lives here because the relocation is the half that
+# needs the number; `stub.py` re-exports it.
+STUB_PROLOGUE_SIZES = {32: 88, 64: 112}
+
+# The x64 length under the name existing callers import. A caller whose target
+# may be WOW64 asks `stub_prologue_size(arch)` instead.
+STUB_PROLOGUE_SIZE = STUB_PROLOGUE_SIZES[64]
+
+
+def stub_prologue_size(arch):
+    """The stub prologue's length for `arch` (32 or 64)."""
+    return STUB_PROLOGUE_SIZES[32 if arch == 32 else 64]
+
 
 _DISP32 = 4
 # Encoded widths a trailing immediate can have after a RIP-relative disp32:
@@ -186,13 +202,14 @@ def _disp32_offset(insn, disp, address_base=0):
     return matches[0]
 
 
-def relocate_prefix(insns, stub_address, *, address_base=0):
-    """The prefix's bytes, rewritten to run at `stub_address + STUB_PROLOGUE_SIZE`.
+def relocate_prefix(insns, stub_address, *, address_base=0, arch=64):
+    """The prefix's bytes, rewritten to run at `stub_address + <prologue>`.
 
     A RIP-relative operand keeps addressing the same memory: the original
     target is `insn.address + insn.size + disp`, and the new displacement is
     that target minus the end of the instruction in the stub. Everything else
-    is copied byte for byte.
+    is copied byte for byte — and on a 32-bit target that is every instruction,
+    because x86 has no RIP-relative addressing.
 
     `stub_address` is the start of the stub `build_stub` will emit, not the
     start of the relocated bytes — the caller has one address (where it will
@@ -204,6 +221,8 @@ def relocate_prefix(insns, stub_address, *, address_base=0):
         address_base: the decoder's RVA -> address offset, used only to keep
             refusals in the RVA domain (`BlockPlan.rva`); 0 for a decoder that
             already addresses by RVA.
+        arch: the target's architecture (32 or 64). Only the prologue's length
+            depends on it; both architectures refuse the same branches.
 
     Raises:
         UnsupportedInstruction: a branch or return is in the prefix, a
@@ -234,7 +253,7 @@ def relocate_prefix(insns, stub_address, *, address_base=0):
         if rip_relative:
             operand = rip_relative[0]
             target = insn.address + insn.size + operand.mem_disp
-            moved_to = stub_address + STUB_PROLOGUE_SIZE + len(relocated)
+            moved_to = stub_address + stub_prologue_size(arch) + len(relocated)
             disp = target - (moved_to + insn.size)
             if not -(1 << 31) <= disp < (1 << 31):
                 raise UnsupportedInstruction(

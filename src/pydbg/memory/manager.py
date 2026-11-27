@@ -170,6 +170,17 @@ class MemoryManager:
         except OSError as e:
             raise MemError(f"VirtualFreeEx at 0x{address:X}: {e}") from e
 
+    def _near_limit(self, near, limit):
+        """`limit`, narrowed so a 32-bit target's stubs stay addressable.
+
+        The session is the source of the target's architecture: a WOW64
+        process addresses with 32-bit EIP, so a stub above 4GB could neither be
+        reached by the E9 nor name its data. The x64 answer is unchanged.
+        """
+        if getattr(self._s, 'target_arch', None) != 32:
+            return limit
+        return min(limit, max(0, 0xFFFFFFFF - near))
+
     def alloc_near(self, size, near, limit=_NEAR_LIMIT):
         """Allocate `size` RWX bytes within `limit` of `near`; return its base.
 
@@ -179,6 +190,11 @@ class MemoryManager:
         lands. The scan walks the target's regions between `near - limit` and
         `near + limit`, takes each free one, and asks VirtualAllocEx for a
         64KB-aligned hint inside it (`_near_hint`).
+
+        A 32-bit target narrows the window's top to 4GB: its detour reaches the
+        stub through a 32-bit EIP and the stub names its data with 32-bit
+        immediates, so an address above the 32-bit space could never run. On
+        x64 this is a no-op (the reach of the E9 is the only bound).
 
         Every candidate is tried, and every failure is kept: a free region
         that cannot hold the request inside the window, a VirtualAllocEx that
@@ -193,6 +209,7 @@ class MemoryManager:
         """
         if size <= 0:
             raise MemError(f"cannot allocate {size} bytes near 0x{near:X}")
+        limit = self._near_limit(near, limit)
         handle = self._s.process_handle
         low = (near - limit) & ~(_ALLOC_GRANULARITY - 1)
         if low < _ALLOC_GRANULARITY:
