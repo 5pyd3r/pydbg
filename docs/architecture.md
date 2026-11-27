@@ -30,7 +30,7 @@ src/pydbg/
 │   ├── outcome.py       HandleOutcome：NOT_MINE / HANDLED / DEGRADED
 │   ├── software.py      INT3 生命周期
 │   └── hardware.py      Dr0-3
-├── module/resolver.py   模块枚举与文件名
+├── module/resolver.py   模块枚举与文件名（WOW64 可按目标架构取 32 位模块表）
 ├── symbol/resolver.py   dbghelp 封装（dbg.symbols）
 ├── pe/                  纯 Python PE 解析**与写出**（无第三方依赖）
 ├── pdb/                 纯 Python PDB 读取（MSF 校验 + ctypes dbghelp 离线）

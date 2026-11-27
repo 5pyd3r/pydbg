@@ -252,6 +252,8 @@ cdef extern from "windows.h":
 
 cdef extern from "psapi.h":
     BOOL EnumProcessModules(HANDLE hProcess, HMODULE* lphModule, DWORD cb, DWORD* lpcbNeeded)
+    DWORD LIST_MODULES_32BIT
+    DWORD LIST_MODULES_64BIT
     DWORD LIST_MODULES_ALL
     BOOL EnumProcessModulesEx(HANDLE hProcess, HMODULE* lphModule,
                               DWORD cb, DWORD* lpcbNeeded, DWORD dwFilterFlag)
