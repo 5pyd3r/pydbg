@@ -96,7 +96,7 @@ class Instrumenter:
 
         from ..disasm.engine import DisasmEngine
         from . import codegen
-        from .templates import build_stub, build_trampoline
+        from .templates import build_detour_jmp, build_trampoline
 
         mode = "x64" if self._s.target_arch == 64 else "x86"
         engine = DisasmEngine(mode=mode)
@@ -138,7 +138,7 @@ class Instrumenter:
             raise
         try:
             self._mem.write(stub_addr, machine)
-            self._mem.write(target_addr, build_stub(target_addr, stub_addr))
+            self._mem.write(target_addr, build_detour_jmp(target_addr, stub_addr))
         except Exception:
             try:
                 self._mem.write(target_addr, original)   # 尽力恢复目标

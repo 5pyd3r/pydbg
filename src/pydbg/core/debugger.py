@@ -891,14 +891,20 @@ class Debugger:
                 rewind indistinguishable from a good hit.
 
         Note: WOW64 (32-bit target on a 64-bit host) reports breakpoints as
-        STATUS_WX86_BREAKPOINT (0x4000001F) instead of EXCEPTION_BREAKPOINT;
-        check for either code (or for the single-step counterpart
-        STATUS_WX86_SINGLE_STEP 0x4000001E).
+        STATUS_WX86_BREAKPOINT instead of EXCEPTION_BREAKPOINT; check for
+        either code (or for the single-step counterpart
+        STATUS_WX86_SINGLE_STEP). Both names, and the numbers, live in
+        `pydbg.constants`.
 
         Example:
+            from pydbg.constants import (
+                EXCEPTION_BREAKPOINT, STATUS_WX86_BREAKPOINT,
+            )
+
             event = dbg.wait_event()
             if (event.type == 'EXCEPTION'
-                    and event.exception_code in (0x80000003, 0x4000001F)):
+                    and event.exception_code in (EXCEPTION_BREAKPOINT,
+                                                 STATUS_WX86_BREAKPOINT)):
                 if dbg.handle_bp_manual(event.tid, event.exception_addr):
                     # Read memory at bp address (original byte is restored)
                     data = dbg.read_memory(event.exception_addr, 16)
@@ -911,7 +917,11 @@ class Debugger:
         return outcome is HandleOutcome.HANDLED
 
     def handle_ss_manual(self, tid):
-        """Manually handle single-step after breakpoint. Call after EXCEPTION_SINGLE_STEP."""
+        """Manually handle single-step after breakpoint.
+
+        Call after EXCEPTION_SINGLE_STEP, or STATUS_WX86_SINGLE_STEP for a
+        32-bit target under WOW64; both are named in `pydbg.constants`.
+        """
         return self.brk_sw.handle_single_step(tid) is HandleOutcome.HANDLED
 
     def remove_all_breakpoints(self):

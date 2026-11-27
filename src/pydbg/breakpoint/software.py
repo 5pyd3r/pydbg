@@ -2,6 +2,7 @@
 
 from .. import _pydbg
 from ..core.process import ProcessManager
+from ..core.session import PendingSingleStep
 from ..exceptions import BreakpointError, ProcessError
 from .model import Breakpoint
 from .outcome import HandleOutcome
@@ -267,7 +268,9 @@ class SoftwareBreakpointManager:
             return HandleOutcome.DEGRADED
 
         # Schedule restore on next single-step event
-        self._s.pending_single_step[tid] = (bp_id, bp_addr, bp.original, h_process)
+        self._s.pending_single_step[tid] = PendingSingleStep(
+            bp_id=bp_id, addr=bp_addr, original=bp.original,
+            h_process=h_process)
         return HandleOutcome.HANDLED
 
     def handle_single_step(self, tid):
@@ -280,13 +283,10 @@ class SoftwareBreakpointManager:
             return HandleOutcome.NOT_MINE
 
         entry = self._s.pending_single_step.pop(tid)
-        bp_id = entry[0]
-        addr = entry[1]
-        h_process = entry[3] if len(entry) > 3 else self._s.process_handle
 
         # Only restore if breakpoint still exists (wasn't removed by user)
-        if bp_id in self._s.breakpoints:
-            self._write_int3_handle(h_process, addr)
+        if entry.bp_id in self._s.breakpoints:
+            self._write_int3_handle(entry.h_process, entry.addr)
 
         return HandleOutcome.HANDLED
 

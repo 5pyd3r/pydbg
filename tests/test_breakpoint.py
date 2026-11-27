@@ -720,7 +720,7 @@ class TestSoftwareBreakpointProcessScope(unittest.TestCase):
         self.assertEqual(session.breakpoints[parent_bp].hits, 0,
                          "the address-only lookup picked the parent's record")
         self.assertEqual(
-            session.pending_single_step[2001][3], 0x2000,
+            session.pending_single_step[2001].h_process, 0x2000,
             "the re-arming single-step was scheduled against another process")
 
     def test_a_thread_whose_pid_was_never_opened_still_dispatches(self):

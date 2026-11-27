@@ -8,8 +8,13 @@ Stub/trampoline 全部用硬编码字节，不依赖 keystone/capstone：
 from ..patch.encoding import build_abs_jmp
 
 
-def build_stub(target_addr: int, payload_addr: int) -> bytes:
-    """Detour stub written at target_addr: JMP payload_addr."""
+def build_detour_jmp(target_addr: int, payload_addr: int) -> bytes:
+    """Detour jump written at target_addr: 5-byte E9 JMP to payload_addr.
+
+    Not to be confused with `pydbg.instrument.stub.build_stub`: that one
+    assembles the ~112-byte target-side prologue (record writer + jump back),
+    while this is only the five-byte redirect planted in the hooked function.
+    """
     return build_abs_jmp(target_addr, payload_addr)
 
 

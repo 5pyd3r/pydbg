@@ -1,9 +1,15 @@
-EXCEPTION_SINGLE_STEP = 0x80000004
-# A 32-bit target under WOW64 reports its single step through the WOW64
-# status code. Recognising only the native code meant step events on x86
-# targets never matched, so the tracer waited for an event that had arrived.
-STATUS_WX86_SINGLE_STEP = 0x4000001E
+"""Single-step execution via the Trap Flag (TF).
 
+The exception codes come from `pydbg.constants`, the one home of the Win32
+numbers. `EXCEPTION_SINGLE_STEP` and `STATUS_WX86_SINGLE_STEP` stay importable
+from here because callers already do (`from pydbg.trace.step import ...`).
+"""
+
+from ..constants import EXCEPTION_SINGLE_STEP, STATUS_WX86_SINGLE_STEP
+
+# A 32-bit target under WOW64 reports its single step through the WOW64 status
+# code. Recognising only the native code meant step events on x86 targets never
+# matched, so the tracer waited for an event that had arrived.
 STEP_EXCEPTION_CODES = frozenset((EXCEPTION_SINGLE_STEP,
                                   STATUS_WX86_SINGLE_STEP))
 

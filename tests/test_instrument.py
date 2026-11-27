@@ -9,7 +9,7 @@ from pydbg.instrument.codegen import _scan_externs
 from pydbg.instrument.templates import (
     InstrumentTemplates,
     build_abs_jmp,
-    build_stub,
+    build_detour_jmp,
     build_trampoline,
 )
 
@@ -43,8 +43,9 @@ class TestTemplates(unittest.TestCase):
         with self.assertRaises(PydbgError):
             build_abs_jmp(0, 1 << 40)
 
-    def test_build_stub_is_jmp(self):
-        self.assertEqual(build_stub(0x1000, 0x9000), build_abs_jmp(0x1000, 0x9000))
+    def test_build_detour_jmp_is_the_five_byte_jmp(self):
+        self.assertEqual(build_detour_jmp(0x1000, 0x9000),
+                         build_abs_jmp(0x1000, 0x9000))
 
     def test_build_trampoline_appends_jmp_back(self):
         original = b'\x90\x90\x90\x90\x90'
