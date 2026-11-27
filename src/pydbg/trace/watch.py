@@ -41,6 +41,7 @@ continue that event before resuming the target.
 
 import time
 
+from ..constants import EXCEPTION_SINGLE_STEP, STATUS_WX86_SINGLE_STEP
 from ..core.status import ExitReason
 from ..exceptions import (
     BreakpointError, ProcessError, PydbgError,
@@ -54,7 +55,9 @@ from .format import MEM_WRITE, TraceEvent
 
 # A data breakpoint is delivered as a single-step exception, in the native code
 # and in the WOW64 status code a 32-bit target under a 64-bit debugger reports.
-_SINGLE_STEP_CODES = frozenset((0x80000004, 0x4000001E))
+# The numbers live in `pydbg.constants`; this is only the pair the watch accepts.
+_SINGLE_STEP_CODES = frozenset((EXCEPTION_SINGLE_STEP,
+                                STATUS_WX86_SINGLE_STEP))
 
 # The only lengths the debug registers encode; 8 is additionally refused by the
 # manager on an x86 target.

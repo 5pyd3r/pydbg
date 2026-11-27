@@ -15,6 +15,23 @@ class ChildProcessInfo:
     exit_code: int | None = None  # 退出后填入
 
 
+@dataclass(frozen=True)
+class PendingSingleStep:
+    """A software breakpoint whose INT3 is out until its thread steps once.
+
+    The INT3 was removed so the thread could execute the original instruction;
+    the breakpoint is re-armed from these fields when the single-step event
+    arrives. Stored in `DebugSession.pending_single_step`, keyed by tid.
+
+    `h_process` is the process the byte was displaced in — the one the re-arm
+    must write through, which is not necessarily the main target's.
+    """
+    bp_id: int
+    addr: int
+    original: bytes
+    h_process: int | None
+
+
 @dataclass
 class DebugSession:
     """Holds debug session state. No logic — pure data."""
@@ -26,7 +43,7 @@ class DebugSession:
     host_arch: int = struct.calcsize("P") * 8  # 32 or 64
     bp_counter: int = 0
     breakpoints: dict = field(default_factory=dict)  # id -> (type, addr, extra)
-    # Breakpoint lifecycle: tid -> (bp_id, addr, original_bytes)
+    # Breakpoint lifecycle: tid -> PendingSingleStep.
     pending_single_step: dict = field(default_factory=dict)
     # Set once the main target has been terminated: the handles stay open so
     # get_exit_code() still answers, but nothing is left to detach from.

@@ -145,13 +145,15 @@ class TestDebugSession(unittest.TestCase):
         self.assertEqual(s.breakpoints[2].kind, "hw")
 
     def test_pending_single_step_operations(self):
-        from pydbg.core.session import DebugSession
+        from pydbg.core.session import DebugSession, PendingSingleStep
         s = DebugSession()
-        s.pending_single_step[100] = (1, 0x1000, b"\x90")
+        s.pending_single_step[100] = PendingSingleStep(
+            bp_id=1, addr=0x1000, original=b"\x90", h_process=0x2000)
         self.assertIn(100, s.pending_single_step)
-        bp_id, addr, orig = s.pending_single_step.pop(100)
-        self.assertEqual(bp_id, 1)
-        self.assertEqual(addr, 0x1000)
+        entry = s.pending_single_step.pop(100)
+        self.assertEqual(entry.bp_id, 1)
+        self.assertEqual(entry.addr, 0x1000)
+        self.assertEqual(entry.h_process, 0x2000)
 
     def test_bp_counter_increment(self):
         from pydbg.core.session import DebugSession
