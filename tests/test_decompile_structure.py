@@ -196,6 +196,23 @@ CROSS_EDGE = bytes.fromhex(
 )
 
 
+def nested_ifs(levels=500):
+    """'levels' nested `if (eax == i)` blocks that all share one exit.
+
+    Each level is `cmp eax, i` + `jne <shared ret>` (9 bytes): the taken edge
+    skips to the merge, so the fall-through nests the next level. 500 levels is
+    far past the structurer's depth budget and, before that budget existed,
+    escaped the public API as RecursionError.
+    """
+    body = bytearray()
+    for index in range(levels):
+        body += bytes.fromhex("83f8") + bytes([index % 256])
+        distance = (levels - index - 1) * 9
+        body += b"\x0f\x85" + struct.pack("<i", distance)
+    body += b"\xc3"
+    return bytes(body)
+
+
 # A switch whose last case ends exactly where `.pdata` says its function ends.
 # Function A is [0x1000, 0x101D); 0x101D..0x102F is 0x90 padding and function B
 # starts at 0x1030. Case 1's body has no terminator, so a block that is not
@@ -475,6 +492,34 @@ class TestSwitchFallback(unittest.TestCase):
             self.assertIn(rva, text_addresses(result.text), result.text)
 
 
+class TestTruncatedTable(unittest.TestCase):
+    """A SlotTable the reader cut short is not a table size."""
+
+    def test_a_truncated_table_stays_flat_and_names_the_reason(self):
+        """`truncated` means "at least N cases", so no switch may be built.
+
+        Rendering the prefix as the whole switch would report a table size the
+        reader never established. The dispatch keeps its flat `goto *...` form
+        and the warning names the truncation instead of "unmatched".
+        """
+        from dataclasses import replace
+        from pydbg.analysis import decompile_function
+
+        result = analyze(SWITCH, image_base=SWITCH_BASE,
+                         extra_sections=switch_extra())
+        self.assertTrue(result.slot_tables, "fixture must yield a jump table")
+        result.slot_tables = tuple(
+            replace(table, truncated=True) for table in result.slot_tables)
+
+        decompiled = decompile_function(result, TEXT_RVA)
+
+        self.assertIsNotNone(decompiled)
+        self.assertNotIn("switch (", decompiled.text)
+        self.assertIn("goto *", decompiled.text)
+        self.assertIn("truncated jump table", decompiled.warnings)
+        self.assertNotIn("unmatched jump table", decompiled.warnings)
+
+
 class TestJumpTableBound(unittest.TestCase):
     """A jump-table case block still belongs to the function that owns it."""
 
@@ -598,6 +643,17 @@ class TestNoSilentDrop(unittest.TestCase):
         self.assertEqual(len(result.unhandled), 2)
         self.assertEqual(result.text.count("// unhandled:"),
                          len(result.unhandled))
+
+
+class TestRegionDepthBudget(unittest.TestCase):
+    """Nesting past the budget degrades to the flat form, never to an exception."""
+
+    def test_500_nested_ifs_return_a_warning_not_a_recursion_error(self):
+        result = decompile(nested_ifs(500))
+
+        self.assertIsNotNone(result)
+        self.assertIn("region depth limit", result.warnings)
+        self.assertIn("goto", result.text)
 
 
 class TestDeterminism(unittest.TestCase):

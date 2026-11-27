@@ -277,7 +277,18 @@ class _Recovery:
             self.stmts.append(Ret(rva=stmt.rva, value=value))
         elif isinstance(stmt, Nop):
             self.stmts.append(stmt)
+        elif isinstance(stmt, Branch):
+            # A terminator has no expression to substitute and nothing in the
+            # block follows it; it is carried through unchanged.
+            self.stmts.append(stmt)
         else:
+            # A statement kind this pass does not model may read or write
+            # anything. Block-local copies/constants kept across it could
+            # rewrite a later read with a value the instruction invalidated --
+            # a plausible wrong answer instead of a visible gap -- so clear
+            # them, exactly as `Call`/`Opaque` do above.
+            self.copies.clear()
+            self.consts.clear()
             self.stmts.append(stmt)
 
     def _step_assign(self, stmt):

@@ -161,6 +161,37 @@ class TestBlockExpressions(unittest.TestCase):
         self.assertNotIn("// dead:", result.text)
 
 
+class TestUnmodelledStatement(unittest.TestCase):
+    """A statement the recovery pass does not model may invalidate anything."""
+
+    def test_copies_and_constants_do_not_survive_it(self):
+        """Keeping stale facts would rewrite later reads with wrong values.
+
+        An unmodelled instruction can write any register, so a copy or constant
+        established before it is no longer known after it. Propagating the old
+        value would print a plausible expression where the analysis had lost
+        track -- the silent-wrong-answer shape this pass must not have.
+        """
+        from pydbg.analysis.decompile import expr, ir
+
+        class Mystery(ir.Stmt):
+            def __init__(self, rva):
+                self.rva = rva
+
+        block = ir.IRBlock(rva=TEXT_RVA, stmts=(
+            ir.Assign(rva=TEXT_RVA, dst="rdx", src=ir.Reg("rcx")),
+            ir.Assign(rva=TEXT_RVA + 3, dst="eax", src=ir.Const(5)),
+            Mystery(TEXT_RVA + 5),
+            ir.Assign(rva=TEXT_RVA + 6, dst="r8", src=ir.Reg("rdx")),
+            ir.Assign(rva=TEXT_RVA + 9, dst="ebx", src=ir.Reg("eax")),
+        ))
+
+        recovered = expr.recover({TEXT_RVA: block}, "x64")[TEXT_RVA].stmts
+
+        self.assertEqual(recovered[-2].src, ir.Reg("rdx"))
+        self.assertEqual(recovered[-1].src, ir.Reg("eax"))
+
+
 class TestBlockSet(unittest.TestCase):
     """`blocks` is the CFG's own block set, not the renderer's block set."""
 
@@ -226,6 +257,40 @@ class TestUnhandled(unittest.TestCase):
         ))
 
         self.assertEqual(result.unhandled, (), result.text)
+
+
+class TestOutOfImageOpaque(unittest.TestCase):
+    """An instruction outside the image still reports an RVA, never a VA."""
+
+    def test_an_out_of_image_opaque_keeps_the_rva_address_space(self):
+        """The IR has one address space; the image base is subtracted once.
+
+        `Stmt.rva` feeds the `// @0x...` annotation and `unhandled`. Storing
+        the VA for this one statement would shift its printed address by the
+        image base exactly when a reader cannot tell which space it is.
+        """
+        from types import SimpleNamespace
+        from pydbg.analysis.decompile import ir, render, structure
+
+        result = analyze(RET)
+        offset = 0x100000            # well past the synthetic image's span
+        insn = SimpleNamespace(address=result.image.image_base + offset,
+                               mnemonic="cpuid", op_str="")
+        stmt = ir.lower_instruction(result.decoder, result.image, insn)[0]
+
+        self.assertIsInstance(stmt, ir.Opaque)
+        self.assertEqual(stmt.rva, offset)
+        self.assertNotEqual(stmt.rva, insn.address)
+        self.assertEqual(result.image.rva_to_va(stmt.rva), insn.address)
+
+        block = ir.IRBlock(rva=offset, stmts=(stmt,))
+        text = render.render_function(
+            offset,
+            structure.Structured(nodes=(structure.Statements(block),),
+                                 warnings=()),
+            {})
+        self.assertIn(f"@0x{offset:x}", text)
+        self.assertNotIn(f"@0x{insn.address:x}", text)
 
 
 class TestControlFlow(unittest.TestCase):
@@ -311,6 +376,72 @@ class TestNoSilentDrop(unittest.TestCase):
                          f"missing from text:\n{decompiled.text}")
         self.assertEqual(decompiled.text.count("// unhandled:"),
                          len(decompiled.unhandled))
+
+
+class TestRenderedGaps(unittest.TestCase):
+    """A form the renderer lacks is stated in the text, never silently lost."""
+
+    def test_an_unknown_expression_is_marked_instead_of_a_question_mark(self):
+        from pydbg.analysis.decompile import ir, render, structure
+
+        block = ir.IRBlock(rva=TEXT_RVA, stmts=(
+            ir.Assign(rva=TEXT_RVA, dst="eax", src=object()),))
+        text = render.render_function(
+            TEXT_RVA,
+            structure.Structured(nodes=(structure.Statements(block),),
+                                 warnings=()),
+            {})
+
+        self.assertIn("unhandled: expression", text)
+        self.assertNotIn("?", text)
+
+    def test_an_unrendered_statement_is_printed_with_its_address(self):
+        """Returning no line would delete the instruction from the output."""
+        from pydbg.analysis.decompile import ir, render, structure
+
+        class Mystery(ir.Stmt):
+            def __init__(self, rva):
+                self.rva = rva
+
+        block = ir.IRBlock(rva=TEXT_RVA, stmts=(Mystery(TEXT_RVA),))
+        text = render.render_function(
+            TEXT_RVA,
+            structure.Structured(nodes=(structure.Statements(block),),
+                                 warnings=()),
+            {})
+
+        self.assertIn("// unhandled: statement Mystery", text)
+        self.assertIn("@0x1000", text)
+
+    def test_an_unrendered_statement_makes_the_result_incomplete(self):
+        """A line that states a gap must stop `complete` claiming otherwise."""
+        from unittest import mock
+        import pydbg.analysis.decompile as package
+        from pydbg.analysis.decompile import ir
+
+        class Mystery(ir.Stmt):
+            def __init__(self, rva):
+                self.rva = rva
+
+        result = analyze(RET)
+        original = package.expr.recover
+
+        def recover(blocks, mode):
+            recovered = original(blocks, mode)
+            rva = min(recovered)
+            block = recovered[rva]
+            recovered[rva] = ir.IRBlock(
+                rva=block.rva,
+                stmts=(Mystery(rva),) + block.stmts,
+                dead=block.dead)
+            return recovered
+
+        with mock.patch.object(package.expr, "recover", recover):
+            decompiled = package.decompile_function(result, TEXT_RVA)
+
+        self.assertIn("unhandled statement", decompiled.warnings)
+        self.assertFalse(decompiled.complete)
+        self.assertIn("// unhandled: statement Mystery", decompiled.text)
 
 
 class TestFailureAndHonesty(unittest.TestCase):

@@ -49,10 +49,13 @@ class DecompiledFunction:
     when 'extra_blocks' is non-empty the warnings say `jump-table blocks`.
 
     'unhandled' names each instruction that fell outside the model as
-    (rva, mnemonic); its length is the number of `// unhandled:` lines in the
-    text. 'complete' is False when the CFG had an unresolved edge or was
-    truncated, and 'warnings' names the reason (`unresolved edges`,
-    `truncated`, `jump-table blocks`, `irreducible`, `unmatched jump table`).
+    (rva, mnemonic); its length is the number of `// unhandled:` lines those
+    instructions produce. 'complete' is False when the CFG had an unresolved
+    edge or was truncated, or when the renderer met a statement kind it has no
+    form for (that line is still printed, as `// unhandled: statement <kind>`).
+    'warnings' names the reason (`unresolved edges`, `truncated`,
+    `jump-table blocks`, `irreducible`, `unmatched jump table`,
+    `truncated jump table`, `region depth limit`, `unhandled statement`).
     """
 
     rva: int
@@ -148,6 +151,15 @@ def decompile_function(result, rva, max_blocks=4096):
         for stmt in recovered[block_rva].stmts
         if isinstance(stmt, Opaque)
     )
+    # A statement kind the renderer has no form for is printed as an
+    # `// unhandled: statement ...` line rather than dropped, but a line that
+    # states a gap must also stop the result from claiming completeness.
+    unrendered = tuple(
+        (stmt.rva, type(stmt).__name__)
+        for block_rva in sorted(recovered)
+        for stmt in recovered[block_rva].stmts
+        if not render.is_rendered(stmt)
+    )
 
     warnings = []
     if _unresolved(successors):
@@ -156,9 +168,11 @@ def decompile_function(result, rva, max_blocks=4096):
         warnings.append("truncated")
     if extra_blocks:
         warnings.append("jump-table blocks")
+    if unrendered:
+        warnings.append("unhandled statement")
     warnings.extend(structured.warnings)
-    complete = bool(cfg.complete) and not cfg.truncated and not _unresolved(
-        successors)
+    complete = (bool(cfg.complete) and not cfg.truncated
+                and not _unresolved(successors) and not unrendered)
 
     return DecompiledFunction(
         rva=rva,
