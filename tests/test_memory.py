@@ -15,6 +15,7 @@ except ImportError:
     _has_cython = False
 
 
+@unittest.skipUnless(_has_cython, "optional dependency: Cython extension")
 class TestMemoryReadWrite(unittest.TestCase):
     """Test reading and writing process memory."""
 
@@ -88,6 +89,7 @@ class TestMemoryReadWrite(unittest.TestCase):
         self.assertIn("protect", info)
 
 
+@unittest.skipUnless(_has_cython, "optional dependency: Cython extension")
 class TestModuleEnum(unittest.TestCase):
     """Test module enumeration."""
 

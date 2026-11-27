@@ -21,8 +21,14 @@ import unittest
 from tests import (
     TEST_MODAL_TARGET_PATH, TEST_WEDGE_TARGET_PATH, TEST_WINDOW_TARGET_PATH,
 )
-from tests.helpers import teardown
 from pydbg.core.windows import Windows
+
+try:
+    from pydbg import _pydbg  # noqa: F401
+
+    _has_cython = True
+except ImportError:
+    _has_cython = False
 
 # Which of the two halves a test needs. The state table runs everywhere; the
 # integration tests need a desktop that actually has windows, and say so
@@ -188,6 +194,7 @@ class TestTheStateTable(unittest.TestCase):
         self.assertIn("cannot rule out", unknown.caveat)
 
 
+@unittest.skipUnless(_has_cython, "optional dependency: Cython extension")
 class TestAgainstRealWindows(unittest.TestCase):
     """The positive control: a real window, a real child, a real read."""
 
@@ -243,6 +250,7 @@ class TestGoneIsReachable(unittest.TestCase):
     read as "it exited".
     """
 
+    @unittest.skipUnless(_has_cython, "optional dependency: Cython extension")
     def test_a_pid_outside_the_snapshot_is_gone(self):
         from pydbg.core.window_probe import MessageLoopState, WindowProbeQuery
 
@@ -250,6 +258,7 @@ class TestGoneIsReachable(unittest.TestCase):
         self.assertIs(probe.state, MessageLoopState.GONE)
         self.assertIn("snapshot", probe.evidence)
 
+    @unittest.skipUnless(_has_cython, "optional dependency: Cython extension")
     def test_the_facade_reports_gone_for_an_unknown_pid(self):
         from pydbg import Debugger
         from pydbg.core.window_probe import MessageLoopState
@@ -272,6 +281,7 @@ class TestGoneIsReachable(unittest.TestCase):
         self.assertIn("snapshot", probe.evidence)
 
 
+@unittest.skipUnless(_has_cython, "optional dependency: Cython extension")
 class TestTheModalCase(unittest.TestCase):
     """The cause that cost the round, against a real message box."""
 
@@ -300,6 +310,7 @@ class TestTheModalCase(unittest.TestCase):
                              "message box pumps, so WEDGED is the wrong cause")
 
 
+@unittest.skipUnless(_has_cython, "optional dependency: Cython extension")
 class TestTheSameZeroGetsTwoDiagnoses(unittest.TestCase):
     """The test that would have saved the round.
 
@@ -355,12 +366,17 @@ class TestTheSameZeroGetsTwoDiagnoses(unittest.TestCase):
                 self.assertNotIn("idle, blocked, or wedged", str(error))
 
 
+@unittest.skipUnless(_has_cython, "optional dependency: Cython extension")
 class TestRunCarriesTheDiagnosis(unittest.TestCase):
     """The link from `run()`'s idle path to the probe, end to end."""
 
     def test_a_real_timeout_carries_a_probe_and_drops_the_old_sentence(self):
         from pydbg import Debugger
         from pydbg.exceptions import TimeoutError as PydbgTimeout
+        # Imported here, not at module scope: tests.helpers binds `_pydbg` on
+        # import, and that made this whole module uncollectable without the
+        # extension — including the pure state-table tests above.
+        from tests.helpers import teardown
         debugger = Debugger()
         pid, _tid = debugger.create_process(TEST_WINDOW_TARGET_PATH)
         try:
@@ -390,6 +406,7 @@ class TestRunCarriesTheDiagnosis(unittest.TestCase):
         self.assertIn("cannot rule out that the target is blocked", str(error))
 
 
+@unittest.skipUnless(_has_cython, "optional dependency: Cython extension")
 class TestTheRefusalsAreLoud(unittest.TestCase):
     """Requirement two: when the probe cannot run, say so in words."""
 
@@ -439,6 +456,7 @@ class TestTheRefusalsAreLoud(unittest.TestCase):
         self.assertIn("cannot rule out", probe.caveat)
 
 
+@unittest.skipUnless(_has_cython, "optional dependency: Cython extension")
 class TestTheWedgeCase(unittest.TestCase):
     """The third cause, with a bounded wait rather than a fixed sleep."""
 

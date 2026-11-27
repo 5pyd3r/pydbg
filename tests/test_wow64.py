@@ -9,6 +9,13 @@ import unittest
 
 _TEST_DIR = os.path.dirname(os.path.abspath(__file__))
 
+try:
+    from pydbg import _pydbg  # noqa: F401
+
+    _has_cython = True
+except ImportError:
+    _has_cython = False
+
 # simple_target32.exe is a product of scripts/build-target32.ps1 (meson has no
 # x86 toolchain) and is not committed. tests/meson.build defines its path once
 # and passes it here; a fallback path duplicated in this module used to hide a
@@ -594,6 +601,7 @@ class TestWow64ArchMapping(unittest.TestCase):
 
 @unittest.skipUnless(_wow64_available(), "environment: 64-bit host")
 class TestWow64ChildProcess(unittest.TestCase):
+    @unittest.skipUnless(_has_cython, "optional dependency: Cython extension")
     def test_cross_arch_child_gets_correct_machine(self):
         from pydbg import Debugger
         from tests.helpers import teardown

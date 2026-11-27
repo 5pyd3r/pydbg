@@ -40,6 +40,7 @@ def _process_module():
             del pydbg._pydbg
 
 
+@unittest.skipUnless(_has_cython, "optional dependency: Cython extension")
 class TestProcessLifecycle(unittest.TestCase):
     """Integration tests for process creation and debug event loop."""
 
@@ -114,6 +115,7 @@ class TestProcessLifecycle(unittest.TestCase):
             _pydbg.debug_active_process_stop(999999)
 
 
+@unittest.skipUnless(_has_cython, "optional dependency: Cython extension")
 class TestDebuggerAPI(unittest.TestCase):
     """Tests for the high-level Debugger class."""
 
