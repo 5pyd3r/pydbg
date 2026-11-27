@@ -43,14 +43,10 @@ import time
 from dataclasses import dataclass
 
 from ..constants import EXCEPTION_SINGLE_STEP, STATUS_WX86_SINGLE_STEP
-from ..core.status import ExitReason
-from ..exceptions import (
-    BreakpointError, ProcessError, PydbgError, TimeoutError as PydbgTimeoutError,
-)
+from ..exceptions import BreakpointError, PydbgError
 from . import _shared
 from .bbl import (
-    STOP_IDLE_TIMEOUT, STOP_MAX_EVENTS, STOP_NO_MODULE, STOP_NO_TARGET,
-    STOP_TARGET_EXITED, TRUNCATED_REASONS,
+    STOP_MAX_EVENTS, STOP_NO_MODULE, STOP_NO_TARGET, TRUNCATED_REASONS,
 )
 from .format import API, TraceEvent
 
@@ -188,12 +184,7 @@ class FunctionProbe:
         self._step_pending = False
         # True when the run ended on an uncontinued debug event.
         self._uncontinued = False
-        # Handed a Debugger, a tracer is part of that debugger's teardown
-        # chain (ADR-0004); a fake or proxy without attach_trace() is simply
-        # not a lifecycle owner.
-        attach = getattr(dbg, "attach_trace", None)
-        if callable(attach):
-            attach(self)
+        _shared.attach_tracer(dbg, self)
 
     @property
     def hook_id(self):
@@ -272,14 +263,12 @@ class FunctionProbe:
             return ()
 
         try:
-            self.dbg.remove_breakpoint(bp_id)
-        except (BreakpointError, ProcessError):
-            if _shared.target_exited(self.dbg):
-                return ("target exited during cleanup",)
-            return ("breakpoint left",)
+            # This probe reports a failed removal but does not re-check a
+            # non-raising one; recheck_removed=False keeps that exact contract.
+            return _shared.remove_breakpoints(
+                self.dbg, ((self.addr, bp_id),), recheck_removed=False)
         finally:
             self._close_thread(h_thread)
-        return ()
 
     def teardown(self):
         """Undo the probe as one manager-contract step (ADR-0004).
@@ -342,16 +331,10 @@ class FunctionProbe:
                 self._base, self._size = region
                 if self._bp_id is None:
                     self.arm()
-                try:
-                    status = self.dbg.run(
-                        self._on_event,
-                        max_idle_timeouts=max_idle_timeouts)
-                except PydbgTimeoutError:
-                    self._reason = STOP_IDLE_TIMEOUT
-                else:
-                    if (status is not None
-                            and status.reason is ExitReason.TARGET_EXITED):
-                        self._reason = STOP_TARGET_EXITED
+                reason = _shared.run_target(
+                    self.dbg, self._on_event, max_idle_timeouts)
+                if reason is not None:
+                    self._reason = reason
 
         return ProbeSummary(
             calls=tuple(self._calls),

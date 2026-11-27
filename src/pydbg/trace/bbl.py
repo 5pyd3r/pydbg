@@ -43,10 +43,7 @@ from dataclasses import dataclass
 from ..analysis import analyze_process
 from ..analysis.cfg import cfg_of
 from ..constants import EXCEPTION_BREAKPOINT, STATUS_WX86_BREAKPOINT
-from ..core.status import ExitReason
-from ..exceptions import (
-    BreakpointError, ProcessError, PydbgError, TimeoutError as PydbgTimeoutError,
-)
+from ..exceptions import PydbgError
 from . import _shared
 from .format import BLOCK, TraceEvent
 
@@ -54,21 +51,19 @@ from .format import BLOCK, TraceEvent
 # 64-bit debugger reports (same pair the debugger's own dispatch checks).
 _BREAKPOINT_CODES = frozenset((EXCEPTION_BREAKPOINT, STATUS_WX86_BREAKPOINT))
 
-# Why a run stopped. These are exported so callers compare against a name and
-# not a string literal that can drift. Two of them mean the trace is partial.
-# STOP_NO_MODULE / STOP_NO_TARGET live here too because they are reasons a
-# trace can end, not facts about one tracer: every Phase 3b entry point can
-# answer with them, and the copies in instr/probe had already drifted apart.
-STOP_MAX_EVENTS = "max_events"
-STOP_TARGET_EXITED = "target_exited"
-STOP_IDLE_TIMEOUT = "idle_timeout"
-STOP_NO_BLOCKS = "no traceable blocks"
-STOP_NO_MODULE = "no module"
-STOP_NO_TARGET = "no target"
-
-# The reasons that mean "a budget cut this run short". `TraceSummary.truncated`
-# is derived from this set, so it cannot disagree with `reason`.
-TRUNCATED_REASONS = frozenset((STOP_MAX_EVENTS, STOP_IDLE_TIMEOUT))
+# The stop reasons are defined in `_shared`, beside the run shell that
+# translates them, so "what a stop reason means" has one place to change. They
+# are re-exported here under their published names: `pydbg.trace` and callers
+# have always imported them from this module. Two of them mean the trace is
+# partial, and `TraceSummary.truncated` is derived from their set so it cannot
+# disagree with `reason`.
+STOP_MAX_EVENTS = _shared.STOP_MAX_EVENTS
+STOP_TARGET_EXITED = _shared.STOP_TARGET_EXITED
+STOP_IDLE_TIMEOUT = _shared.STOP_IDLE_TIMEOUT
+STOP_NO_BLOCKS = _shared.STOP_NO_BLOCKS
+STOP_NO_MODULE = _shared.STOP_NO_MODULE
+STOP_NO_TARGET = _shared.STOP_NO_TARGET
+TRUNCATED_REASONS = _shared.TRUNCATED_REASONS
 
 
 @dataclass(frozen=True)
@@ -169,12 +164,7 @@ class BblTracer:
         self._seen = set()
         self._reason = None
         self._warnings = []
-        # Handed a Debugger, a tracer is part of that debugger's teardown
-        # chain (ADR-0004); a fake or proxy without attach_trace() is simply
-        # not a lifecycle owner.
-        attach = getattr(dbg, "attach_trace", None)
-        if callable(attach):
-            attach(self)
+        _shared.attach_tracer(dbg, self)
 
     # ── planning ───────────────────────────────────────────────
 
@@ -302,29 +292,7 @@ class BblTracer:
         self._arming_warnings = []
         if not own:
             return ()
-
-        warnings = []
-        leftover_ids = set()
-        target_exited = False
-        for address, bp_id in own.items():
-            try:
-                self.dbg.remove_breakpoint(bp_id)
-            except (BreakpointError, ProcessError):
-                if _shared.target_exited(self.dbg):
-                    warnings.append("target exited during cleanup")
-                    target_exited = True
-                    break
-                leftover_ids.add(address)
-                warnings.append("breakpoint left")
-
-        if not target_exited:
-            for address in own:
-                if address in leftover_ids:
-                    continue
-                if self.dbg.find_breakpoint(address) is not None:
-                    warnings.append("breakpoint left")
-                    break
-        return tuple(dict.fromkeys(warnings))
+        return _shared.remove_breakpoints(self.dbg, own.items())
 
     def teardown(self):
         """Undo this tracer's INT3s as one manager-contract step (ADR-0004).
@@ -399,16 +367,10 @@ class BblTracer:
             else:
                 if not self._armed_ids:
                     self.arm()
-                try:
-                    status = self.dbg.run(
-                        self._on_event,
-                        max_idle_timeouts=max_idle_timeouts)
-                except PydbgTimeoutError:
-                    self._reason = STOP_IDLE_TIMEOUT
-                else:
-                    if (status is not None
-                            and status.reason is ExitReason.TARGET_EXITED):
-                        self._reason = STOP_TARGET_EXITED
+                reason = _shared.run_target(
+                    self.dbg, self._on_event, max_idle_timeouts)
+                if reason is not None:
+                    self._reason = reason
         finally:
             arming_warnings = list(self._arming_warnings)
             cleanup_warnings = self.disarm()

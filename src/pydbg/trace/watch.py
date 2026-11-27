@@ -42,15 +42,9 @@ continue that event before resuming the target.
 import time
 
 from ..constants import EXCEPTION_SINGLE_STEP, STATUS_WX86_SINGLE_STEP
-from ..core.status import ExitReason
-from ..exceptions import (
-    BreakpointError, ProcessError, PydbgError,
-    TimeoutError as PydbgTimeoutError,
-)
+from ..exceptions import BreakpointError, PydbgError
 from . import _shared
-from .bbl import (
-    STOP_IDLE_TIMEOUT, STOP_MAX_EVENTS, STOP_TARGET_EXITED, TraceSummary,
-)
+from .bbl import STOP_MAX_EVENTS, TraceSummary
 from .format import MEM_WRITE, TraceEvent
 
 # A data breakpoint is delivered as a single-step exception, in the native code
@@ -108,12 +102,7 @@ class MemoryWatch:
         # (~36 ms measured); caching the handle keeps a watch cheap enough to
         # observe a target that writes every 20 ms.
         self._h_threads = {}
-        # Handed a Debugger, a tracer is part of that debugger's teardown
-        # chain (ADR-0004); a fake or proxy without attach_trace() is simply
-        # not a lifecycle owner.
-        attach = getattr(dbg, "attach_trace", None)
-        if callable(attach):
-            attach(self)
+        _shared.attach_tracer(dbg, self)
 
     # ── arming ─────────────────────────────────────────────────
 
@@ -163,19 +152,8 @@ class MemoryWatch:
         try:
             if own is None:
                 return ()
-            try:
-                self.dbg.remove_breakpoint(own)
-            except (BreakpointError, ProcessError):
-                if _shared.target_exited(self.dbg):
-                    return ("target exited during cleanup",)
-                return ("breakpoint left",)
-
-            # A removal that raised is the only normal failure; if the
-            # breakpoint record survived a non-raising removal, that is still a
-            # leftover. Ask the public lookups, not the session's dict.
-            if self.dbg.find_breakpoint(self.addr) is not None:
-                return ("breakpoint left",)
-            return ()
+            return _shared.remove_breakpoints(
+                self.dbg, ((self.addr, own),))
         finally:
             for h_thread in handles.values():
                 try:
@@ -253,15 +231,10 @@ class MemoryWatch:
         if self._bp_id is None:
             self.arm()
 
-        try:
-            status = self.dbg.run(
-                self._on_event, max_idle_timeouts=max_idle_timeouts)
-        except PydbgTimeoutError:
-            self._reason = STOP_IDLE_TIMEOUT
-        else:
-            if (status is not None
-                    and status.reason is ExitReason.TARGET_EXITED):
-                self._reason = STOP_TARGET_EXITED
+        reason = _shared.run_target(
+            self.dbg, self._on_event, max_idle_timeouts)
+        if reason is not None:
+            self._reason = reason
 
         return TraceSummary(
             events=self._events,
