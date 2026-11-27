@@ -274,13 +274,17 @@ class _FakeCleanupDebugger:
         self.breakpoints = {}       # bp_id -> addr
         self.removed = []
         self.closed = []
+        # A debugger that answers remove_breakpoint() and leaves the record:
+        # the only way the probe can tell "called" from "removed".
+        self.silent_fail = False
 
     def add(self, bp_id, addr):
         self.breakpoints[bp_id] = addr
 
     def remove_breakpoint(self, bp_id):
         self.removed.append(bp_id)
-        self.breakpoints.pop(bp_id, None)
+        if not self.silent_fail:
+            self.breakpoints.pop(bp_id, None)
 
     def find_breakpoint(self, addr):
         return next((bid for bid, a in self.breakpoints.items() if a == addr),
@@ -313,6 +317,36 @@ class TestFunctionProbeTeardown(unittest.TestCase):
         self.assertEqual(dbg.closed, [0x55])
         self.assertIsNone(probe.hook_id)
         self.assertEqual(probe.teardown(), (), "teardown is idempotent")
+
+    def test_a_removal_that_returns_without_removing_is_reported(self):
+        """No exception is not the same answer as "removed".
+
+        A debugger that returns from remove_breakpoint() without deleting the
+        record leaves the slot armed. The probe must report that as
+        "breakpoint left", as `BblTracer` and `MemoryWatch` already do,
+        instead of calling the cleanup clean because nothing raised.
+        """
+        probe, dbg = self.armed()
+        dbg.silent_fail = True
+
+        self.assertEqual(probe.teardown(), ("breakpoint left",))
+        self.assertEqual(dbg.breakpoints, {7: 0x1000},
+                         "the fake kept the record, so the slot is not back")
+        self.assertEqual(dbg.closed, [0x55])
+
+    def test_another_owners_record_at_the_same_address_is_not_ours(self):
+        """The recheck asks for this record, not for any record at the address.
+
+        Four probes can arm the same entry in four debug-register slots, and
+        `find_breakpoint()` answers by address. An address-only recheck would
+        call a clean removal "breakpoint left" while another probe's record
+        still sits at that entry.
+        """
+        probe, dbg = self.armed()
+        dbg.add(8, 0x1000)          # another probe on the same entry
+
+        self.assertEqual(probe.disarm(), ())
+        self.assertEqual(dbg.breakpoints, {8: 0x1000})
 
     def test_discard_forgets_the_slot_without_touching_the_target(self):
         probe, dbg = self.armed()

@@ -274,10 +274,11 @@ class BblTracer:
         Only ids recorded by arm() are removed; the caller's own breakpoints
         are never touched.
 
-        A failed removal is not assumed harmless. The breakpoint manager drops
-        its record before restoring the byte, so the record being gone does
-        not prove the byte went back — when the target is still alive that is
-        reported as 'breakpoint left'. After the target has exited the byte
+        A failed removal is not assumed harmless. The breakpoint manager
+        restores the byte first and deletes the record only once that write
+        succeeded; a raising removal keeps the record, so a live target may
+        still hold the INT3 and that is reported as 'breakpoint left'. After
+        the target has exited the byte
         cannot be put back at all: that is reported once as "target exited
         during cleanup", and the remaining removals are abandoned because
         every one would fail the same way. It is deliberately not called

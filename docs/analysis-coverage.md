@@ -559,7 +559,7 @@ RebuildReport(sections_rebuilt, size_of_image, entry_point, load_delta,
               imports, unresolved_imports, gaps, warnings)
 
 pydbg.pe.writer.write_pe(pe, image_bytes, *, entry_point=None) -> bytes
-pydbg.pe.writer.file_layout(pe) -> FileLayout(size_of_image, size_of_headers, sections, sections_offset)
+pydbg.pe.writer.file_layout(pe) -> FileLayout(size_of_image, size_of_headers, sections, sections_offset, table_end)
 ```
 
 - `dump_module`：模块来自 `enum_modules()` 或 `None`（主模块）；先按 `LoadedView` 解析确认是 PE，

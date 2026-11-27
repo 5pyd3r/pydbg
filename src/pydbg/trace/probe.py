@@ -250,7 +250,9 @@ class FunctionProbe:
         reported once as "target exited during cleanup" — its debug registers
         are gone with it; a live target whose slot could not be cleared is
         reported as "breakpoint left", the same vocabulary `BblTracer.disarm()`
-        uses.
+        uses. A removal that returns without raising is asked for again, so a
+        record that survived is reported the same way instead of being taken
+        for a clean removal.
         """
         bp_id = self._bp_id
         h_thread = self._h_thread
@@ -263,10 +265,8 @@ class FunctionProbe:
             return ()
 
         try:
-            # This probe reports a failed removal but does not re-check a
-            # non-raising one; recheck_removed=False keeps that exact contract.
             return _shared.remove_breakpoints(
-                self.dbg, ((self.addr, bp_id),), recheck_removed=False)
+                self.dbg, ((self.addr, bp_id),))
         finally:
             self._close_thread(h_thread)
 
