@@ -82,6 +82,7 @@ class TestSymbolResolverCoverage(unittest.TestCase):
             self.assertIn("name", info)
 
 
+@unittest.skipUnless(_has_cython, "optional dependency: Cython extension")
 class TestSymbolResolverErrorWrapping(unittest.TestCase):
     """Mock-based: raw OSError from _pydbg must wrap into PydbgError."""
 

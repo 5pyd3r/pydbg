@@ -11,6 +11,13 @@ import unittest
 from pydbg.analysis import cfg as cfg_module, report
 from tests.pe_builder import PEBuilder
 
+try:
+    from pydbg import _pydbg  # noqa: F401
+
+    _has_cython = True
+except ImportError:
+    _has_cython = False
+
 TEXT_RVA = 0x1000
 IMAGE_BASE = 0x400000
 
@@ -162,6 +169,7 @@ class TestReports(unittest.TestCase):
         self.assertIn("branch->", text)
 
 
+@unittest.skipUnless(_has_cython, "optional dependency: Cython extension")
 class TestLiveProcessSource(unittest.TestCase):
     """Analyzing a module inside a real process, through LoadedView."""
 

@@ -1373,6 +1373,7 @@ class TestDisasmEngineIntegration(unittest.TestCase):
             engine.mode()
 
 
+@unittest.skipUnless(_has_cython, "optional dependency: Cython extension")
 class TestStepTracerIntegration(unittest.TestCase):
     """Integration tests for StepTracer."""
 
@@ -1559,6 +1560,7 @@ class TestPEParserEdgeCases(unittest.TestCase):
         self.assertIsNone(pe.rva_to_offset(0x99999))
 
 
+@unittest.skipUnless(_has_cython, "optional dependency: Cython extension")
 class TestDebugEventEdgeCases(unittest.TestCase):
     """Tests for DebugEvent edge cases."""
 
