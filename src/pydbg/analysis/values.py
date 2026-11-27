@@ -15,7 +15,8 @@ answers that carry no information are separate forms that cannot compare equal:
     SET             exactly these values; every writer was modelled
     RANGE           a contiguous interval; every writer was modelled
     UNBOUNDED       every writer was modelled, and they admit any value
-    UNMODELED       a reaching writer was NOT modelled (its RVA is named)
+    UNMODELED       a reaching writer, or a guard the analysis could not place
+                    on this path, was NOT modelled (its RVA is named)
     UNREPRESENTABLE every writer WAS modelled, and the union still has no
                     single representation here
 
@@ -127,7 +128,7 @@ class ValueSet:
     @classmethod
     def of_unmodeled(cls, entries, writers=()):
         if not entries:
-            raise ValueError("UNMODELED must name at least one writer")
+            raise ValueError("UNMODELED must name at least one site")
         return cls(kind=Bound.UNMODELED, writers=tuple(writers),
                    unmodeled=tuple(entries))
 
@@ -319,10 +320,15 @@ def value_set_of(result, address, **kwargs):
     if total.kind is Bound.NONE:
         return ValueSet(kind=Bound.NONE,
                         unresolved_writes=unresolved_write_count(result))
+    # Rebuilt rather than returned as-is because the scope below is image-wide
+    # rather than the sum each writer carried. `reason` has to survive the
+    # rebuild: dropping it left an UNBOUNDED answer that no constructor would
+    # have produced, and `ValueSet.unbounded` demands one precisely so that
+    # form cannot be reached without the evidence that makes it credible.
     return ValueSet(
         kind=total.kind, values=total.values, lo=total.lo, hi=total.hi,
         writers=total.writers, unmodeled=total.unmodeled, parts=total.parts,
-        unresolved_writes=unresolved_write_count(result))
+        unresolved_writes=unresolved_write_count(result), reason=total.reason)
 
 
 def unresolved_write_count(result):
@@ -404,19 +410,49 @@ def narrow_by_guards(result, address, base=None):
     # reporting *more* than the code can hold, which reads as a richer answer
     # rather than as a bug. The mirror direction is worse still: it would say a
     # value is impossible when it is not.
+    unresolved = base.unresolved_writes
     if base.kind is Bound.SET:
         kept = frozenset(v for v in base.values
                          if (lo is None or v >= lo) and (hi is None or v <= hi))
-        return ValueSet(kind=Bound.SET, values=kept, writers=writers)
+        if not kept:
+            return _undecided_intersection(base, writers, chain)
+        return ValueSet(kind=Bound.SET, values=kept, writers=writers,
+                        unresolved_writes=unresolved, reason=base.reason)
     if base.kind is Bound.RANGE:
         new_lo = base.lo if lo is None else max(base.lo, lo)
         new_hi = base.hi if hi is None else min(base.hi, hi)
         if new_hi < new_lo:
-            return ValueSet(kind=Bound.NONE,
-                            unresolved_writes=base.unresolved_writes)
+            return _undecided_intersection(base, writers, chain)
         return ValueSet(kind=Bound.RANGE, lo=new_lo, hi=new_hi,
-                        writers=writers)
+                        writers=writers, unresolved_writes=unresolved,
+                        reason=base.reason)
     return base
+
+
+def _undecided_intersection(base, writers, chain):
+    """The guard excludes every value the base established.
+
+    Two pieces of evidence contradict each other: the writer scan produced a
+    decided set, and the guard says none of those values can reach the
+    fallthrough. Neither can be dismissed from the bytes — the fallthrough may
+    simply be unreachable, or a writer the scan did not model may be the one
+    that reaches it — so the answer cannot be decided.
+
+    Returning `NONE` here (what an empty range intersection used to do) said
+    "no writer was seen", which is false, and `contains()` then answered False
+    for every value: a confident "impossible" where the evidence only supports
+    "not established". Returning the base untouched is the other wrong
+    direction, reporting values the guard forbids. `UNMODELED` names the
+    conflict and refuses `contains()`; the named site is the guard whose bound
+    exposed it, and the reason says what the contradiction admits.
+    """
+    return ValueSet(
+        kind=Bound.UNMODELED, writers=writers,
+        unmodeled=((chain[-1][0],
+                    "a guard excludes every value the writers establish: "
+                    "either this path is unreachable or a writer was not "
+                    "modelled"),),
+        unresolved_writes=base.unresolved_writes)
 
 
 def _single_guard_chain(guards):

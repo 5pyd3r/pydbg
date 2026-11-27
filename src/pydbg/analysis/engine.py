@@ -120,14 +120,15 @@ class StaticAnalyzer:
         self.stats.pruned_starts = self.functions.prune_starts_inside_functions()
         self.functions.invalidate()
         xrefs = self._freeze_xrefs()
-        self._finish_stats(xrefs)
+        coverage = self._coverage()
+        self._finish_stats(xrefs, coverage)
         return AnalysisResult(
             image=self.image,
             functions=self.functions,
             xrefs=xrefs,
             stats=self.stats,
             xref_gaps=self._xref_gaps(seeds),
-            coverage=self._coverage(),
+            coverage=coverage,
             undecodable=tuple(sorted(self.undecodable)),
             indirect_sites=tuple(self.indirect_sites[rva]
                                  for rva in sorted(self.indirect_sites)),
@@ -499,23 +500,35 @@ class StaticAnalyzer:
                 for target, refs in self.xrefs.items()}
 
     def _coverage(self):
+        """Per-section coverage, including every section the decoder claimed.
+
+        The report is the one place the per-section figures are computed, and
+        `_finish_stats` takes the global `overlap_bytes` from their sum. They
+        must therefore cover *every* claim, not only the executable sections:
+        `scan.linear_scan` marks bytes in whatever section it is given, and a
+        claim in, say, `.data` used to be counted globally while belonging to
+        no section — so adding the sections up came short of the total the
+        architecture docs promise. A section the decoder never touched still
+        carries no claim, so it is left out rather than reported as 0% of a
+        data section; the sum is unchanged because it contributes zero.
+        """
         report = {}
         for section in self.image.sections:
-            if not section.is_executable:
-                continue
-            # The tail of a section can be raw-only; bytes decoded there were
-            # previously left out of both the numerator and the denominator.
             span = section.span
             start = section.virtual_address
             end = start + span
+            covered = self.decoder.covered_in(start, end)
+            overlap = self.decoder.overlapped_in(start, end)
+            if not section.is_executable and not covered and not overlap:
+                continue
             report[section.name] = CoverageReport(
-                covered=self.decoder.covered_in(start, end),
+                covered=covered,
                 total=span,
-                overlap_bytes=self.decoder.overlapped_in(start, end),
+                overlap_bytes=overlap,
             )
         return report
 
-    def _finish_stats(self, xrefs):
+    def _finish_stats(self, xrefs, coverage):
         stats = self.stats
         stats.insns = self.decoder.instructions
         stats.func_starts = len(self.functions.starts)
@@ -527,7 +540,13 @@ class StaticAnalyzer:
         # reporting is how many DATA entries the index actually carries.
         stats.data_refs = sum(1 for refs in xrefs.values() for ref in refs
                               if ref.kind == RefKind.DATA)
-        stats.overlap_bytes = self.decoder.overlap_bytes
+        # Summed from the per-section figures rather than copied from the
+        # decoder's global counter, so the two cannot disagree. A claim that
+        # lands outside every section belongs to no section and is therefore
+        # not part of this figure: the report is a statement about the image's
+        # sections, and this is the total that can be checked against them.
+        stats.overlap_bytes = sum(report.overlap_bytes
+                                  for report in coverage.values())
         stats.overlap_conflicts = self.decoder.overlap_conflicts
         stats.indirect_unknown = len(self.indirect_sites)
 

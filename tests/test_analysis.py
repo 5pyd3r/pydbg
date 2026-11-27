@@ -206,6 +206,38 @@ class TestCoverageAccounting(unittest.TestCase):
         self.assertEqual(result.stats.overlap_bytes, 0)
         self.assertEqual(result.stats.overlap_conflicts, 0)
 
+    def test_an_overlap_outside_executable_code_still_adds_up(self):
+        """The per-section sum has to include every section that was claimed.
+
+        A claim is not restricted to code: `scan.linear_scan` with
+        `mark_covered=True` marks bytes in whatever section it is handed. The
+        coverage report walked executable sections only, so an overlap in
+        `.data` was in the global counter but in no per-section figure — the
+        sum the architecture docs promise came up short.
+        """
+        from pydbg.analysis import (
+            AnalyzedImage, StaticAnalyzer, linear_scan,
+        )
+
+        builder = PEBuilder(magic=0x10B, image_base=IMAGE_BASE,
+                            entry_rva=TEXT_RVA)
+        builder.add_section(".text", RET, TEXT_RVA)
+        builder.add_section(".data", NOP * 0x10, 0x2000, 0xC0000040)
+        analyzer = StaticAnalyzer(AnalyzedImage.from_bytes(builder.build()))
+        # Two scans of the same data bytes: the second claim is the overlap.
+        # Done before run() because that is when the result's counters, and
+        # the coverage report beside them, are frozen.
+        linear_scan(analyzer.decoder, 0x2000, 0x2004, mark_covered=True)
+        linear_scan(analyzer.decoder, 0x2000, 0x2004, mark_covered=True)
+        result = analyzer.run()
+
+        self.assertIn(".data", result.coverage)
+        self.assertEqual(result.coverage[".data"].overlap_bytes, 4)
+        self.assertEqual(
+            sum(section.overlap_bytes for section in result.coverage.values()),
+            result.stats.overlap_bytes)
+        self.assertEqual(result.stats.overlap_bytes, 4)
+
     def test_a_truncated_instruction_is_recorded_as_undecodable(self):
         """A seed that lands somewhere that will not decode is information.
 

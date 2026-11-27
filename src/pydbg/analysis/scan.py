@@ -175,7 +175,9 @@ def linear_scan(decoder, start, end, origin="linear-scan",
     Walks the range in instruction-sized steps, so every decoded instruction
     starts where the previous one ended and nothing overlaps. When an address
     will not decode, the whole unreadable run is consumed and reported, and the
-    scan resumes at the first byte that does decode.
+    scan resumes at the first byte that does decode. A final instruction that
+    starts inside the range and runs past its end is not decoded; the bytes it
+    starts on are reported as a gap, so the accounting stays closed.
 
     `limit` bounds the instruction count; hitting it sets `truncated` rather
     than silently returning a shorter scan. `mark_covered` claims the decoded
@@ -211,8 +213,19 @@ def linear_scan(decoder, start, end, origin="linear-scan",
 
         if rva + insn.size > end:
             # The instruction runs past the range. Decoding it anyway would
-            # report bytes this scan was not asked about as covered.
-            break
+            # report bytes this scan was not asked about as covered, but the
+            # bytes it *does* start on are still unaccounted for: leaving them
+            # out made `unaccounted_bytes()` non-zero (documented to be 0 for
+            # every scan) and let `instructions()` refuse with "0 undecodable
+            # run(s)" while bytes were missing. The tail is a gap like any
+            # other — it did not decode — and there is nothing left to resync
+            # to, so it is recorded without a `Resync`.
+            undecodable.append(Undecodable(
+                rva, end - rva,
+                f"{insn.size}-byte instruction runs past the end of the "
+                f"range"))
+            rva = end
+            continue
         decoded.append((rva, insn.size))
         covered_bytes += insn.size
         if mark_covered:
