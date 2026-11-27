@@ -34,7 +34,7 @@ src/pydbg/
 ├── symbol/resolver.py   dbghelp 封装（dbg.symbols）
 ├── pe/                  纯 Python PE 解析**与写出**（无第三方依赖）
 ├── pdb/                 纯 Python PDB 读取（MSF 校验 + ctypes dbghelp 离线）
-├── disasm/engine.py     capstone 封装；模式**按次**判定，不锁存
+├── disasm/engine.py     capstone 封装；模式**按次**判定，不锁存（patch/assembler.py 同此）
 ├── instrument/          插桩：硬编码 stub + LLVM 动态代码生成 + BBL detour
 ├── inject/              注入原语：DLL / shellcode / APC / 进程挂起恢复
 ├── hook/{iat,inline}.py IAT / inline hook（dbg.hook_iat / dbg.hook_inline）
