@@ -652,10 +652,15 @@ OepCandidate(rva, sources, evidence)     # sources ⊆ {"tls", "pdata-gap", "wat
 - LLVM 在本机不可用（唯一产物是 cp314 的 `_llvm_backend.pyd`，本机只有 Python 3.13、也没有 LLVM 工具链），
   所以 payload 用 **keystone 自研机器码 stub**。`keystone-engine` 是 `patch` extra；缺失时整族按
   `optional dependency: keystone-engine` 跳过。
-- `instrument/` 自 v0.2 冻结（#87）：本阶段新增 `src/pydbg/instrument/bbl.py`，**不修改**
-  `instrumenter.py` / `templates.py` / `llvm_backend`。旧 trampoline「原样复制被覆盖指令」的问题记进
-  `KNOWN_ISSUES`，本阶段不修。
-- x64 only；32 位与 WOW64 不做。
+- `instrument/` 的 v0.2 冻结（#87）已于 **2026-11-28 解除**（用户决定），解除的范围就是下面的
+  **32 位 BBL**；`instrumenter.py` / `templates.py` / `llvm_backend` 仍不在范围内。旧 trampoline
+  「原样复制被覆盖指令」的问题仍记在 `KNOWN_ISSUES`，本次不修。
+- **x64 与 x86/WOW64 都做**。32 位目标复用同一套「E9 detour + 目标侧 stub + 环形缓冲」，
+  差别只有三处，全部落在边界上：
+  1. 跳转编码：x64 用 `ff 25` + 8 字节绝对地址，x86 用 `ff 25` + 4 字节绝对地址；
+  2. stub prologue 的寄存器宽度（`eax/ecx/edx` 对 `rax/rcx/rdx`）；
+  3. 线程窗口判定读 **EIP**（`WOW64_CONTEXT`）而不是 RIP。
+  x86 没有 RIP-relative 寻址，`relocate_prefix` 在这一侧反而更简单。
 - 事件沿用 trace v1 的 36 字节记录与 `TraceEvent`；`tid` 与 `ts` 在 stub 内不可得，都记 0，文档写明。
 
 ### 12.2 API
@@ -719,11 +724,15 @@ InstalledPatch(address, patch, original)         # 装过什么；install_patch 
    <5 字节的块分别 `UnsupportedInstruction` / 拒绝。
 4. `uninstall` 手工改一个字节 → 警告 `"bytes changed under us"`，且不静默覆盖。
 5. keystone 缺失 → 全族 `optional dependency: keystone-engine` 跳过；`pyproject.toml` 不变。
+6. 32 位（2026-11-28 扩入）：在 `loop_target32`（`scripts/build-target32.ps1` 产出）上重复第 1 条——
+   `plan() > 0`、`install()`、事件块集合与 `BblTracer` 对账、`uninstall()` 后字节逐字节恢复。
+   `plan()` 不得因为目标架构拒绝全部块；x86 侧的 `relocatable` 判据不含 RIP-relative。
 
 ### 12.6 不做
 
-函数级 detour / 返回值回传、rel8/rel32 重写、32 位与 WOW64、跨线程聚合、与旧 `instrument/` 路径互通、
+函数级 detour / 返回值回传、rel8/rel32 重写、跨线程聚合、与旧 `instrument/` 路径互通、
 每次命中回到调试器、超出 `max_blocks` 的全模块插桩。
+（32 位与 WOW64 自 2026-11-28 起纳入范围，见 §12.1。）
 
 ## 13. Phase 6：D2/D9/D10 补齐与 X3/X4 收口
 
@@ -780,6 +789,17 @@ DebuggerCheck(name, detected, evidence)
 `NtQueryInformationProcess` 读的是内核状态，任何被调试进程（含不查反调试的 `simple_target`）都为真；
 只有入口点前的 `0xCC` 扫描看目标自身影像。
 
+**WOW64 目标（2026-11-28 扩入范围）**：注入原语不再一律拒绝 32 位目标。
+
+- 远程基址必须落在 4 GiB 以下（32 位代码只寻址 32 位）；`VirtualAllocEx` 返回的不是的话以
+  `InjectionError` 拒绝——不静默重试，也不"取低 32 位"。
+- `LoadLibraryW` 必须用**目标内 32 位 kernel32** 的地址：先由 32 位模块表定位 `kernel32.dll`
+  （`enum_modules(arch=32)`，见 §13.2 的模块表能力），再从目标的导出表解析。
+  禁止在 64 位宿主里解析"目标要执行的函数地址"。
+- `queue_apc` 的 APC 函数地址同样必须是 32 位地址；`suspend_process` / `resume_process` 不需要改。
+- 拒绝同样要有名字：目标架构未知、或 32 位模块表尚未出现（loader 断点边界）时抛 `InjectionError`，
+  不返回"成功"。
+
 ### 13.3 D10：原始 CONTEXT 与 x86 栈回溯
 
 现状：`stack_walk_frame` 已收 machine；缺的是拿到**原始 `CONTEXT` 字节**（现在 `get_thread_context` 返回 dict），
@@ -826,6 +846,10 @@ tracer 一旦离开模块就停，窗口只填 7 条（`left_module`），填不
 `scripts/build-target32.ps1`。产物不入库。
 x86 栈回溯**不新增目标**，复用现有 32 位目标 `threaded_target32`（真实调用链，探针停在 `main_add`）。
 
+32 位 BBL 的循环目标（`loop_target32`）与 32 位被注入宿主（`inject_host32`）也由
+`scripts/build-target32.ps1` 产出；它们的路径只在 `tests/meson.build` 的 `target32_dir` 定义一次，
+测试缺文件时按 `target not built:` 跳过并点出该脚本。
+
 ### 13.8 验收
 
 1. D2：默认策略下现有测试零改动；`continue_event(status=DBG_EXCEPTION_NOT_HANDLED)` 让目标自己的 SEH 收到异常
@@ -840,7 +864,10 @@ x86 栈回溯**不新增目标**，复用现有 32 位目标 `threaded_target32`
 4. X3：枚举测试通过；`BblTracer`/`MemoryWatch` 在 `close()` 后自行 disarm（目标仍活时字节恢复）。
 5. X4：三条预算测试存在、打印实测、在 CI 上不抖。
 6. PDB：32 位目标 `find` + `symbols` + `structs` + `line_for` 全绿；行号在 x64 目标上返回 `file/line`。
-7. 整体：新测试全绿、`flake8 --max-line-length=120` 干净、`pyproject.toml` 不变、现有测试全绿。
+7. WOW64 注入（2026-11-28 扩入）：在 `inject_host32` 上 `inject_dll` 一个 32 位 DLL 并拿到导出地址；
+   `inject_shellcode` 写入 `ret` 级 stub 不崩目标；`queue_apc` 在 alertable 的 32 位线程上执行；
+   对 64 位目标请求 32 位注入、以及 32 位模块表尚未出现时，均抛 `InjectionError` 而不是返回成功。
+8. 整体：新测试全绿、`flake8 --max-line-length=120` 干净、`pyproject.toml` 不变、现有测试全绿。
 
 ### 13.9 不做
 
