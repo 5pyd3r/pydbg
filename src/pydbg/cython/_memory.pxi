@@ -8,7 +8,8 @@ from _win32types cimport (
     MEMORY_BASIC_INFORMATION, MODULEINFO,
     ReadProcessMemory, WriteProcessMemory,
     VirtualQueryEx, VirtualProtectEx, VirtualAllocEx, VirtualFreeEx,
-    EnumProcessModulesEx, LIST_MODULES_ALL, GetModuleFileNameExA,
+    EnumProcessModulesEx, LIST_MODULES_32BIT, LIST_MODULES_64BIT,
+    LIST_MODULES_ALL, GetModuleFileNameExA,
     GetModuleInformation, GetLastError, CloseHandle,
     MEM_COMMIT, MEM_RESERVE, MEM_FREE, MEM_RELEASE, MEM_PRIVATE,
     MEM_MAPPED, MEM_IMAGE,
@@ -193,15 +194,15 @@ cpdef int virtual_protect_ex(uintptr_t h_process, uintptr_t addr,
     return old_protect
 
 
-cpdef list enum_process_modules(uintptr_t h_process):
-    """Enumerate loaded modules in a process.
+cdef list _enum_process_modules(uintptr_t h_process, DWORD filter_flag):
+    """Enumerate one module table of a process.
 
-    Returns list of dicts with: handle, base_address.
-    Raises OSError on failure.
-
-    The buffer grows until EnumProcessModulesEx reports that everything fit.
-    A fixed 1024-entry array used to return whatever portion fit, and a
-    truncated module list is indistinguishable from a complete one.
+    'filter_flag' is the psapi.h table selector: LIST_MODULES_ALL for
+    everything Windows reports, or LIST_MODULES_32BIT / LIST_MODULES_64BIT
+    for exactly one table. The buffer grows until EnumProcessModulesEx
+    reports that everything fit. A fixed 1024-entry array used to return
+    whatever portion fit, and a truncated module list is indistinguishable
+    from a complete one.
     """
     cdef DWORD cb_needed = 0
     cdef DWORD capacity = 256
@@ -221,7 +222,7 @@ cpdef list enum_process_modules(uintptr_t h_process):
             <HMODULE*>buffer,
             capacity * sizeof(HMODULE),
             &cb_needed,
-            LIST_MODULES_ALL)
+            filter_flag)
         if result == 0:
             free(buffer)
             raise OSError(GetLastError(), "EnumProcessModulesEx failed")
@@ -244,6 +245,36 @@ cpdef list enum_process_modules(uintptr_t h_process):
         })
     free(buffer)
     return out
+
+
+cpdef list enum_process_modules(uintptr_t h_process):
+    """Enumerate loaded modules in a process.
+
+    Returns list of dicts with: handle, base_address.
+    Raises OSError on failure.
+
+    This is the historical LIST_MODULES_ALL view. On a WOW64 target it holds
+    both tables; enum_process_modules_ex() selects one of them.
+    """
+    return _enum_process_modules(h_process, LIST_MODULES_ALL)
+
+
+cpdef list enum_process_modules_ex(uintptr_t h_process, DWORD filter_flag):
+    """Enumerate one architecture's module table in a process.
+
+    'filter_flag' is LIST_MODULES_32BIT or LIST_MODULES_64BIT (the Python
+    copies live in pydbg.constants). Windows rejects a table the process
+    cannot have, so the caller must check the target's architecture before
+    asking — ModuleResolver does.
+
+    A WOW64 process has no 32-bit table before the loader has mapped its
+    32-bit image; until then EnumProcessModulesEx raises ERROR_PARTIAL_COPY
+    and this function raises OSError carrying that code.
+
+    Returns list of dicts with: handle, base_address.
+    Raises OSError on failure.
+    """
+    return _enum_process_modules(h_process, filter_flag)
 
 
 cpdef str get_module_file_name_ex(uintptr_t h_process, uintptr_t h_module):

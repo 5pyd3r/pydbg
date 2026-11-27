@@ -23,3 +23,12 @@ STATUS_WX86_SINGLE_STEP = 0x4000001E
 # it inside the target (its SEH, then the unhandled-exception filter).
 DBG_CONTINUE = 0x00010002
 DBG_EXCEPTION_NOT_HANDLED = 0x80010001
+
+# Module-table filters for EnumProcessModulesEx (psapi.h). LIST_MODULES_ALL is
+# the value the unfiltered enumeration has always passed; the 32/64 flags read
+# one table, which is how a WOW64 process's 32-bit modules are selected from an
+# x64 debugger. Kept here, not read back from the extension, so a caller that
+# only needs the number does not need the compiled module.
+LIST_MODULES_32BIT = 0x01
+LIST_MODULES_64BIT = 0x02
+LIST_MODULES_ALL = 0x03

@@ -972,7 +972,7 @@ class Debugger:
 
     # ── delegated: modules ─────────────────────────────────────
 
-    def enum_modules(self, pid=None):
+    def enum_modules(self, pid=None, arch=None):
         """List loaded modules. Falls back to event-observed images.
 
         EnumProcessModulesEx fails with ERROR_PARTIAL_COPY while the target
@@ -980,9 +980,15 @@ class Debugger:
         image until the loader has mapped it. Rather than fail exactly when
         module information is first wanted, this falls back to the bases
         reported by CREATE_PROCESS / LOAD_DLL ('source': 'events' marks those).
+
+        'arch' (32/'x86' or 64/'x64') asks for one module table only, for
+        example the 32-bit table of a WOW64 target. None keeps the historical
+        answer. A table the target cannot have raises PydbgError, and the
+        filtered view has no event fallback — see ModuleResolver.enumerate.
         """
         h = self._get_read_handle(pid)
-        return self.modules.enumerate_handle(h, allow_event_fallback=True, pid=pid)
+        return self.modules.enumerate_handle(
+            h, allow_event_fallback=True, pid=pid, arch=arch)
 
     def module_at(self, addr, pid=None):
         """Module containing 'addr', or None. See ModuleResolver.module_at."""

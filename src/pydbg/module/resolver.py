@@ -1,9 +1,29 @@
-"""ModuleResolver — enumerate modules and resolve filenames."""
+"""ModuleResolver — enumerate modules and resolve filenames.
+
+On a WOW64 target the debugger runs in the 64-bit host while the target's own
+images are 32-bit. The unfiltered enumeration reports both tables; a caller
+that needs the 32-bit table by itself asks for it with `enumerate(arch=32)`.
+
+That view has a boundary the caller has to plan around: Windows only reports
+the 32-bit module table once the WOW64 target has actually mapped its image.
+The first loader breakpoint — the 64-bit bootstrap, before the 32-bit image
+exists — is too early, exactly the window `_read_pe_info` below warns about,
+and there the filtered call still fails with ERROR_PARTIAL_COPY. So
+`enumerate(arch=32)` raises MemError instead of returning a short list; the
+answer appears once the loader events have mapped the image, at or before the
+WX86 loader breakpoint.
+
+The view is selected by the TARGET's architecture (`session.pid_arch`, through
+`arch_for_pid`), never by the host's: on this x64 host a 32-bit target's
+32-bit view works, and asking that same target for a 64-bit view raises
+PydbgError rather than returning an empty list.
+"""
 
 import struct
 
 from .. import _pydbg
-from ..exceptions import MemError
+from ..constants import LIST_MODULES_32BIT, LIST_MODULES_64BIT
+from ..exceptions import MemError, PydbgError
 
 # PE IMAGE_FILE_HEADER.Machine -> architecture label.
 _MACHINE_TO_ARCH = {0x14C: "x86", 0x8664: "x64"}
@@ -12,6 +32,31 @@ _MACHINE_TO_ARCH = {0x14C: "x86", 0x8664: "x64"}
 _NT_FILE_HEADER = 4 + 20          # Signature + IMAGE_FILE_HEADER
 _SIZE_OF_IMAGE_OFFSET = 56        # same for PE32 and PE32+
 _OPTIONAL_HEADER_SIZE = {0x10B: 96, 0x20B: 112}
+
+# EnumProcessModulesEx filter for each module table a caller may request.
+_MODULE_VIEW_FLAGS = {32: LIST_MODULES_32BIT, 64: LIST_MODULES_64BIT}
+
+# Accepted spellings of the requested table's architecture. Module dicts label
+# their own arch 'x86'/'x64', so those labels are accepted alongside 32/64.
+_MODULE_VIEW_ALIASES = {32: 32, "32": 32, "x86": 32,
+                        64: 64, "64": 64, "x64": 64}
+
+
+def _module_view_arch(arch):
+    """Normalise a requested module-table architecture; None keeps every table.
+
+    A bad spelling is a PydbgError, not a ValueError: every public entry point
+    in this package funnels its failures through the PydbgError hierarchy, and
+    a caller catching PydbgError would otherwise miss this one.
+    """
+    if arch is None:
+        return None
+    try:
+        return _MODULE_VIEW_ALIASES[arch]
+    except (KeyError, TypeError):
+        raise PydbgError(
+            "module view architecture must be None, 32 or 64 "
+            f"(or 'x86'/'x64'), not {arch!r}") from None
 
 
 class ModuleResolver:
@@ -101,7 +146,7 @@ class ModuleResolver:
                 m["name"] = name
         return modules
 
-    def enumerate(self):
+    def enumerate(self, arch=None):
         """Return list of loaded modules with handle, base_address, name, arch.
 
         Each dict: {'handle': int, 'base_address': int, 'name': str,
@@ -109,11 +154,20 @@ class ModuleResolver:
         'name' is the full filesystem path to the module file. 'arch' is
         derived from the module's PE header machine field, so WOW64 targets
         yield both 32-bit modules ('x86') and 64-bit modules ('x64').
+
+        'arch' reads one module table instead of both: 32/'x86' for the
+        32-bit table, 64/'x64' for the 64-bit one, None for the historical
+        LIST_MODULES_ALL answer. A table the target cannot have raises
+        PydbgError rather than returning an empty list — a native 64-bit
+        target has no 32-bit modules, and a 32-bit (WOW64) target has no
+        64-bit table. See the module docstring for when the 32-bit table
+        becomes visible.
         """
         return self.enumerate_handle(
-            self._s.process_handle, allow_event_fallback=True)
+            self._s.process_handle, allow_event_fallback=True, arch=arch)
 
-    def enumerate_handle(self, h_process, allow_event_fallback=False, pid=None):
+    def enumerate_handle(self, h_process, allow_event_fallback=False, pid=None,
+                         arch=None):
         """Same as enumerate() but with explicit process handle.
 
         With allow_event_fallback, a failing EnumProcessModulesEx falls back to
@@ -121,7 +175,10 @@ class ModuleResolver:
         modules missing from the PSAPI result are merged in ('source' marks
         which those are). Both matter around the loader breakpoint: PSAPI
         raises ERROR_PARTIAL_COPY there, and on WOW64 it cannot see the 32-bit
-        image until the loader has mapped it.
+        image until the loader has mapped it. The fallback belongs to the
+        unfiltered view only: an arch-filtered answer must not contain a
+        module whose architecture has not been proven yet, so those calls are
+        PSAPI-only and raise MemError until the table exists.
 
         'pid' names the process h_process belongs to, and is only used to pick
         which event table the fallback merges from; it defaults to the session's
@@ -129,7 +186,28 @@ class ModuleResolver:
         event table is per pid, so without it a read of some *other* process
         would merge the target's modules into that process's answer — a
         plausible-looking list of the wrong DLLs at the wrong addresses.
+
+        'arch' is as in enumerate(). It is checked against the session's record
+        for 'pid' before any Win32 call, so the table is selected by the
+        target's architecture and a mismatch costs nothing.
         """
+        view_arch = _module_view_arch(arch)
+        if view_arch is not None:
+            target_pid = self._s.pid if pid is None else pid
+            target_arch = self._s.arch_for_pid(target_pid)
+            if target_arch != view_arch:
+                raise PydbgError(
+                    f"{view_arch}-bit module view requested for a "
+                    f"{target_arch}-bit target (pid {target_pid}): a process "
+                    "has a module table only for its own architecture")
+            try:
+                modules = _pydbg.enum_process_modules_ex(
+                    h_process, _MODULE_VIEW_FLAGS[view_arch])
+            except OSError as e:
+                raise MemError(
+                    f"EnumProcessModulesEx({view_arch}-bit): {e}") from e
+            return self._decorate(h_process, modules)
+
         try:
             modules = _pydbg.enum_process_modules(h_process)
         except OSError as e:
