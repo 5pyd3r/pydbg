@@ -466,19 +466,22 @@ cpdef list enumerate_processes():
     cdef wchar_t* pname
 
     cdef BOOL ok = Process32FirstW(snap, &pe)
-    while ok:
-        # Take the address of the inline array: the field itself is a C array,
-        # not a pointer, and an empty name is a legitimate entry rather than an
-        # error (a process can exit mid-snapshot and leave its name blank).
-        pname = &pe.szExeFile[0]
-        name = PyUnicode_FromWideChar(pname, -1) if pname[0] != 0 else ""
-        procs.append({
-            'pid': pe.th32ProcessID,
-            'parent_pid': pe.th32ParentProcessID,
-            'exe_name': name,
-            'thread_count': pe.cntThreads,
-        })
-        ok = Process32NextW(snap, &pe)
-
-    CloseHandle(snap)
+    # Building the dicts can raise (PyUnicode_FromWideChar, list append); the
+    # snapshot must be closed on that path too, not only on success.
+    try:
+        while ok:
+            # Take the address of the inline array: the field itself is a C array,
+            # not a pointer, and an empty name is a legitimate entry rather than an
+            # error (a process can exit mid-snapshot and leave its name blank).
+            pname = &pe.szExeFile[0]
+            name = PyUnicode_FromWideChar(pname, -1) if pname[0] != 0 else ""
+            procs.append({
+                'pid': pe.th32ProcessID,
+                'parent_pid': pe.th32ParentProcessID,
+                'exe_name': name,
+                'thread_count': pe.cntThreads,
+            })
+            ok = Process32NextW(snap, &pe)
+    finally:
+        CloseHandle(snap)
     return procs

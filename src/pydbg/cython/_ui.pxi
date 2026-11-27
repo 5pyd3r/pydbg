@@ -62,10 +62,15 @@ cdef class _WindowWalk:
 
 cdef list _collect_children(HWND parent):
     cdef _WindowWalk walk = _WindowWalk(pid=0)
-    EnumChildWindows(parent, _collect_window,
-                     <LPARAM><uintptr_t><PyObject*>walk)
+    cdef BOOL ok = EnumChildWindows(parent, _collect_window,
+                                    <LPARAM><uintptr_t><PyObject*>walk)
     if walk.error is not None:
         raise walk.error
+    # A failed walk must not read as "this window has no children".
+    if ok == 0:
+        walk.win32_error = GetLastError()
+        if walk.win32_error != 0:
+            raise OSError(walk.win32_error, "EnumChildWindows failed")
     return walk.windows
 
 

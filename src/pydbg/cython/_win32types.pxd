@@ -358,14 +358,14 @@ cdef extern from "dbghelp.h":
     DWORD SymGetOptions()
 
     # Minidump stream types
-    DWORD MiniDumpReadDumpStream
-
+    #
+    # MINIDUMP_LOCATION_DESCRIPTOR is two 32-bit fields, so an entry is 12
+    # bytes; the *_high fields that used to be here do not exist in the real
+    # layout and inflated the struct to 28.
     ctypedef struct MINIDUMP_DIRECTORY:
-        unsigned long StreamType
-        unsigned long Location_DataSize
-        unsigned long Location_Rva
-        unsigned long long Location_DataSize_high
-        unsigned long long Location_Rva_high
+        uint32_t StreamType
+        uint32_t DataSize
+        uint32_t Rva
 
     BOOL MiniDumpReadDumpStream(void* BaseOfDump, unsigned long StreamNumber,
                                 MINIDUMP_DIRECTORY** Dir, void** StreamPointer,

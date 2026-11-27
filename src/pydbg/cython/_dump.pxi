@@ -8,11 +8,18 @@ from _win32types cimport (
     SYMBOL_INFOW, MAX_SYM_NAME,
     MiniDumpReadDumpStream, StackWalk64, SymFunctionTableAccess64,
     GetLastError,
+    pydbg_ctx_arch_sizeof,
 )
 
 # ADDRESS_MODE.AddrModeFlat. It is 3 (1616/1632/Real/Flat), not 0 — seeding 0
 # asks dbghelp for a 16:16 far frame and StackWalk64 answers FALSE.
 cdef int _ADDR_MODE_FLAT = 3
+
+# IMAGE_FILE_MACHINE, which is what StackWalk64 wants as MachineType. It is not
+# the 32/64 flag the CONTEXT helpers take, so the two are mapped explicitly
+# below instead of being compared against 32.
+cdef unsigned long _MACHINE_X86 = 0x14C
+cdef unsigned long _MACHINE_X64 = 0x8664
 
 
 cpdef bytes mini_dump_read_dump_stream(
@@ -58,6 +65,9 @@ cpdef dict stack_walk_frame(unsigned long machine_type,
     context_bytes: raw CONTEXT bytes from GetThreadContext. The buffer is
     copied, so the caller's bytes are not modified.
     frame_state: None for the first frame; the previous call's frame_state.
+
+    Raises ValueError when context_bytes is shorter than the CONTEXT for
+    machine_type.
     """
     cdef STACKFRAME64 sf
     memset(&sf, 0, sizeof(sf))
@@ -72,8 +82,26 @@ cpdef dict stack_walk_frame(unsigned long machine_type,
         sf.AddrFrame.Offset = initial_frame_fp
         sf.AddrFrame.Mode = _ADDR_MODE_FLAT
 
+    # StackWalk64 interprets this pointer as the live CONTEXT (or
+    # WOW64_CONTEXT for a 32-bit target) and writes back into it, so a buffer
+    # shorter than the architecture's struct is an overflow waiting to happen.
     cdef bytes ctx = bytes(context_bytes)
     cdef Py_ssize_t ctx_len = len(ctx)
+    # machine_type is IMAGE_FILE_MACHINE (0x14C / 0x8664), not the 32/64 flag
+    # pydbg_ctx_arch_sizeof takes: handing it 0x14C as-is would ask for the x64
+    # size and reject every real 716-byte WOW64_CONTEXT.
+    cdef int ctx_arch
+    if machine_type == _MACHINE_X86:
+        ctx_arch = 32
+    elif machine_type == _MACHINE_X64:
+        ctx_arch = 64
+    else:
+        raise ValueError("unknown machine type 0x%X" % machine_type)
+    cdef int need = pydbg_ctx_arch_sizeof(ctx_arch)
+    if ctx_len < need:
+        raise ValueError(
+            "CONTEXT for machine 0x%X is %d bytes, got %d"
+            % (machine_type, need, ctx_len))
     cdef void* ctx_copy = malloc(ctx_len)
     if ctx_copy == NULL:
         raise MemoryError("Failed to allocate CONTEXT copy")
