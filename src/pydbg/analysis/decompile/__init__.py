@@ -17,7 +17,7 @@ can be read and tested on its own:
 
 One thing happens between S0 and S1 that is worth naming. The CFG cannot follow
 an indirect edge, so a switch's case blocks are absent from it even though the
-analysis decoded them; `structure.jump_table_targets` reads the `SlotTable` the
+analysis decoded them; `switch.jump_table_targets` reads the `SlotTable` the
 analysis already produced and S0 grows blocks for those targets. That is not a
 guess: the table is the image's own statement of where the cases begin, and the
 structurer only emits a `switch` when every entry lands on one of those blocks.
@@ -33,7 +33,9 @@ from dataclasses import dataclass
 
 from ..cfg import RET, build_function_cfg
 from . import expr, render, structure
+from .blocks import normalize_blocks
 from .ir import Opaque, lower_block
+from .switch import jump_table_targets
 
 
 @dataclass(frozen=True, slots=True)
@@ -93,7 +95,7 @@ def _with_jump_table_targets(blocks, slot_tables, result, max_blocks,
     merged = dict(blocks)
     extra_starts = []
     successors = {rva: block.successors for rva, block in merged.items()}
-    targets = structure.jump_table_targets(
+    targets = jump_table_targets(
         merged, successors, slot_tables, result.decoder, result.image)
     for target in targets:
         if target in merged:
@@ -132,7 +134,7 @@ def decompile_function(result, rva, max_blocks=4096):
     function_end = rva + extent if extent else None
     blocks, extra_blocks = _with_jump_table_targets(
         cfg.blocks, slot_tables, result, max_blocks, end=function_end)
-    blocks = structure.normalize_blocks(blocks)
+    blocks = normalize_blocks(blocks)
     successors = {block_rva: block.successors
                   for block_rva, block in blocks.items()}
 

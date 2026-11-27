@@ -10,7 +10,7 @@ C-style, with two conventions worth stating rather than discovering:
   `L_<hex>`, `0x...`). Mixing the two would make `[rcx + 0x8]` and `L_1008`
   look like the same kind of number.
 
-The tree comes from `structure`; this module only prints it. Two rendering
+The tree comes from `ast`; this module only prints it. Two rendering
 forms coexist on purpose. A structured node (`if`/`while`/`do`/`switch`) prints
 its branches itself. A `Flat` node is the P5 form -- statements followed by the
 CFG's edges -- and is what a shape the structurer does not recognise falls back
@@ -20,7 +20,9 @@ continue here".
 """
 
 from ..cfg import FALL, INDIRECT, JCC, JMP, RET
-from . import structure
+from .ast import (
+    Break, Continue, DoWhile, Flat, If, Seq, Statements, Switch, While,
+)
 from .ir import (
     Addr, Assign, BinExpr, BinOp, Branch, Call, Cmp, Const, Load, Mem, Nop,
     Opaque, Reg, Ret, Store, UnExpr, UnOp,
@@ -296,22 +298,22 @@ def _edge_rva(terminator, block):
 
 def _iter_nodes(node):
     """Every node in the tree below 'node', depth-first."""
-    if isinstance(node, structure.Seq):
+    if isinstance(node, Seq):
         for item in node.items:
             yield from _iter_nodes(item)
         return
     yield node
-    if isinstance(node, structure.If):
+    if isinstance(node, If):
         yield from _iter_nodes(node.header)
         yield from _iter_nodes(node.then)
         if node.orelse is not None:
             yield from _iter_nodes(node.orelse)
-    elif isinstance(node, structure.While):
+    elif isinstance(node, While):
         yield from _iter_nodes(node.header)
         yield from _iter_nodes(node.body)
-    elif isinstance(node, structure.DoWhile):
+    elif isinstance(node, DoWhile):
         yield from _iter_nodes(node.body)
-    elif isinstance(node, structure.Switch):
+    elif isinstance(node, Switch):
         yield from _iter_nodes(node.header)
         for _, body in node.cases:
             yield from _iter_nodes(body)
@@ -327,8 +329,8 @@ def _referenced_targets(nodes, successors):
     from edges; structured constructs consume theirs.
     """
     targets = set()
-    for node in _iter_nodes(structure.Seq(tuple(nodes))):
-        if isinstance(node, structure.Flat):
+    for node in _iter_nodes(Seq(tuple(nodes))):
+        if isinstance(node, Flat):
             for kind, target in successors.get(node.block.rva, ()):
                 if target is None or kind in (RET, INDIRECT):
                     continue
@@ -352,27 +354,27 @@ def _render_block(node, lines, depth, entry, successors, referenced):
         for line in _statement_lines(stmt, indent):
             body = line.strip().replace("  // @", "  @", 1)
             lines.append(f"{indent}// dead: {body}")
-    if isinstance(node, structure.Flat):
+    if isinstance(node, Flat):
         lines.extend(_edge_lines(block, successors.get(block.rva, ()),
                                  node.next_rva, entry, indent))
 
 
 def _render_node(node, lines, depth, entry, successors, referenced):
     indent = _indent(depth)
-    if isinstance(node, structure.Seq):
+    if isinstance(node, Seq):
         for item in node.items:
             _render_node(item, lines, depth, entry, successors, referenced)
         return
-    if isinstance(node, (structure.Statements, structure.Flat)):
+    if isinstance(node, (Statements, Flat)):
         _render_block(node, lines, depth, entry, successors, referenced)
         return
-    if isinstance(node, structure.Break):
+    if isinstance(node, Break):
         lines.append(f"{indent}break;  {_at(node.rva)}")
         return
-    if isinstance(node, structure.Continue):
+    if isinstance(node, Continue):
         lines.append(f"{indent}continue;  {_at(node.rva)}")
         return
-    if isinstance(node, structure.If):
+    if isinstance(node, If):
         _render_block(node.header, lines, depth, entry, successors, referenced)
         lines.append(_annotate(
             f"{indent}if ({render_expr(node.condition)}) {{", node.rvas))
@@ -384,7 +386,7 @@ def _render_node(node, lines, depth, entry, successors, referenced):
                          referenced)
         lines.append(f"{indent}}}")
         return
-    if isinstance(node, structure.While):
+    if isinstance(node, While):
         _render_block(node.header, lines, depth, entry, successors, referenced)
         lines.append(_annotate(
             f"{indent}while ({render_expr(node.condition)}) {{", node.rvas))
@@ -392,14 +394,14 @@ def _render_node(node, lines, depth, entry, successors, referenced):
                      referenced)
         lines.append(f"{indent}}}")
         return
-    if isinstance(node, structure.DoWhile):
+    if isinstance(node, DoWhile):
         lines.append(f"{indent}do {{")
         _render_node(node.body, lines, depth + 1, entry, successors,
                      referenced)
         lines.append(_annotate(
             f"{indent}}} while ({render_expr(node.condition)});", node.rvas))
         return
-    if isinstance(node, structure.Switch):
+    if isinstance(node, Switch):
         _render_block(node.header, lines, depth, entry, successors, referenced)
         lines.append(_annotate(
             f"{indent}switch ({render_expr(node.index)}) {{", node.rvas))
@@ -419,7 +421,7 @@ def _render_node(node, lines, depth, entry, successors, referenced):
 def render_function(entry, structured, successors, truncated=False):
     """Render a structured function as labelled pseudo-C.
 
-    'structured' is a `structure.Structured`; 'successors' is the CFG's
+    'structured' is an `ast.Structured`; 'successors' is the CFG's
     successor map, needed only by the flat fallback. Nothing iterates a set
     into the text: the nodes are ordered by construction and the lookup tables
     are read by key, so two calls with the same input produce the same bytes.

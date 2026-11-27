@@ -270,7 +270,7 @@ class TestOutOfImageOpaque(unittest.TestCase):
         image base exactly when a reader cannot tell which space it is.
         """
         from types import SimpleNamespace
-        from pydbg.analysis.decompile import ir, render, structure
+        from pydbg.analysis.decompile import ast, ir, render
 
         result = analyze(RET)
         offset = 0x100000            # well past the synthetic image's span
@@ -286,8 +286,8 @@ class TestOutOfImageOpaque(unittest.TestCase):
         block = ir.IRBlock(rva=offset, stmts=(stmt,))
         text = render.render_function(
             offset,
-            structure.Structured(nodes=(structure.Statements(block),),
-                                 warnings=()),
+            ast.Structured(nodes=(ast.Statements(block),),
+                           warnings=()),
             {})
         self.assertIn(f"@0x{offset:x}", text)
         self.assertNotIn(f"@0x{insn.address:x}", text)
@@ -382,14 +382,14 @@ class TestRenderedGaps(unittest.TestCase):
     """A form the renderer lacks is stated in the text, never silently lost."""
 
     def test_an_unknown_expression_is_marked_instead_of_a_question_mark(self):
-        from pydbg.analysis.decompile import ir, render, structure
+        from pydbg.analysis.decompile import ast, ir, render
 
         block = ir.IRBlock(rva=TEXT_RVA, stmts=(
             ir.Assign(rva=TEXT_RVA, dst="eax", src=object()),))
         text = render.render_function(
             TEXT_RVA,
-            structure.Structured(nodes=(structure.Statements(block),),
-                                 warnings=()),
+            ast.Structured(nodes=(ast.Statements(block),),
+                           warnings=()),
             {})
 
         self.assertIn("unhandled: expression", text)
@@ -397,7 +397,7 @@ class TestRenderedGaps(unittest.TestCase):
 
     def test_an_unrendered_statement_is_printed_with_its_address(self):
         """Returning no line would delete the instruction from the output."""
-        from pydbg.analysis.decompile import ir, render, structure
+        from pydbg.analysis.decompile import ast, ir, render
 
         class Mystery(ir.Stmt):
             def __init__(self, rva):
@@ -406,8 +406,8 @@ class TestRenderedGaps(unittest.TestCase):
         block = ir.IRBlock(rva=TEXT_RVA, stmts=(Mystery(TEXT_RVA),))
         text = render.render_function(
             TEXT_RVA,
-            structure.Structured(nodes=(structure.Statements(block),),
-                                 warnings=()),
+            ast.Structured(nodes=(ast.Statements(block),),
+                           warnings=()),
             {})
 
         self.assertIn("// unhandled: statement Mystery", text)

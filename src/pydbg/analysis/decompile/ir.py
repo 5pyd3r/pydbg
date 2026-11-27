@@ -322,7 +322,7 @@ _PF = _flag("pf")
 # assembler used, and a table that only knew `je` would turn `jz` into an
 # unhandled instruction.
 #
-# The third field is the operator `structure.fold_compare` uses, and it lives
+# The third field is the operator `conditions.fold_compare` uses, and it lives
 # here rather than being re-derived from the flag expression: two tables would
 # drift, and the drift would silently stop folding instead of failing. Only
 # relations with an exact C spelling are listed -- unsigned ones (`jb`/`ja`)
