@@ -1,5 +1,6 @@
 """Tests for DebugEvent, Debugger API completeness, exception helpers, and new features."""
 
+import os
 import unittest
 
 from tests import TEST_AV_TARGET_PATH, TEST_TARGET_PATH, IP_REG
@@ -584,6 +585,10 @@ class TestAccessViolationPayload(unittest.TestCase):
     from a target that dereferences NULL.
     """
 
+    @unittest.skipUnless(
+        os.path.isfile(TEST_AV_TARGET_PATH),
+        f"target not built: {TEST_AV_TARGET_PATH} "
+        "(meson compile -C build av_target)")
     def test_real_access_violation_keeps_its_parameters(self):
         from pydbg import Debugger
 
