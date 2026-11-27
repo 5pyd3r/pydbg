@@ -555,6 +555,31 @@ class TestCodeViewPayload(unittest.TestCase):
         info = PE(bytes(data)).codeview_entries[0]
         self.assertEqual(info.pdb_path, r"c:\build\out\app.pdb")
 
+    def test_file_offset_fallback_is_refused_under_a_loaded_view(self):
+        """PointerToRawData is a file offset; a loaded source is RVA-indexed.
+
+        Reading it as a source offset under LoadedView silently returns the
+        unrelated image bytes that happen to sit at that RVA, so the payload
+        must be reported as absent rather than guessed. The control shows the
+        same field is still the right fallback for a file view.
+        """
+        from pydbg.pe import PE
+        from pydbg.pe.source import BytesSource
+        from pydbg.pe.view import LoadedView
+
+        data = bytearray(build_codeview_image([build_codeview_payload()]))
+        entry = struct.unpack_from("<IIHHIIII", data, RVA_RDATA)
+        # AddressOfRawData zeroed; PointerToRawData left as the file offset
+        # the payload would have in a file-layout image.
+        struct.pack_into("<IIHHIIII", data, RVA_RDATA, *entry[:6],
+                         0, RVA_DEBUG)
+
+        loaded = PE.from_source(BytesSource(bytes(data)), LoadedView())
+        self.assertEqual(loaded.codeview_entries, [])
+
+        # The same bytes through a file view still use the fallback.
+        self.assertEqual(len(PE(bytes(data)).codeview_entries), 1)
+
     def test_absent_directory_is_empty(self):
         from pydbg.pe import PE
 

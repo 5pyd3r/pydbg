@@ -10,7 +10,7 @@ from .types import (
     RelocationEntry, RelocationBlock, TLSDirectory, DebugEntry,
     CodeViewInfo, ExceptionEntry, RichHeader, RichHeaderEntry,
 )
-from .view import View
+from .view import FileView, View
 
 # Data directory indices this module understands. Only dirs 0 and 1 are parsed
 # eagerly at construction; the rest are lazy (see PE).
@@ -36,8 +36,30 @@ MAX_DATA_DIRECTORIES = 16
 # Import table bounds. A descriptor table is NUL-terminated, but a truncated
 # or lying directory has no terminator in reach; these caps end the walk with
 # the partial list instead of letting it run to the end of the image.
+#
+# A descriptor is 20 bytes, so the directory's own Size is the only statement
+# the file makes about how many there are; MAX_IMPORT_DESCRIPTORS is the
+# backstop for a Size that claims the whole address space.
+IMPORT_DESCRIPTOR_SIZE = 20
 MAX_IMPORT_DESCRIPTORS = 4096
 MAX_IMPORTS_PER_DLL = 65536
+
+# The thunk arrays sit *outside* the descriptor table, so their length is not
+# in dd.size: each is NUL-terminated and only the readable bytes bound one
+# array. The whole directory therefore also has a ceiling, otherwise several
+# descriptors pointing into the same readable thunk region multiply their
+# walks — 4096 descriptors x 65536 thunks is a work count no file of that size
+# justifies. A real image imports a few thousand symbols at most.
+MAX_IMPORTS_TOTAL = 65536
+
+# Export table bounds. NumberOfFunctions/NumberOfNames are 32-bit counts with
+# no in-format ceiling. The export directory's own Size is the only bound the
+# file declares (a table entry cannot live outside the bytes it claims), and
+# MAX_EXPORTS is the backstop for a Size that claims the address space; it
+# matches the exception table's ceiling. The smallest export table entry is one
+# RVA, which is what turns the directory Size into a count.
+MAX_EXPORTS = 65536
+EXPORT_TABLE_ENTRY_SIZE = 4
 
 # A CodeView payload is a 24-byte header plus a path. Both bounds are what stop
 # a debug entry whose SizeOfData lies from turning into a huge read.
@@ -387,8 +409,16 @@ class PEParser:
             return exports
         fields = struct.unpack_from('<IIHHIIIIIII', export_data, 0)
         base = fields[5]
-        num_funcs = fields[6]
-        num_names = fields[7]
+
+        # Both counts are file input used as loop bounds, and a forged one
+        # used to walk until a read fell off the end of the file and raised out
+        # of PE(). The directory Size is the file's own statement about how
+        # many entries it holds; the readable prefix then bounds the table
+        # itself in _read_rva_table, so a truncated tail keeps its prefix.
+        max_entries = min(MAX_EXPORTS,
+                          dd.size // EXPORT_TABLE_ENTRY_SIZE)
+        num_funcs = min(fields[6], max_entries)
+        num_names = min(fields[7], max_entries)
         func_table_rva = fields[8]
         name_table_rva = fields[9]
         ordinal_table_rva = fields[10]
@@ -430,9 +460,16 @@ class PEParser:
 
         # Bounded walks: a truncated or lying directory must end the parse the
         # way every sibling directory does, not raise out of PE() while its
-        # neighbours quietly return [].
+        # neighbours quietly return []. The descriptor count is derived from
+        # the directory's Size; the old walk read straight past the declared
+        # directory until the 4096 cap ran out.
+        descriptor_count = min(MAX_IMPORT_DESCRIPTORS,
+                               dd.size // IMPORT_DESCRIPTOR_SIZE)
+
         cursor = offset
-        for _ in range(MAX_IMPORT_DESCRIPTORS):
+        for _ in range(descriptor_count):
+            if len(imports) >= MAX_IMPORTS_TOTAL:
+                break
             desc_data = self._src.try_read(cursor, 20)
             if desc_data is None:
                 break
@@ -448,8 +485,14 @@ class PEParser:
 
             thunk_rva = ilt_rva if ilt_rva != 0 else iat_rva
             thunk_offset = self._view.rva_to_source_offset(thunk_rva)
+            # One array may claim at most the per-DLL ceiling, and the whole
+            # directory stops at MAX_IMPORTS_TOTAL. Without the second bound a
+            # descriptor table whose entries all point at the same readable
+            # array walks that array once per descriptor.
+            budget = min(MAX_IMPORTS_PER_DLL,
+                         MAX_IMPORTS_TOTAL - len(imports))
             if thunk_offset is not None:
-                for t_index in range(MAX_IMPORTS_PER_DLL):
+                for t_index in range(budget):
                     t_data = self._src.try_read(thunk_offset, thunk_size)
                     if t_data is None:
                         break
@@ -785,7 +828,9 @@ class PEParser:
 
         AddressOfRawData is an RVA and is what the loader uses; a few linkers
         and most dumpers leave it zero and set only the file offset, so that is
-        the fallback rather than a separate code path at every call site.
+        the fallback rather than a separate code path at every call site. The
+        offset is only meaningful for a file-layout source (see view.py), which
+        is why the fallback is restricted to a FileView.
         """
         size = min(entry.size_of_data, max_size)
         if size <= 0:
@@ -794,7 +839,10 @@ class PEParser:
             raw = self._read_rva(entry.address_of_raw_data, size)
             if raw is not None:
                 return raw
-        if entry.pointer_to_raw_data:
+        # PointerToRawData is a FILE offset. Under a loaded view the source is
+        # indexed by RVA, so using the field there reads unrelated image bytes
+        # at best; refuse the fallback instead of guessing.
+        if entry.pointer_to_raw_data and isinstance(self._view, FileView):
             return self._src.try_read(entry.pointer_to_raw_data, size)
         return None
 
@@ -899,14 +947,19 @@ class PEParser:
 
     def _read_rva_table(self, table_rva: int, count: int,
                         entry_size: int, fmt: str) -> list[int]:
-        result = []
-        table_offset = self._view.rva_to_source_offset(table_rva)
-        if table_offset is None:
-            return result
-        for i in range(count):
-            data = self._src.read(table_offset + i * entry_size, entry_size)
-            result.append(struct.unpack_from(fmt, data, 0)[0])
-        return result
+        """The whole entries of the table at 'table_rva' that the file has.
+
+        Read once as a prefix rather than one read per entry: a table cut
+        short then yields the entries before the cut instead of raising out of
+        PE(), which is the contract every sibling directory follows. A partial
+        trailing entry is not a fact and is dropped.
+        """
+        raw = self._read_rva_prefix(table_rva, count * entry_size)
+        if not raw:
+            return []
+        whole = len(raw) // entry_size
+        return [struct.unpack_from(fmt, raw, i * entry_size)[0]
+                for i in range(whole)]
 
     def _read_name_ordinal_map(self, name_table_rva: int,
                                ordinal_table_rva: int,

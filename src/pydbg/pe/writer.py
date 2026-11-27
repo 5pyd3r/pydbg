@@ -19,6 +19,7 @@ header, which describes the loaded image rather than the file just written.
 """
 
 import struct
+import warnings
 from dataclasses import dataclass
 
 from .view import LoadedView
@@ -39,6 +40,16 @@ _SH_SIZE = 40
 # IMAGE_FILE_HEADER: 20 bytes, SizeOfOptionalHeader 16 bytes in.
 _FH_SIZE = 20
 _FH_SIZE_OF_OPTIONAL_HEADER = 16
+
+# SizeOfHeaders is copied into a bytearray and a section's VirtualSize sizes
+# the copy out of the image, so both are allocation bounds the file chose. The
+# source's own extent is the preferred limit — it is the one thing a forged
+# header cannot inflate — and these are the backstops for a source that cannot
+# report one (a live-process image). 1 MiB is far above any real PE header; a
+# 1 GiB section is generous for a loaded image and still refuses the forged
+# 0xFFFFFF00 that used to allocate four gigabytes.
+MAX_SIZE_OF_HEADERS = 0x100000
+MAX_SECTION_SIZE = 0x40000000  # only used when Source.extent is None
 
 
 def _align(value, alignment):
@@ -84,6 +95,9 @@ def file_layout(pe):
     offsets start just past the headers and grow by each aligned section size.
     `virtual_size` is the trustworthy extent of a loaded image — its
     `size_of_raw_data` describes the file it came from, not the memory image.
+    Both header fields are still file input, so the sizes that reach an
+    allocation are clamped to the source's extent (or the fixed caps when it
+    cannot report one); each clamp emits a warning naming the field.
 
     Raises:
         ValueError: 'pe' was not parsed with LoadedView, or its alignments or
@@ -114,23 +128,70 @@ def file_layout(pe):
         e_lfanew + 4 + _FH_SIZE_OF_OPTIONAL_HEADER)[0]
     sections_offset = optional_offset + size_of_optional_header
 
+    # What the source can actually supply. None means it cannot say (a live
+    # process image), in which case the fixed caps below are the only limits.
+    extent = pe.source.extent
+
     # SizeOfHeaders has to cover the section table and stay FileAlignment
     # aligned; never shrink it, because the original header bytes live there.
     table_end = sections_offset + pe.file_header.number_of_sections * _SH_SIZE
-    size_of_headers = max(optional.size_of_headers,
-                          _align(table_end, file_align))
+    minimum_headers = _align(table_end, file_align)
+    size_of_headers = max(optional.size_of_headers, minimum_headers)
 
-    # SizeOfImage covers every section's *virtual* extent plus the headers;
+    # SizeOfHeaders is copied into a bytearray, so before it is used that way
+    # it is compared with what the source can supply: a forged 0xFFFFFF00 must
+    # not become a four-gigabyte ljust() in write_pe. The fallback is the
+    # extent that has to be kept anyway — the section table.
+    allowed_headers = MAX_SIZE_OF_HEADERS
+    if extent is not None:
+        allowed_headers = min(allowed_headers, extent)
+    if size_of_headers > allowed_headers:
+        limit = ('the writer cap' if extent is None
+                 else f'the source extent {extent:#x}')
+        warnings.warn(
+            f'SizeOfHeaders {size_of_headers:#x} clamped to '
+            f'{minimum_headers:#x} (limit: {limit})',
+            stacklevel=2)
+        size_of_headers = minimum_headers
+
+    # A section's span is the larger of two file-chosen fields, so clamp it to
+    # the bytes the source has from the section's RVA before it sizes a copy or
+    # SizeOfImage. Never shrink it otherwise: a short source is still a dump
+    # worth writing, and write_pe zero-fills what it could not read.
+    spans = []
+    for section in pe.sections:
+        # With a known extent the clamp is proportional to the input, so no
+        # fixed section cap applies; without one, the cap is all there is.
+        allowed = MAX_SECTION_SIZE
+        if extent is not None:
+            allowed = max(0, extent - section.virtual_address)
+        span = section.span
+        if span > allowed:
+            limit = ('the writer cap' if extent is None
+                     else f'the source extent {extent:#x}')
+            warnings.warn(
+                f'{section.name}: span {span:#x} (VirtualSize '
+                f'{section.virtual_size:#x}, SizeOfRawData '
+                f'{section.size_of_raw_data:#x}) clamped to {allowed:#x} '
+                f'(limit: {limit})',
+                stacklevel=2)
+            span = allowed
+        spans.append(span)
+
+    # SizeOfImage covers every section's clamped extent plus the headers;
     # rebuilding can drop it below the source's hard-coded value.
-    image_end = max([section.virtual_address + section.span
-                     for section in pe.sections] + [size_of_headers])
+    image_end = max([section.virtual_address + span
+                     for section, span in zip(pe.sections, spans)]
+                    + [size_of_headers])
     size_of_image = _align(image_end, section_align)
 
     # Lay the sections out at file offsets, aligned and strictly increasing.
     sections = []
     raw_pointer = _align(size_of_headers, file_align)
-    for section in pe.sections:
-        size = section.virtual_size or section.span
+    for section, span in zip(pe.sections, spans):
+        # 'virtual_size or span' is what gets copied; the clamp above bounds
+        # the span, so this cannot exceed what the source supplies either.
+        size = min(section.virtual_size or span, span)
         raw_size = _align(size, file_align)
         sections.append(SectionLayout(
             raw_pointer=raw_pointer,
@@ -174,6 +235,8 @@ def write_pe(pe, image_bytes, *, entry_point=None):
     if raw_header is None:
         raise ValueError("PE header is unreadable")
 
+    # file_layout already clamped SizeOfHeaders to what the source can supply,
+    # so this padding cannot grow to a forged field's four-gigabyte claim.
     header = bytearray(raw_header.ljust(layout.size_of_headers, b"\x00"))
     struct.pack_into("<I", header, optional_offset + _OH_SIZE_OF_IMAGE,
                      layout.size_of_image)

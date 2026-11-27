@@ -23,6 +23,17 @@ class Source(ABC):
 
     path = None
 
+    @property
+    def extent(self) -> int | None:
+        """How many bytes this source can supply, or None when it cannot say.
+
+        A file or a memory buffer knows its length; a live-process source does
+        not, and answers None. Callers that allocate from a header field (the
+        writer's SizeOfHeaders, a section's VirtualSize) need this comparison:
+        the field is file input and may be forged far past the bytes present.
+        """
+        return None
+
     @abstractmethod
     def read(self, offset: int, size: int) -> bytes:
         """Read bytes at given offset."""
@@ -58,6 +69,11 @@ class FileSource(Source):
         """The file this source reads."""
         return self._path
 
+    @property
+    def extent(self):
+        """The file's current length, in bytes."""
+        return os.fstat(self._file.fileno()).st_size
+
     def read(self, offset: int, size: int) -> bytes:
         """Read bytes at 'offset', raising ValueError for a short range.
 
@@ -91,7 +107,19 @@ class BytesSource(Source):
     def __init__(self, data: bytes):
         self._data = data
 
+    @property
+    def extent(self):
+        """The buffer's length, in bytes."""
+        return len(self._data)
+
     def read(self, offset: int, size: int) -> bytes:
+        # A negative offset or size passes the upper-bound check but then
+        # indexes from the tail (read(-1, 11) on ten bytes returned b'9').
+        # Reject it as the out-of-bounds range it is instead of returning
+        # bytes from the wrong end of the buffer.
+        if offset < 0 or size < 0:
+            raise ValueError(
+                f"Negative read range: offset={offset}, size={size}")
         if offset + size > len(self._data):
             raise ValueError(
                 f"Read out of bounds: offset={offset}, size={size}, len={len(self._data)}")
