@@ -22,6 +22,7 @@ import struct
 import warnings
 from dataclasses import dataclass
 
+from .align import align_up
 from .view import LoadedView
 
 # Offsets inside IMAGE_OPTIONAL_HEADER32 *and* IMAGE_OPTIONAL_HEADER64. The two
@@ -37,9 +38,9 @@ _SH_SIZE_OF_RAW_DATA = 16
 _SH_POINTER_TO_RAW_DATA = 20
 _SH_SIZE = 40
 
-# IMAGE_FILE_HEADER: 20 bytes, SizeOfOptionalHeader 16 bytes in.
+# IMAGE_FILE_HEADER: 20 bytes between the PE signature and the optional header,
+# which is where the fields this module patches begin.
 _FH_SIZE = 20
-_FH_SIZE_OF_OPTIONAL_HEADER = 16
 
 # SizeOfHeaders is copied into a bytearray and a section's VirtualSize sizes
 # the copy out of the image, so both are allocation bounds the file chose. The
@@ -50,11 +51,6 @@ _FH_SIZE_OF_OPTIONAL_HEADER = 16
 # 0xFFFFFF00 that used to allocate four gigabytes.
 MAX_SIZE_OF_HEADERS = 0x100000
 MAX_SECTION_SIZE = 0x40000000  # only used when Source.extent is None
-
-
-def _align(value, alignment):
-    """Round 'value' up to the next multiple of 'alignment'."""
-    return (value + alignment - 1) // alignment * alignment
 
 
 @dataclass(frozen=True)
@@ -77,13 +73,18 @@ class FileLayout:
 
     'sections' holds one `SectionLayout` per section, in section-table order.
     'sections_offset' is where the section table sits inside the header copy,
-    which the writer needs in order to patch each section's raw fields.
+    which the writer needs in order to patch each section's raw fields, and
+    'table_end' is where that table ends. The offset is the parse's own and
+    the end follows from its section count, so the writer never reconstructs
+    either from the raw header — a second copy of the header-layout rule is a
+    second answer.
     """
 
     size_of_image: int
     size_of_headers: int
     sections: tuple[SectionLayout, ...]
     sections_offset: int
+    table_end: int
 
 
 def file_layout(pe):
@@ -97,11 +98,14 @@ def file_layout(pe):
     `size_of_raw_data` describes the file it came from, not the memory image.
     Both header fields are still file input, so the sizes that reach an
     allocation are clamped to the source's extent (or the fixed caps when it
-    cannot report one); each clamp emits a warning naming the field.
+    cannot report one); each clamp emits a warning naming the field. The
+    section table's offset comes from the parse that located it and its end
+    follows from the parsed count, so this is the one place that states both
+    for the writer.
 
     Raises:
-        ValueError: 'pe' was not parsed with LoadedView, or its alignments or
-            header are unusable.
+        ValueError: 'pe' was not parsed with LoadedView, or its alignments
+            are unusable.
     """
     if not isinstance(pe.view, LoadedView):
         raise ValueError(
@@ -116,17 +120,9 @@ def file_layout(pe):
             f"invalid alignment: FileAlignment={file_align:#x}, "
             f"SectionAlignment={section_align:#x}")
 
-    # The fixed part of the file header locates the section table:
-    # SizeOfOptionalHeader lives there, not in the parsed model.
-    e_lfanew = pe.dos_header.e_lfanew
-    optional_offset = e_lfanew + 4 + _FH_SIZE
-    file_header_bytes = pe.source.try_read(0, optional_offset)
-    if file_header_bytes is None:
-        raise ValueError("PE header is unreadable")
-    size_of_optional_header = struct.unpack_from(
-        "<H", file_header_bytes,
-        e_lfanew + 4 + _FH_SIZE_OF_OPTIONAL_HEADER)[0]
-    sections_offset = optional_offset + size_of_optional_header
+    # The parse already located the section table from SizeOfOptionalHeader;
+    # taking its offset keeps one derivation of the header layout.
+    sections_offset = pe._sections_offset
 
     # What the source can actually supply. None means it cannot say (a live
     # process image), in which case the fixed caps below are the only limits.
@@ -135,7 +131,7 @@ def file_layout(pe):
     # SizeOfHeaders has to cover the section table and stay FileAlignment
     # aligned; never shrink it, because the original header bytes live there.
     table_end = sections_offset + pe.file_header.number_of_sections * _SH_SIZE
-    minimum_headers = _align(table_end, file_align)
+    minimum_headers = align_up(table_end, file_align)
     size_of_headers = max(optional.size_of_headers, minimum_headers)
 
     # SizeOfHeaders is copied into a bytearray, so before it is used that way
@@ -183,16 +179,16 @@ def file_layout(pe):
     image_end = max([section.virtual_address + span
                      for section, span in zip(pe.sections, spans)]
                     + [size_of_headers])
-    size_of_image = _align(image_end, section_align)
+    size_of_image = align_up(image_end, section_align)
 
     # Lay the sections out at file offsets, aligned and strictly increasing.
     sections = []
-    raw_pointer = _align(size_of_headers, file_align)
+    raw_pointer = align_up(size_of_headers, file_align)
     for section, span in zip(pe.sections, spans):
         # 'virtual_size or span' is what gets copied; the clamp above bounds
         # the span, so this cannot exceed what the source supplies either.
         size = min(section.virtual_size or span, span)
-        raw_size = _align(size, file_align)
+        raw_size = align_up(size, file_align)
         sections.append(SectionLayout(
             raw_pointer=raw_pointer,
             raw_size=raw_size,
@@ -205,6 +201,7 @@ def file_layout(pe):
         size_of_headers=size_of_headers,
         sections=tuple(sections),
         sections_offset=sections_offset,
+        table_end=table_end,
     )
 
 
@@ -228,10 +225,9 @@ def write_pe(pe, image_bytes, *, entry_point=None):
     # A header that under-declares SizeOfHeaders is still parseable (the
     # section table is read past it), so fall back to the table extent rather
     # than zeroing every section's name and characteristics.
-    table_end = layout.sections_offset + pe.file_header.number_of_sections * _SH_SIZE
     raw_header = pe.source.try_read(0, layout.size_of_headers)
     if raw_header is None:
-        raw_header = pe.source.try_read(0, table_end)
+        raw_header = pe.source.try_read(0, layout.table_end)
     if raw_header is None:
         raise ValueError("PE header is unreadable")
 

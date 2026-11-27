@@ -19,6 +19,7 @@ without a readable root there is nothing to return, so that is None.
 import struct
 from dataclasses import dataclass
 
+from .align import align_up
 from .resource import RT_VERSION
 
 # VS_FIXEDFILEINFO.dwSignature — the only proof that the value is that struct.
@@ -163,7 +164,7 @@ def _parse_node(data, start, limit, value_is_chars):
         return None
     key = data[start + 6:key_end].decode("utf-16-le", errors="replace")
 
-    value_start = _align4(key_end + 2)
+    value_start = align_up(key_end + 2, 4)
     value_size = value_length * (2 if value_is_chars else 1)
     value_end = min(value_start + value_size, end)
     value = data[value_start:value_end] if value_start < value_end else b""
@@ -171,7 +172,7 @@ def _parse_node(data, start, limit, value_is_chars):
         key=key,
         value=value,
         length=length,
-        children_start=_align4(value_start + value_size),
+        children_start=align_up(value_start + value_size, 4),
         end=end,
     )
 
@@ -189,7 +190,7 @@ def _iter_children(data, node, value_is_chars=False):
         if child is None:
             return
         yield child
-        next_offset = _align4(offset + child.length)
+        next_offset = align_up(offset + child.length, 4)
         if next_offset <= offset:
             return
         offset = next_offset
@@ -254,7 +255,3 @@ def _find_utf16_nul(data, start, end):
             return offset
         offset += 2
     return None
-
-
-def _align4(offset):
-    return (offset + 3) & ~3
