@@ -9,18 +9,26 @@ stage and, when Windows refused a call, the Win32 code, because an injection
 that fails at `alloc` and one that fails at `CreateRemoteThread` need different
 fixes.
 
-The `LoadLibraryW` address is resolved in *this* process's kernel32. That is
-valid only for a same-bitness target: Windows maps kernel32 at the same base in
-every 64-bit process of a session, which is the same assumption
-`demo/dll_injector.py` makes. Cross-architecture injection is out of scope
-(spec §13.9), so a WOW64 target is refused instead of being handed a 64-bit
-address.
+There are two address spaces to keep apart, not one. For a 64-bit target the
+`LoadLibraryW` address is resolved in *this* process's kernel32: Windows maps
+kernel32 at the same base in every 64-bit process of a session, which is the
+same assumption `demo/dll_injector.py` makes. A WOW64 target gets no such
+shortcut — its 32-bit code cannot execute a 64-bit address — so `LoadLibraryW`
+there is resolved from the target's own 32-bit kernel32, found through the
+32-bit module table (`_target_export`). Every remote address a 32-bit target
+will dereference is also allocated below 4 GiB (`_alloc`), and an answer from
+`VirtualAllocEx` above that is refused rather than truncated. Before the loader
+has mapped the 32-bit image, that module table does not exist yet; the resolve
+then raises `InjectionError` instead of falling back to the 64-bit answer.
 """
 
 import os
+import struct
 
 from .. import _pydbg
-from ..exceptions import InjectionError, MemError
+from ..analysis.process_source import ProcessSource
+from ..exceptions import InjectionError, MemError, PydbgError
+from ..pe import PE, LoadedView
 from . import InjectionReport
 
 _MEM_COMMIT_RESERVE = 0x3000     # MEM_COMMIT | MEM_RESERVE
@@ -31,6 +39,27 @@ _THREAD_SUSPEND_RESUME = 0x0002  # what SuspendThread/ResumeThread require
 
 _WIN32_INVALID_PARAMETER = 87
 _WIN32_FILE_NOT_FOUND = 2
+_WIN32_BAD_EXE_FORMAT = 193
+_WIN32_PARTIAL_COPY = 299
+
+# A 32-bit target cannot form an address at or above this, so no pointer it will
+# dereference — path string, shellcode, APC parameter block — can live there.
+_WOW64_LIMIT = 0x1_0000_0000
+
+# Candidate bases for a WOW64 allocation, in the order they are tried. They are
+# fixed, 64KB-aligned and below 2GB: "wherever the allocator likes" is not a
+# contract a 32-bit target can be held to, and each of these fits a 2GB as well
+# as a LARGEADDRESSAWARE 4GB address space. The trailing 0 asks Windows to
+# place the block itself once every fixed base is already mapped.
+_WOW64_ALLOC_HINTS = (0x10000000, 0x20000000, 0x30000000, 0x40000000,
+                      0x50000000, 0x60000000, 0x70000000, 0)
+
+# IMAGE_FILE_HEADER.Machine -> the bitness of a DLL a caller asked to inject.
+_MACHINE_ARCH = {0x14C: 32, 0x8664: 64}
+
+# How many export forwarders to follow before giving up. A real chain is one or
+# two hops; the bound is what stops a cycle in a forged image from looping.
+_MAX_FORWARDER_HOPS = 8
 
 
 def _win32_code(exc):
@@ -56,9 +85,9 @@ def _fail(stage, message, code=None):
     """Raise InjectionError for 'stage'.
 
     'code' is the Win32/errno number when Windows made the call and refused
-    it. A failure that never reached Windows — a missing target, a WOW64
-    target, a bad argument — has no code, and says so instead of printing
-    `win32=0`, which reads like a successful call.
+    it. A failure that never reached Windows — a missing target, a DLL of the
+    wrong bitness, a bad argument — has no code, and says so instead of
+    printing `win32=0`, which reads like a successful call.
     """
     raise InjectionError(
         f"injection {stage} failed ({_code_detail(code)}): {message}")
@@ -82,18 +111,63 @@ def _session(dbg):
     return session
 
 
-def _require_native(session):
-    """Refuse a WOW64 target: this injection path only has 64-bit addresses."""
-    if getattr(session, "target_arch", None) == 32:
-        _fail("arch", "cross-architecture injection is not supported "
-                      "(WOW64 target, 64-bit host)")
+def _target_is_wow64(session):
+    """True when the target is 32-bit, i.e. WOW64 on this 64-bit host.
+
+    Everything that changes between the two paths hangs off this one question:
+    which kernel32 resolves `LoadLibraryW`, and whether the remote addresses a
+    target will dereference have to fit in 32 bits.
+    """
+    return getattr(session, "target_arch", None) == 32
 
 
-def _alloc(dbg, size, protect):
-    try:
-        return dbg.memory.alloc_remote(size, protect)
-    except (MemError, OSError) as exc:
-        _translate("alloc", exc)
+def _alloc(dbg, session, size, protect):
+    """Allocate 'size' bytes in the target; a WOW64 base stays below 4 GiB.
+
+    A 64-bit target gets the historical arbitrary-placement allocation. A
+    32-bit target cannot form an address at or above 4 GiB, so VirtualAllocEx
+    is steered with `_WOW64_ALLOC_HINTS`: a refused hint is an ordinary "that
+    base is taken" and the next candidate is tried, but a *successful* answer
+    at or above the limit is fatal. Truncating it to 32 bits would make the
+    target read from an unrelated address, and retrying would paper over an
+    answer that must not have happened — so the block is released and the call
+    fails.
+
+    Raises:
+        InjectionError: VirtualAllocEx refused every candidate (`alloc`), or
+            answered with an address a 32-bit target cannot use; the message
+            carries the Win32 code when there is one.
+    """
+    if not _target_is_wow64(session):
+        try:
+            return dbg.memory.alloc_remote(size, protect)
+        except (MemError, OSError) as exc:
+            _translate("alloc", exc)
+
+    last = None
+    last_hint = 0
+    for hint in _WOW64_ALLOC_HINTS:
+        last_hint = hint
+        try:
+            address = dbg.memory.alloc_remote(size, protect, hint)
+        except (MemError, OSError) as exc:
+            last = exc
+            continue
+        if not 0 < address < _WOW64_LIMIT:
+            # Release what Windows handed out and then refuse it: the caller
+            # never learns this address, so leaving it allocated would leak.
+            if address:
+                _free_quietly(dbg, address)
+            _fail("alloc",
+                  f"VirtualAllocEx returned 0x{address:X} for a 32-bit "
+                  f"target; it cannot address anything at or above "
+                  f"0x{_WOW64_LIMIT:X}, and truncating the answer would point "
+                  f"the target at the wrong memory. Refusing it.")
+        return address
+    _fail("alloc",
+          f"VirtualAllocEx refused every candidate base for {size} bytes "
+          f"({len(_WOW64_ALLOC_HINTS)} tried, last 0x{last_hint:X}): {last}",
+          _win32_code(last))
 
 
 def _write(dbg, address, data):
@@ -124,6 +198,133 @@ def _close_quietly(handle):
         pass
 
 
+def _image_arch(path):
+    """32 or 64 from the DLL's own PE header; 0 when it is not a usable PE.
+
+    A process loads only images of its own architecture, so the bitness of the
+    file is what decides whether injecting it can work at all. Only the machine
+    field is needed, which is why this reads the two headers rather than
+    parsing the whole image: the answer is two bytes and the caller has not yet
+    touched the target.
+    """
+    try:
+        with open(path, "rb") as handle:
+            dos = handle.read(0x40)
+            if len(dos) < 0x40 or dos[:2] != b"MZ":
+                return 0
+            e_lfanew = struct.unpack_from("<I", dos, 0x3C)[0]
+            handle.seek(e_lfanew)
+            nt = handle.read(6)
+    except OSError as exc:
+        _fail("path", f"cannot read {path}: {exc}", _win32_code(exc))
+    if len(nt) < 6 or nt[:4] != b"PE\x00\x00":
+        return 0
+    return _MACHINE_ARCH.get(struct.unpack_from("<H", nt, 4)[0], 0)
+
+
+def _target_module(dbg, module_name):
+    """The target's entry for 'module_name' in its 32-bit module table.
+
+    This is also where the loader-breakpoint boundary shows up. Before the
+    loader has mapped the 32-bit image, Windows either refuses the table with
+    ERROR_PARTIAL_COPY (the window module/resolver.py documents) or answers
+    with an empty one; both are surfaced as an InjectionError naming the
+    missing table, never as a fallback to a same-bitness address the target
+    could not execute.
+    """
+    try:
+        modules = dbg.enum_modules(arch=32)
+    except MemError as exc:
+        if _win32_code(exc) == _WIN32_PARTIAL_COPY:
+            _fail("resolve",
+                  "the target's 32-bit module table is not available yet "
+                  "(the loader has not mapped the 32-bit image; wait past the "
+                  "WX86 loader breakpoint): " + str(exc),
+                  _WIN32_PARTIAL_COPY)
+        _translate("resolve", exc)
+    except PydbgError as exc:
+        _translate("resolve", exc)
+
+    wanted = module_name.lower()
+    for module in modules:
+        if os.path.basename(module.get("name") or "").lower() == wanted:
+            return module
+    _fail("resolve",
+          f"the target has no 32-bit {module_name}: its 32-bit module table "
+          f"does not contain one")
+
+
+def _read_target_image(dbg, module_name):
+    """(base, PE) for the target's own 32-bit 'module_name', read in place.
+
+    The bytes come out of the target with `dbg.read_memory` after the module
+    table supplied the base and the image's own SizeOfImage. Parsing them with
+    LoadedView means an RVA is a direct offset into that buffer, and `va_base`
+    anchors the addresses the image stores to where the module really loaded.
+
+    The source is a ProcessSource over `dbg.read_memory`, not one bulk read of
+    SizeOfImage: a loaded image legitimately has holes (the loader decommits
+    discardable sections such as .reloc after applying them), so reading the
+    whole image at once fails with ERROR_PARTIAL_COPY on the first such page —
+    measured on a real 32-bit kernel32. ProcessSource asks for the bytes the
+    directory walk actually needs and reports an unreadable page as "no data
+    here", which is the answer the PE parser is built to stop on.
+    """
+    module = _target_module(dbg, module_name)
+    base = module.get("base_address") or 0
+    size = module.get("size") or 0
+    if not base or not size:
+        _fail("resolve",
+              f"the target's {module_name} entry reports no base/size, so its "
+              f"image cannot be read")
+    source = ProcessSource(
+        getattr(dbg, "_session", None), base, size=size, reader=dbg.read_memory)
+    try:
+        return base, PE.from_source(source, LoadedView(), va_base=base)
+    except (ValueError, struct.error) as exc:
+        _fail("resolve",
+              f"cannot parse the target's {module_name} at 0x{base:X}: {exc}")
+
+
+def _target_export(dbg, module_name, proc_name):
+    """Address of 'proc_name' in the target's own 32-bit 'module_name'.
+
+    The 64-bit host's kernel32 is a different image at a different base, so an
+    address resolved here could not be executed by a WOW64 target (spec §13.2).
+    The answer therefore has to come from the target's address space: find the
+    module in its 32-bit table, read that mapped image, and take the export's
+    RVA relative to the module's runtime base.
+
+    A forwarded export is followed into the module it names, because a
+    forwarder's RVA points at a name string inside the export directory rather
+    than at code; returning it would hand the target a data address to execute.
+
+    Raises:
+        InjectionError: the 32-bit module table is missing, either module is
+            not loaded, the export is not there, or an image cannot be read or
+            parsed (`resolve`); the message names which.
+    """
+    name = proc_name
+    for _ in range(_MAX_FORWARDER_HOPS):
+        base, image = _read_target_image(dbg, module_name)
+        entry = next(
+            (export for export in image.exports if export.name == name), None)
+        if entry is None:
+            _fail("resolve",
+                  f"{module_name} in the target has no export {name!r}")
+        if entry.forwarder is None:
+            return base + entry.rva
+        module_name, _, name = entry.forwarder.partition(".")
+        if not name:
+            _fail("resolve",
+                  f"malformed export forwarder {entry.forwarder!r}")
+        if not module_name.lower().endswith(".dll"):
+            module_name += ".dll"
+    _fail("resolve",
+          f"the export forwarders for {proc_name!r} did not terminate within "
+          f"{_MAX_FORWARDER_HOPS} hops")
+
+
 def inject_dll(dbg, path):
     """Inject a DLL into the target with `CreateRemoteThread(LoadLibraryW)`.
 
@@ -139,14 +340,21 @@ def inject_dll(dbg, path):
 
     The function does not wait and does not free: a caller that only wants the
     DLL mapped and not the report can close and free after a successful wait.
-    Same-bitness targets only (see the module docstring).
+
+    The DLL has to match the target's architecture: a 32-bit DLL goes to a
+    WOW64 target (through that target's own 32-bit kernel32) and a 64-bit DLL
+    to a 64-bit target (through this process's kernel32, the same-bitness
+    assumption in the module docstring). A mismatch is refused before anything
+    is allocated or executed.
 
     Raises:
-        InjectionError: the path is unusable (`path`), kernel32/LoadLibraryW
-            cannot be resolved (`resolve`), `VirtualAllocEx` refused (`alloc`),
-            `WriteProcessMemory` refused (`write`), or `CreateRemoteThread`
-            refused (`thread`); the message carries the Win32 code when there
-            is one.
+        InjectionError: the path is unusable (`path`) or is not a PE image
+            (`path`), the DLL's architecture does not match the target's
+            (`arch`), kernel32/LoadLibraryW cannot be resolved (`resolve`),
+            `VirtualAllocEx` refused or answered with a non-32-bit address for
+            a WOW64 target (`alloc`), `WriteProcessMemory` refused (`write`),
+            or `CreateRemoteThread` refused (`thread`); the message carries the
+            Win32 code when there is one.
     """
     if not isinstance(path, (str, os.PathLike)):
         _fail("path", f"not a path: {path!r}", _WIN32_INVALID_PARAMETER)
@@ -163,18 +371,30 @@ def inject_dll(dbg, path):
         _fail("path", f"no such file: {absolute}", _WIN32_FILE_NOT_FOUND)
 
     session = _session(dbg)
-    _require_native(session)
+    target_arch = getattr(session, "target_arch", None)
+    dll_arch = _image_arch(absolute)
+    if not dll_arch:
+        _fail("path", f"not a PE image: {absolute}", _WIN32_BAD_EXE_FORMAT)
+    if dll_arch != target_arch:
+        _fail("arch",
+              f"refusing to inject a {dll_arch}-bit DLL into a "
+              f"{target_arch}-bit target: a process can only load images of "
+              f"its own architecture")
 
-    try:
-        kernel32 = _pydbg.get_module_handle("kernel32.dll")
-        load_library = _pydbg.get_proc_address(kernel32, "LoadLibraryW")
-    except OSError as exc:
-        _translate("resolve", exc)
+    if dll_arch == 32:
+        # The target executes this address in its own 32-bit kernel32.
+        load_library = _target_export(dbg, "kernel32.dll", "LoadLibraryW")
+    else:
+        try:
+            kernel32 = _pydbg.get_module_handle("kernel32.dll")
+            load_library = _pydbg.get_proc_address(kernel32, "LoadLibraryW")
+        except OSError as exc:
+            _translate("resolve", exc)
 
     # LoadLibraryW takes a wide string; the terminating pair is part of the
     # buffer, not of the Python string.
     payload = absolute.encode("utf-16-le") + b"\x00\x00"
-    remote = _alloc(dbg, len(payload), _PAGE_READWRITE)
+    remote = _alloc(dbg, session, len(payload), _PAGE_READWRITE)
     try:
         _write(dbg, remote, payload)
         thread_id, handle = _create_remote_thread(
@@ -199,7 +419,9 @@ def inject_shellcode(dbg, code):
     - free the code buffer with
       `dbg.memory.free_remote(report.remote_base)` once the thread exits.
 
-    Same-bitness targets only (see the module docstring).
+    On a WOW64 target the code is 32-bit code, and the allocation is made below
+    4 GiB so the thread can execute it at all; an allocation answer above that
+    is refused (see `_alloc`).
 
     Raises:
         InjectionError: `code` is empty or not bytes (`code`), the allocation
@@ -219,9 +441,8 @@ def inject_shellcode(dbg, code):
         _fail("code", "empty shellcode", _WIN32_INVALID_PARAMETER)
 
     session = _session(dbg)
-    _require_native(session)
 
-    remote = _alloc(dbg, len(payload), _PAGE_EXECUTE_READWRITE)
+    remote = _alloc(dbg, session, len(payload), _PAGE_EXECUTE_READWRITE)
     try:
         _write(dbg, remote, payload)
         thread_id, handle = _create_remote_thread(
@@ -249,6 +470,15 @@ def queue_apc(dbg, thread_id, addr, data=b""):
     copied into a new `PAGE_READWRITE` allocation in the target and that
     address is what the routine receives.
 
+    On a WOW64 target both `addr` and the parameter block have to be below
+    4 GiB: that is the address space the 32-bit thread can form, and a high
+    address is refused instead of being handed to it truncated. Note that
+    Windows documents `QueueUserAPC` as unsupported across architectures
+    ("addresses will be incorrect and the application will crash"): the APC is
+    dispatched natively rather than through the 32-bit ntdll, so an address
+    below 4 GiB is delivered, but the body there must not assume that the
+    32-bit calling convention (a stack argument, `ret n`) is in effect.
+
     **A non-empty `data` leaks that allocation by design**: the address is
     neither returned nor freed, because the APC routine owns what it receives
     and this function cannot know when the APC ran. A caller that needs to
@@ -260,10 +490,11 @@ def queue_apc(dbg, thread_id, addr, data=b""):
         The `QueueUserAPC` result: nonzero on success.
 
     Raises:
-        InjectionError: the thread id or routine address is invalid (`apc`), the
-            thread cannot be opened (`apc`), the data allocation/write failed
-            (`alloc`/`write`), or Windows refused the APC (`apc`); the message
-            carries the Win32 code when there is one.
+        InjectionError: the thread id or routine address is invalid (`apc`),
+            the routine address is not a 32-bit address for a WOW64 target
+            (`apc`), the thread cannot be opened (`apc`), the data
+            allocation/write failed (`alloc`/`write`), or Windows refused the
+            APC (`apc`); the message carries the Win32 code when there is one.
     """
     if not isinstance(thread_id, int) or isinstance(thread_id, bool) \
             or thread_id <= 0:
@@ -274,7 +505,10 @@ def queue_apc(dbg, thread_id, addr, data=b""):
               _WIN32_INVALID_PARAMETER)
 
     session = _session(dbg)
-    _require_native(session)
+    if _target_is_wow64(session) and addr >= _WOW64_LIMIT:
+        _fail("apc",
+              f"APC routine 0x{addr:X} is not a 32-bit address; a WOW64 target "
+              f"cannot execute code at or above 0x{_WOW64_LIMIT:X}")
 
     parameter = 0
     if data:
@@ -282,7 +516,7 @@ def queue_apc(dbg, thread_id, addr, data=b""):
             _fail("apc", f"APC data must be bytes, not {type(data).__name__}",
                   _WIN32_INVALID_PARAMETER)
         payload = bytes(data)
-        parameter = _alloc(dbg, len(payload), _PAGE_READWRITE)
+        parameter = _alloc(dbg, session, len(payload), _PAGE_READWRITE)
         try:
             _write(dbg, parameter, payload)
         except InjectionError:

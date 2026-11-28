@@ -14,7 +14,15 @@ What this file proves, in the order the ticket lists it:
    naming the stage and the Win32 code;
 6. the extension is not needed to import `pydbg` or `pydbg.inject`, and the
    live checks declare `optional dependency: Cython extension` /
-   `target not built:` when their preconditions are missing.
+   `target not built:` when their preconditions are missing;
+7. the same three primitives work on a WOW64 target (the 2026-11-28 extension,
+   spec §13.2/§13.8 item 7): `inject_dll` maps a 32-bit DLL through the
+   target's own 32-bit `LoadLibraryW` and its export resolves from the target,
+   `inject_shellcode` runs 32-bit code from an allocation below 4 GiB, and
+   `queue_apc` runs on the host's own thread in an alertable wait. A 32-bit DLL
+   asked of a 64-bit target, and an injection attempted before the 32-bit
+   module table exists, are both `InjectionError`s rather than success. Those
+   two files are built by `scripts/build-target32.ps1`.
 
 The live targets are started as ordinary (non-debugged) processes and opened
 with `_pydbg.open_process`: injection is a library operation on any process,
@@ -28,10 +36,11 @@ import os
 import struct
 import subprocess
 import sys
+import tempfile
 import time
 import unittest
 
-from pydbg import PydbgError
+from pydbg import MemError, PydbgError
 from pydbg.inject import InjectionError, InjectionReport
 
 try:
@@ -60,6 +69,14 @@ _DUMP_DLL = os.environ.get(
     "TEST_DUMP_DLL_PATH", os.path.join(_HERE, "target", "dump_target.dll"))
 _DUMP_HOST = os.environ.get(
     "TEST_DUMP_HOST_PATH", os.path.join(_HERE, "target", "dump_host.exe"))
+# The WOW64 pair is built out of band by scripts/build-target32.ps1, so these
+# name the source-tree artefacts; tests/meson.build sets the same paths.
+_INJECT_HOST32 = os.environ.get(
+    "TEST_INJECT_HOST32_PATH",
+    os.path.join(_HERE, "target", "inject_host32.exe"))
+_INJECT_DLL32 = os.environ.get(
+    "TEST_INJECT_DLL32_PATH",
+    os.path.join(_HERE, "target", "inject_target32.dll"))
 
 needs_cython = unittest.skipUnless(
     _has_cython, "optional dependency: Cython extension")
@@ -68,6 +85,19 @@ needs_target = unittest.skipUnless(
 needs_dump_targets = unittest.skipUnless(
     os.path.isfile(_DUMP_DLL) and os.path.isfile(_DUMP_HOST),
     "target not built: " + _DUMP_DLL + " and " + _DUMP_HOST)
+needs_inject_dll32 = unittest.skipUnless(
+    os.path.isfile(_INJECT_DLL32),
+    "target not built: " + _INJECT_DLL32 +
+    " (scripts/build-target32.ps1)")
+needs_inject_targets32 = unittest.skipUnless(
+    os.path.isfile(_INJECT_HOST32) and os.path.isfile(_INJECT_DLL32),
+    "target not built: " + _INJECT_HOST32 + " and " + _INJECT_DLL32 +
+    " (scripts/build-target32.ps1)")
+# A 32-bit host cannot exercise WOW64 at all; that is an environment limit, not
+# a missing target, so it is reported separately (test_wow64.py says the same).
+needs_64bit_host = unittest.skipUnless(
+    struct.calcsize("P") == 8 and sys.platform == "win32",
+    "environment: 64-bit Windows host")
 
 # GetExitCodeProcess answers this while the process is still running.
 _STILL_ACTIVE = 259
@@ -163,7 +193,6 @@ class TestInjectionValidation(unittest.TestCase):
 
     def test_a_translated_failure_without_a_code_also_omits_win32_zero(self):
         """The same rule for an exception with no winerror/errno to carry."""
-        from pydbg.exceptions import MemError
         from pydbg.inject import api
 
         with self.assertRaises(InjectionError) as ctx:
@@ -245,9 +274,9 @@ class _LiveTarget:
     CreateRemoteThread from here is not held at a CREATE_THREAD debug event.
     """
 
-    def __init__(self, path):
+    def __init__(self, path, args=()):
         self.process = subprocess.Popen(
-            [path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            [path, *args], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             cwd=os.path.dirname(os.path.abspath(path)))
         self.handle = None
         for _ in range(200):
@@ -266,7 +295,10 @@ class _LiveTarget:
         session = self.dbg._session
         session.pid = self.process.pid
         session.process_handle = self.handle
-        session.target_arch = 64
+        # Asked from Windows, not assumed: the session's architecture is what
+        # `enum_modules(arch=32)` checks, so guessing 64 for a 32-bit target
+        # would send the WOW64 tests down the 64-bit table.
+        session.target_arch = 32 if _pydbg.is_wow64_process(self.handle) else 64
 
     def close(self):
         try:
@@ -429,6 +461,54 @@ def _write_apc_param_to_absolute(absolute):
         + b"\x48\xBA" + struct.pack("<Q", absolute)   # mov rdx, absolute
         + b"\x89\x02"                       # mov [rdx], eax
         + b"\xC3")                          # ret
+
+
+def _write_marker_to_absolute_32(absolute):
+    """x86 APC body: mov eax,absolute; mov dword [eax],42; ret.
+
+    Every instruction means the same thing in 32-bit and 64-bit mode: `B8 id`
+    is `mov eax, imm32` in both (zero-extending to rax in 64-bit mode), and
+    `C7 00 id` is `mov dword [eax/rax], imm32`. That matters because Windows
+    documents `QueueUserAPC` as unsupported across architectures and the APC is
+    dispatched natively, so a 32-bit-only encoding is not safe here — `A3
+    moffs32` (a plain 32-bit absolute store) is decoded as a 64-bit `moffs`
+    store, writes to a bogus address and takes the target down. This body
+    proves the APC ran without depending on which dispatcher delivered it.
+    """
+    return (
+        b"\xB8" + struct.pack("<I", absolute)     # mov eax, absolute
+        + b"\xC7\x00\x2A\x00\x00\x00"             # mov dword [eax], 42
+        + b"\xC3")                                # ret
+
+
+def _read_text(path):
+    """The text file at 'path', or '' while it is not readable yet."""
+    try:
+        with open(path, "r", encoding="ascii", errors="replace") as handle:
+            return handle.read()
+    except OSError:
+        return ""
+
+
+def _wait_for_file_text(path, needle, timeout=10.0):
+    """Poll 'path' until its text contains 'needle'; return that text."""
+    deadline = time.time() + timeout
+    text = ""
+    while time.time() < deadline:
+        text = _read_text(path)
+        if needle in text:
+            return text
+        time.sleep(0.02)
+    raise AssertionError(f"{path} never contained {needle!r}: {text!r}")
+
+
+def _status_field(text, name):
+    """The value half of a 'name=value' line in inject_host32's status file."""
+    for line in text.splitlines():
+        key, separator, value = line.partition("=")
+        if separator and key.strip() == name:
+            return value.strip()
+    return None
 
 
 def _wait_for_dword(dbg, address, expected, timeout=5.0):
@@ -734,6 +814,384 @@ class TestSuspendResumeLive(unittest.TestCase):
                          "resume did not undo every suspension")
         time.sleep(0.1)
         self.assertTrue(self.target.alive(), "target died after resume")
+
+
+class _Wow64HostCase(unittest.TestCase):
+    """Start inject_host32.exe and read the state it publishes.
+
+    The host writes a status file naming its worker thread and whether it
+    loaded inject_target32.dll; the worker appends to "<status>.apc" once an
+    APC has run on its alertable wait. Subclasses add `host_args`.
+    """
+
+    host_args = ()
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory(prefix="pydbg-inject32-")
+        self.addCleanup(self._tmp.cleanup)
+        self.status_path = os.path.join(self._tmp.name, "inject_host32.txt")
+        self.marker_path = self.status_path + ".apc"
+        self.target = _LiveTarget(
+            _INJECT_HOST32, args=[self.status_path, *self.host_args])
+        self.addCleanup(self.target.close)
+        self.dbg = self.target.dbg
+        # "end" is the last line, so waiting for it means every earlier field
+        # (worker_tid in particular) was fully written before it was parsed.
+        self.status = _wait_for_file_text(self.status_path, "end")
+
+    def worker_tid(self):
+        """The host's alertable worker thread, as the host itself named it."""
+        value = _status_field(self.status, "worker_tid")
+        self.assertIsNotNone(value, "inject_host32 published no worker_tid")
+        return int(value, 0)
+
+
+@needs_cython
+@needs_64bit_host
+@needs_inject_targets32
+class TestDllInjectionIntoWow64(_Wow64HostCase):
+    """§13.8 item 7: a 32-bit DLL, mapped by the target's 32-bit LoadLibraryW."""
+
+    def test_inject_dll_adds_the_32_bit_module_and_its_export(self):
+        self.assertEqual(
+            _status_field(self.status, "loaded"), "0",
+            "this host loaded the DLL itself; the injection would prove less")
+        self.assertIsNone(
+            _module_by_name(self.dbg.enum_modules(arch=32),
+                            "inject_target32.dll"),
+            "the DLL was already in the target before injection")
+
+        report = inject_dll(self.dbg, _INJECT_DLL32)
+        self.assertLess(report.remote_base, 0x100000000,
+                        "the path buffer is not a 32-bit address")
+        self.assertNotEqual(report.remote_base, 0)
+        self.assertEqual(
+            self.dbg.memory.query(report.remote_base)["protect"],
+            0x04)                           # PAGE_READWRITE
+        self.assertEqual(
+            _pydbg.wait_for_single_object(report.handle, 10000), 0,
+            "the remote LoadLibraryW thread did not finish")
+        loaded_base = _pydbg.get_exit_code_thread(report.handle)
+        _pydbg.close_handle(report.handle)
+        self.assertNotEqual(loaded_base, 0, "LoadLibraryW returned NULL")
+        self.assertTrue(self.target.alive(),
+                        "the target died during the injection")
+
+        module = _module_by_name(self.dbg.enum_modules(arch=32),
+                                 "inject_target32.dll")
+        self.assertIsNotNone(module, "the injected module is not in the 32-bit "
+                                     "table")
+        self.assertLess(module["base_address"], 0x100000000)
+        self.assertEqual(module["base_address"] & 0xFFFFFFFF,
+                         loaded_base & 0xFFFFFFFF)
+        export = _remote_export(self.target.handle, module["base_address"],
+                                "inject_target32_answer")
+        self.assertNotEqual(
+            export, 0,
+            "the target's mapping has no inject_target32_answer export")
+        self.assertLess(export, 0x100000000)
+
+
+@needs_cython
+@needs_64bit_host
+@needs_inject_targets32
+class TestShellcodeInjectionIntoWow64(_Wow64HostCase):
+    """§13.8 item 7: a `ret`-level 32-bit stub runs without killing the host."""
+
+    def test_a_32_bit_ret_stub_runs_and_the_target_survives(self):
+        code = b"\x31\xC0\xC3"                  # xor eax,eax; ret
+        report = inject_shellcode(self.dbg, code)
+
+        self.assertNotEqual(report.remote_base, 0)
+        self.assertLess(report.remote_base, 0x100000000,
+                        "the shellcode page is not a 32-bit address")
+        self.assertEqual(
+            _pydbg.read_process_memory(
+                self.target.handle, report.remote_base, len(code)), code)
+        self.assertEqual(
+            self.dbg.memory.query(report.remote_base)["protect"],
+            0x40)                           # PAGE_EXECUTE_READWRITE
+        self.assertEqual(
+            _pydbg.wait_for_single_object(report.handle, 10000), 0)
+        self.assertEqual(_pydbg.get_exit_code_thread(report.handle), 0)
+        _pydbg.close_handle(report.handle)
+        self.assertTrue(self.target.alive(),
+                        "the 32-bit stub killed the target")
+
+
+@needs_cython
+@needs_64bit_host
+@needs_inject_targets32
+class TestQueueApcOnWow64(_Wow64HostCase):
+    """§13.8 item 7: the APC runs on the host's own alertable 32-bit thread."""
+
+    # Load and call the DLL first: this case is "a 32-bit process already using
+    # a DLL, then an APC is queued to its alertable thread".
+    host_args = ("--load-dll",)
+
+    def test_the_host_used_the_dll_before_the_apc(self):
+        """A precondition, so the APC cannot pass on a host that never ran."""
+        self.assertEqual(_status_field(self.status, "loaded"), "1")
+        self.assertEqual(_status_field(self.status, "answer"), "1234")
+        self.assertNotEqual(
+            int(_status_field(self.status, "dll_base") or "0", 0), 0)
+
+    def test_apc_runs_on_the_hosts_alertable_thread(self):
+        self.assertEqual(_status_field(self.status, "answer"), "1234")
+        result = self.dbg.memory.alloc_remote(4, 0x04)   # PAGE_READWRITE
+        routine_bytes = _write_marker_to_absolute_32(result)
+        routine = self.dbg.memory.alloc_remote(
+            len(routine_bytes), 0x40)                    # PAGE_EXECUTE_READWRITE
+        self.assertLess(result, 0x100000000)
+        self.assertLess(routine, 0x100000000)
+        self.dbg.memory.write(routine, routine_bytes)
+
+        self.assertNotEqual(
+            queue_apc(self.dbg, self.worker_tid(), routine,
+                      data=b"\x2A\x00\x00\x00"), 0)
+
+        self.assertEqual(
+            _wait_for_dword(self.dbg, result, b"\x2A\x00\x00\x00"),
+            b"\x2A\x00\x00\x00",
+            "the APC did not run on the host's alertable thread")
+        # The worker only writes this after SleepEx returned
+        # WAIT_IO_COMPLETION, i.e. after the APC ran and returned.
+        _wait_for_file_text(self.marker_path, "apc")
+        self.assertTrue(self.target.alive(), "the APC killed the target")
+
+    def test_an_apc_routine_above_4_gib_is_refused(self):
+        with self.assertRaises(InjectionError) as ctx:
+            queue_apc(self.dbg, self.worker_tid(), 0x100000000)
+        message = str(ctx.exception)
+        self.assertIn("apc", message)
+        self.assertIn("32-bit", message)
+        self.assertTrue(self.target.alive())
+
+
+@needs_cython
+@needs_64bit_host
+@needs_target
+@needs_inject_dll32
+class TestWow64InjectionRefusals(unittest.TestCase):
+    """A 32-bit DLL asked of a 64-bit target is an InjectionError."""
+
+    def test_a_32_bit_dll_is_refused_for_a_64_bit_target(self):
+        target = _LiveTarget(_TARGET)           # instrument_target.exe, x64
+        self.addCleanup(target.close)
+        self.assertEqual(target.dbg._session.target_arch, 64)
+
+        with self.assertRaises(InjectionError) as ctx:
+            inject_dll(target.dbg, _INJECT_DLL32)
+        message = str(ctx.exception)
+        self.assertIn("arch", message)
+        self.assertIn("32-bit DLL", message)
+        self.assertIn("64-bit target", message)
+        self.assertTrue(target.alive())
+
+
+@needs_cython
+@needs_64bit_host
+@needs_inject_targets32
+class TestWow64LoaderBoundary(unittest.TestCase):
+    """Injecting before the 32-bit image is loaded is an InjectionError."""
+
+    def test_injection_at_the_loader_breakpoint_is_an_injection_error(self):
+        """Before the 32-bit image is in the table, resolving must fail.
+
+        create_process() returns with the target stopped on the initial loader
+        breakpoint. On this Windows build the 32-bit table already answers, but
+        it is still empty (an older answer is ERROR_PARTIAL_COPY, which #122
+        documents). Either way the resolve has to raise InjectionError naming
+        the missing table/image, never fall back to this process's kernel32.
+        """
+        from pydbg import Debugger
+        from tests.helpers import teardown
+
+        dbg = Debugger()
+        try:
+            dbg.create_process(_INJECT_HOST32)
+            if _module_by_name(dbg.enum_modules(arch=32),
+                               "kernel32.dll") is not None:
+                self.skipTest(
+                    "environment: the 32-bit kernel32 is already enumerated "
+                    "at the initial loader breakpoint")
+
+            with self.assertRaises(InjectionError) as ctx:
+                inject_dll(dbg, _INJECT_DLL32)
+            message = str(ctx.exception)
+            self.assertIn("32-bit", message)
+            self.assertIn("module table", message)
+        finally:
+            teardown(dbg)
+
+
+class _FakeWow64Session:
+    pid = 4242
+    process_handle = 0x99
+    target_arch = 32
+
+
+class _FakeHighMemory:
+    """Target memory whose next allocation lands above 32-bit address space."""
+
+    HIGH = 0x7FFE00000000
+
+    def __init__(self):
+        self.hints = []
+        self.freed = []
+
+    def alloc_remote(self, size, protect=0x04, hint=0):
+        self.hints.append(hint)
+        return self.HIGH
+
+    def free_remote(self, address):
+        self.freed.append(address)
+
+
+class _FakeWow64Target:
+    def __init__(self):
+        self._session = _FakeWow64Session()
+        self.memory = _FakeHighMemory()
+
+
+class _FakeNoTableDebugger:
+    """A 32-bit session whose module table is not visible yet (#122).
+
+    Mirrors what ModuleResolver does before the loader has mapped the 32-bit
+    image: EnumProcessModulesEx refuses with ERROR_PARTIAL_COPY and the
+    resolver wraps that as MemError. The boundary is platform timing, not a
+    controllable live state, so it is reproduced here.
+    """
+
+    def __init__(self):
+        self._session = _FakeWow64Session()
+        self.memory = _FakeHighMemory()
+
+    def enum_modules(self, arch=None):
+        try:
+            raise OSError(299, "ERROR_PARTIAL_COPY")
+        except OSError as exc:
+            raise MemError("EnumProcessModulesEx(32-bit)") from exc
+
+
+@needs_inject_dll32
+class TestWow64TableBoundary(unittest.TestCase):
+    """A missing 32-bit table is an InjectionError, never a 64-bit fallback."""
+
+    def test_a_missing_32_bit_module_table_is_an_injection_error(self):
+        api = _api_module()
+        target = _FakeNoTableDebugger()
+
+        with self.assertRaises(InjectionError) as ctx:
+            api.inject_dll(target, _INJECT_DLL32)
+
+        message = str(ctx.exception)
+        self.assertIn("32-bit module table", message)
+        self.assertIn("299", message)       # ERROR_PARTIAL_COPY
+        self.assertEqual(target.memory.hints, [],
+                         "a missing table must fail before allocating")
+
+
+class _FakeRefusingMemory:
+    """Refuses the first 'refusals' bases, then answers one below 4 GiB."""
+
+    def __init__(self, refusals=2):
+        self.refusals = refusals
+        self.hints = []
+        self.writes = []
+
+    def alloc_remote(self, size, protect=0x04, hint=0):
+        self.hints.append(hint)
+        if len(self.hints) <= self.refusals:
+            raise MemError("VirtualAllocEx failed: the base is taken")
+        return 0x12340000
+
+    def write(self, address, data):
+        self.writes.append((address, bytes(data)))
+
+    def free_remote(self, address):
+        pass
+
+
+class TestWow64AllocationPolicy(unittest.TestCase):
+    """A 32-bit target's allocations are steered, checked and never truncated."""
+
+    def test_a_high_allocation_answer_is_refused_and_released(self):
+        from unittest import mock
+
+        api = _api_module()
+        target = _FakeWow64Target()
+        extension = mock.Mock()
+
+        with mock.patch.object(api, "_pydbg", extension):
+            with self.assertRaises(InjectionError) as ctx:
+                api.inject_shellcode(target, b"\xC3")
+
+        message = str(ctx.exception)
+        self.assertIn("alloc", message)
+        self.assertIn("7FFE00000000", message)
+        self.assertIn("32-bit", message)
+        self.assertEqual(target.memory.freed, [_FakeHighMemory.HIGH],
+                         "the refused allocation leaked")
+        extension.create_remote_thread.assert_not_called()
+
+    def test_a_refused_hint_is_retried_with_the_next_one(self):
+        from unittest import mock
+
+        api = _api_module()
+        target = _FakeWow64Target()
+        target.memory = _FakeRefusingMemory(refusals=2)
+        extension = mock.Mock()
+        extension.create_remote_thread.return_value = (7, 0x88)
+
+        with mock.patch.object(api, "_pydbg", extension):
+            report = api.inject_shellcode(target, b"\xC3")
+
+        self.assertEqual(report.remote_base, 0x12340000)
+        self.assertEqual(len(target.memory.hints), 3,
+                         "the allocator was not asked again after a refusal")
+        for hint in target.memory.hints:
+            self.assertLess(hint, 0x100000000)
+        self.assertEqual(extension.create_remote_thread.call_args[0][1],
+                         0x12340000)
+
+    def test_the_apc_parameter_block_is_kept_below_4_gib(self):
+        from unittest import mock
+
+        api = _api_module()
+        target = _FakeWow64Target()
+        target.memory = _FakeRefusingMemory(refusals=0)   # answers 0x12340000
+        extension = mock.Mock()
+        extension.open_thread.return_value = 0x99
+        extension.queue_user_apc.return_value = 1
+
+        with mock.patch.object(api, "_pydbg", extension):
+            self.assertEqual(
+                api.queue_apc(target, 1234, 0x20000000,
+                              data=b"\x2A\x00\x00\x00"), 1)
+
+        self.assertEqual(target.memory.hints, [0x10000000],
+                         "the parameter block was not steered to a 32-bit base")
+        self.assertEqual(target.memory.writes,
+                         [(0x12340000, b"\x2A\x00\x00\x00")])
+        self.assertEqual(extension.queue_user_apc.call_args[0][2], 0x12340000)
+
+    def test_a_high_apc_parameter_block_is_refused(self):
+        from unittest import mock
+
+        api = _api_module()
+        target = _FakeWow64Target()
+        extension = mock.Mock()
+        extension.open_thread.return_value = 0x99
+
+        with mock.patch.object(api, "_pydbg", extension):
+            with self.assertRaises(InjectionError) as ctx:
+                api.queue_apc(target, 1234, 0x20000000, data=b"\x2A")
+
+        self.assertIn("alloc", str(ctx.exception))
+        self.assertEqual(target.memory.freed, [_FakeHighMemory.HIGH],
+                         "the refused parameter block leaked")
+        extension.queue_user_apc.assert_not_called()
 
 
 if __name__ == "__main__":                  # pragma: no cover - manual use

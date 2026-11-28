@@ -50,3 +50,29 @@ try {
     Remove-Item $tmp -Force -ErrorAction SilentlyContinue
 }
 Write-Host "[ok] built $outDir\simple_target32.exe, $outDir\spawn_child.exe, $outDir\threaded_target32.exe, $outDir\instrument_target32.exe, $outDir\child_target32.exe, $outDir\pdb_target32.exe + .pdb"
+
+# ── WOW64 injection targets (spec §13.2/§13.8 item 7) ────────────────────────
+# Its own command block, deliberately self-contained: another branch appends its
+# 32-bit targets here too, and a second independent block keeps that merge to a
+# trivial append conflict instead of an edit to the batch text above.
+$injectCmd = Join-Path $root '.build-inject32.cmd'
+try {
+    $bat = "@echo off`n" +
+           "call `"$vs\VC\Auxiliary\Build\vcvarsall.bat`" amd64_x86 >nul 2>&1`n" +
+           "cd /d `"$root`"`n" +
+           "cl /nologo /O2 /W3 /utf-8 /c tests\target\inject_target32.c /Fo$outDir\inject_target32.obj`n" +
+           "if errorlevel 1 exit /b %errorlevel%`n" +
+           "link /nologo /DLL /machine:x86 /IMPLIB:$outDir\inject_target32.lib /OUT:$outDir\inject_target32.dll $outDir\inject_target32.obj`n" +
+           "if errorlevel 1 exit /b %errorlevel%`n" +
+           "cl /nologo /O2 /W3 /utf-8 /c tests\target\inject_host32.c /Fo$outDir\inject_host32.obj`n" +
+           "if errorlevel 1 exit /b %errorlevel%`n" +
+           "link /nologo /subsystem:console /machine:x86 /OUT:$outDir\inject_host32.exe $outDir\inject_host32.obj`n" +
+           "if errorlevel 1 exit /b %errorlevel%`n" +
+           "echo BUILD_OK"
+    Set-Content -Path $injectCmd -Value $bat -Encoding ascii
+    & cmd /c "`"$injectCmd`""
+    if ($LASTEXITCODE -ne 0) { Write-Host '[error] inject32 target build failed'; exit 1 }
+} finally {
+    Remove-Item $injectCmd -Force -ErrorAction SilentlyContinue
+}
+Write-Host "[ok] built $outDir\inject_host32.exe and $outDir\inject_target32.dll"
