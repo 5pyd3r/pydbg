@@ -18,6 +18,7 @@ target, so it skips with the two declared skip families otherwise.
 
 import os
 import unittest
+from types import SimpleNamespace
 
 from pydbg.exceptions import PydbgError
 from pydbg.instrument.bbl import (
@@ -226,6 +227,69 @@ class TestInstallPatchRefuses(unittest.TestCase):
                           for thread in (self.busy, self.idle)], [0, 0])
         self.assertEqual(sorted(self.dbg.resume_calls),
                          sorted([self.busy.tid, self.idle.tid]))
+
+
+class _Wow64Debugger(FakeDebugger):
+    """The same fake, but its target is a WOW64 process.
+
+    The session is the source of the target's architecture, and a 32-bit
+    context carries EIP instead of RIP; a test that faked `{"rip": ...}` for a
+    32-bit target would pass the *wrong* register to the window check.
+    """
+
+    def __init__(self, threads):
+        super().__init__(threads)
+        self._session = SimpleNamespace(target_arch=32)
+
+    def get_registers(self, handle):
+        thread = self.by_handle[handle]
+        self.context_calls.append(thread.tid)
+        if thread.context_error is not None:
+            raise thread.context_error
+        return {"eip": thread.rip}
+
+
+class TestInstallPatchWow64Window(unittest.TestCase):
+    """On a 32-bit target the window check reads EIP, not RIP."""
+
+    def setUp(self):
+        self.busy = FakeThread(101, BLOCK + 2)
+        self.idle = FakeThread(202)
+        self.dbg = _Wow64Debugger([self.idle, self.busy])
+        self.dbg.put(BLOCK, ORIGINAL)
+
+    def test_a_thread_whose_eip_is_inside_the_window_refuses(self):
+        with self.assertRaises(TargetBusy) as caught:
+            install_patch(self.dbg, BLOCK, PATCH, original=ORIGINAL)
+
+        self.assertEqual(caught.exception.tid, self.busy.tid)
+        self.assertEqual(self.dbg.writes, [])
+        self.assertEqual(self.dbg.bytes_at(BLOCK, len(ORIGINAL)), ORIGINAL)
+        self.assertEqual(sorted(self.dbg.resume_calls),
+                         sorted([self.busy.tid, self.idle.tid]))
+
+    def test_an_eip_at_the_end_of_the_window_is_clear(self):
+        """The window is half-open, and an EIP outside it is not a conflict."""
+        self.busy.rip = BLOCK + len(PATCH)
+
+        installed = install_patch(self.dbg, BLOCK, PATCH, original=ORIGINAL)
+
+        self.assertEqual(installed.warnings, ())
+        self.assertEqual(self.dbg.writes, [(BLOCK, PATCH)])
+
+    def test_a_context_without_eip_cannot_be_proved_clear(self):
+        class _NoIp(_Wow64Debugger):
+            def get_registers(self, handle):
+                return {}
+
+        dbg = _NoIp([FakeThread(7)])
+        dbg.put(BLOCK, ORIGINAL)
+
+        with self.assertRaises(TargetBusy) as caught:
+            install_patch(dbg, BLOCK, PATCH, original=ORIGINAL)
+
+        self.assertIn("EIP", str(caught.exception))
+        self.assertEqual(dbg.writes, [])
 
 
 class TestInstallPatchWrites(unittest.TestCase):

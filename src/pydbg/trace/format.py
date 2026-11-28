@@ -50,6 +50,7 @@ RECORD_SIZE = _RECORD.size
 # Both derive from the one struct above, and the offsets are computed from it
 # so a format change moves them instead of leaving stale constants behind.
 RECORD_STRUCT = _RECORD
+RECORD_TID_OFFSET = struct.calcsize("<B3x")      # 4
 RECORD_RVA_OFFSET = struct.calcsize("<B3xI")     # 8
 RECORD_TS_OFFSET = struct.calcsize("<B3xII")     # 12
 RECORD_A_OFFSET = RECORD_TS_OFFSET + 8           # 20

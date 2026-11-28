@@ -358,6 +358,25 @@ class TestNearAllocator(unittest.TestCase):
         low = (BASE - NEAR_LIMIT) & ~0xFFFF
         self.assertEqual(self.scan_calls, [(0x1234, low, BASE + NEAR_LIMIT)])
 
+    def test_a_32_bit_target_stops_the_window_at_4gb(self):
+        """A WOW64 stub cannot live above the 32-bit space: EIP is 32-bit."""
+        from pydbg.memory.manager import MemoryManager
+
+        manager = MemoryManager(
+            SimpleNamespace(process_handle=0x1234, target_arch=32))
+        manager.regions_handle = self._regions
+        near = 0x90000000
+        self.regions = [self.free(near + 0x100000, 0x10000)]
+
+        with mock.patch("pydbg.memory.manager._pydbg.virtual_alloc_ex",
+                        return_value={"base_address": near + 0x100000}):
+            self.assertEqual(manager.alloc_near(0x1000, near), near + 0x100000)
+
+        # 0xFFFFFFFF - 0x90000000 is narrower than the ±2GB reach, so the
+        # scan's top edge is the last 32-bit address; the bottom is aligned
+        # down to the allocation granularity.
+        self.assertEqual(self.scan_calls, [(0x1234, 0x20000000, 0xFFFFFFFF)])
+
     def test_the_first_placeable_region_wins(self):
         self.regions = [self.free(BASE + 0x100000, 0x10000),
                         self.free(BASE + 0x400000, 0x10000)]

@@ -143,6 +143,11 @@ test_env.set('TEST_INSTRUMENT_TARGET_PATH', instrument_target.full_path())
 test_env.set('TEST_INSTRUMENT_TARGET32_PATH',
   target32_dir / 'instrument_target32.exe')
 test_env.set('TEST_LOOP_TARGET_PATH', loop_target.full_path())
+# The 32-bit BBL acceptance target (§12.5 item 6) is compiled by
+# scripts/build-target32.ps1, not meson, and its path comes from the one
+# target32_dir definition above; the test skips naming that script when absent.
+test_env.set('TEST_LOOP_TARGET32_PATH',
+  target32_dir / 'loop_target32.exe')
 test_env.set('TEST_ARGV_TARGET_PATH', argv_target.full_path())
 test_env.set('TEST_NESTED_TARGET_PATH', nested_target.full_path())
 test_env.set('TEST_WINDOW_TARGET_PATH', window_target.full_path())

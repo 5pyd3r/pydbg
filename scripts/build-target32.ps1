@@ -42,6 +42,12 @@ try {
            "if errorlevel 1 exit /b %errorlevel%`n" +
            "link /nologo /subsystem:console /machine:x86 /DEBUG /PDB:$outDir\pdb_target32.pdb /OUT:$outDir\pdb_target32.exe $outDir\pdb_target32.obj`n" +
            "if errorlevel 1 exit /b %errorlevel%`n" +
+           "rem 32-bit BBL acceptance target (docs/analysis-coverage.md §12.5 item 6):`n" +
+           "rem the same in-module loop as loop_target, compiled for WOW64.`n" +
+           "cl /nologo /O2 /W3 /utf-8 /c tests\target\loop_target32.c /Fo$outDir\loop_target32.obj`n" +
+           "if errorlevel 1 exit /b %errorlevel%`n" +
+           "link /nologo /subsystem:console /machine:x86 /OUT:$outDir\loop_target32.exe $outDir\loop_target32.obj`n" +
+           "if errorlevel 1 exit /b %errorlevel%`n" +
            "echo BUILD_OK"
     Set-Content -Path $tmp -Value $bat -Encoding ascii
     & cmd /c "`"$tmp`""
@@ -49,7 +55,7 @@ try {
 } finally {
     Remove-Item $tmp -Force -ErrorAction SilentlyContinue
 }
-Write-Host "[ok] built $outDir\simple_target32.exe, $outDir\spawn_child.exe, $outDir\threaded_target32.exe, $outDir\instrument_target32.exe, $outDir\child_target32.exe, $outDir\pdb_target32.exe + .pdb"
+Write-Host "[ok] built $outDir\simple_target32.exe, $outDir\spawn_child.exe, $outDir\threaded_target32.exe, $outDir\instrument_target32.exe, $outDir\child_target32.exe, $outDir\pdb_target32.exe + .pdb, $outDir\loop_target32.exe"
 
 # ── WOW64 injection targets (spec §13.2/§13.8 item 7) ────────────────────────
 # Its own command block, deliberately self-contained: another branch appends its

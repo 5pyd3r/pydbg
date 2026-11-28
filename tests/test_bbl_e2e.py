@@ -18,11 +18,18 @@ answers the questions §12.5 asks, not the ones the unit tests already answer:
    `target not built:`), so a machine that cannot run them says which
    precondition failed instead of going quiet.
 
-The execution slice is "loader stop -> first `add_numbers` call". The target is
-an infinite loop, so a slice has to be delimited by an address rather than by
-exit; `add_numbers` is the one deterministic stop both mechanisms can share.
-`add_numbers` itself is left undetoured (and its RVA is excluded from the
-comparison) because `run_until` needs a real instruction there to break on.
+`TestBblAcceptance` runs the case on the x64 `instrument_target`.
+`TestBblAcceptance32` is §12.5 item 6: the same case on the WOW64
+`loop_target32` that `scripts/build-target32.ps1` builds, with only the target,
+the stop export and the context's instruction-pointer name changed. It is
+gated on a 64-bit host as well, because a 32-bit host cannot debug WOW64.
+
+The execution slice is "loader stop -> first call of the stop export". The
+targets loop, so a slice has to be delimited by an address rather than by exit;
+the stop export (`add_numbers` on x64, `bump` on the 32-bit target) is the one
+deterministic stop both mechanisms can share. It is left undetoured (and its
+RVA is excluded from the comparison) because `run_until` needs a real
+instruction there to break on.
 
 One defect the live path found and this file now covers offline: the decoder
 returns VA-addressed instructions while the CFG speaks RVAs, so `plan()` must
@@ -33,6 +40,8 @@ start.
 """
 
 import os
+import struct
+import sys
 import time
 import unittest
 from types import SimpleNamespace
@@ -64,20 +73,47 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 _TARGET = os.environ.get(
     "TEST_INSTRUMENT_TARGET_PATH",
     os.path.join(_HERE, "target", "instrument_target.exe"))
+# The 32-bit acceptance target is a product of scripts/build-target32.ps1
+# (meson has no x86 toolchain); tests/meson.build exports its path.
+_TARGET32 = os.environ.get(
+    "TEST_LOOP_TARGET32_PATH",
+    os.path.join(_HERE, "target", "loop_target32.exe"))
 
-# The three declared skip families. A machine missing one of these cannot run
-# the live acceptance, and must say which instead of passing silently.
+# The declared skip families. A machine missing one of these cannot run the
+# live acceptance, and must say which instead of passing silently.
 needs_keystone = unittest.skipUnless(
     _has_keystone, "optional dependency: keystone-engine")
 needs_cython = unittest.skipUnless(
     _has_cython, "optional dependency: Cython extension")
 needs_target = unittest.skipUnless(
     os.path.isfile(_TARGET), "target not built: " + _TARGET)
+needs_target32 = unittest.skipUnless(
+    os.path.isfile(_TARGET32),
+    "target not built: " + _TARGET32 + " (scripts/build-target32.ps1)")
+
+
+def _wow64_available():
+    """True only on 64-bit Windows (a 32-bit host cannot debug WOW64)."""
+    return struct.calcsize("P") == 8 and sys.platform == "win32"
+
+
+needs_wow64 = unittest.skipUnless(
+    _wow64_available(), "environment: 64-bit Windows host")
 
 _BREAKPOINT_CODES = frozenset((EXCEPTION_BREAKPOINT, STATUS_WX86_BREAKPOINT))
 
 # GetExitCodeProcess answers this while the process is still running.
 _STILL_ACTIVE = 259
+
+# The tracer's 100_000-event default is below what this slice costs on a CI
+# runner. loop_target32 statically links the CRT, so the startup that scans the
+# inherited environment block runs in the module and yields block events: a
+# 33 KB environment costs ~180_000 hits before `bump` is reached, against
+# ~27_000 for a developer's 3 KB one. With the default budget the run is cut off
+# during startup (reason `max_events`) while the stop block is planned and
+# armed, so the tracer never reaches it. 500_000 is ~3x the measured worst case
+# for the largest environment block CreateProcess may pass (32 KB).
+_TRACER_MAX_EVENTS = 500_000
 
 
 class _DictDecoder:
@@ -132,47 +168,93 @@ class TestPlanAddressSpace(unittest.TestCase):
                          "span is bytes from the block entry, not a VA")
 
 
-def _prepare(dbg):
-    """(module, base, analysis, add_numbers RVA) for the live target."""
+def _target_module(dbg, target):
+    """The `enum_modules()` record for `target`'s own image.
+
+    `enum_modules()` is ordered by load, and other images can precede the
+    debuggee, so match by basename (like `helpers.module_base`) and fall back to
+    the first entry only when the name is not there yet.
+    """
+    wanted = os.path.basename(target).lower()
+    modules = dbg.enum_modules()
+    for module in modules:
+        if os.path.basename(module.get("name") or "").lower() == wanted:
+            return module
+    return modules[0]
+
+
+def _prepare(dbg, target, stop_export):
+    """(module, base, analysis, stop RVA) for the live target."""
     from tests.helpers import export_address
 
-    module = dbg.enum_modules()[0]
+    module = _target_module(dbg, target)
     base = module["base_address"]
     result = analyze_process(dbg._session, base, module_size=module["size"])
-    add_rva = export_address(dbg, _TARGET, "add_numbers") - base
-    return module, base, result, add_rva
+    stop_rva = export_address(dbg, target, stop_export) - base
+    return module, base, result, stop_rva
 
 
-def _entry_candidates(dbg, module, base, result, add_rva):
+def _entry_candidates(dbg, module, base, result, stop_rva, target):
     """Relocatable blocks of the entry function, minus the stop address.
 
     The entry function is the slice the target walks first; its blocks are the
-    ones the execution below can actually reach before `add_numbers`. Blocks
+    ones the execution below can actually reach before the stop export. Blocks
     that cannot host an E9 (no 5-byte prefix, branch in the prefix) are
     excluded because `install()` would only refuse them, and the acceptance
     reconciles *installed* blocks.
     """
     from tests.helpers import entry_point
 
-    entry_rva = entry_point(dbg) - base
+    entry_rva = entry_point(dbg, image=target) - base
     cfg = cfg_of(result, entry_rva)
     entry_blocks = ({block.rva for block in cfg.blocks.values()}
                     if cfg is not None else set())
     plans = BblInstrumenter(dbg, module=module, result=result).plan()
     chosen = [plan for plan in plans
               if plan.relocatable and plan.rva in entry_blocks
-              and plan.rva != add_rva]
+              and plan.rva != stop_rva]
     if not chosen:
         raise AssertionError(
             "no relocatable block of the entry function was planned")
     return chosen
 
 
+def _create_debugger32(target, attempts=200):
+    """A debugger stopped at a loader breakpoint with `target`'s image readable.
+
+    A WOW64 target has two loader breakpoints: the 64-bit bootstrap one, then
+    the 32-bit (WX86) one. The 32-bit image is not necessarily mapped at the
+    first, and the debuggee is paused at every event, so waiting cannot make an
+    unreadable image readable: the earlier events are continued instead, and the
+    first event that finds the image is left pending. That is still before the
+    entry point, which is the point `plan()` and `install()` need.
+    """
+    from pydbg import Debugger
+    from pydbg.exceptions import MemError
+    from tests.helpers import module_base
+
+    dbg = Debugger()
+    pid, tid = dbg.create_process(target)
+    for _ in range(attempts):
+        event = dbg.wait_event(5000)
+        if event is None or event.type == "EXIT_PROCESS":
+            break
+        try:
+            readable = dbg.read_memory(module_base(dbg, target), 2) == b"MZ"
+        except (AssertionError, MemError):
+            readable = False
+        if event.type == "EXCEPTION" and readable:
+            return dbg, pid, tid
+        dbg.continue_event(event.pid, event.tid)
+    raise AssertionError(
+        f"{target}: the 32-bit image never became readable at a loader stop")
+
+
 class _StopAtTracer(BblTracer):
     """A tracer whose run ends on the first hit at `stop_address`.
 
     `BblTracer.run()` stops for a budget, target exit or a callback returning
-    False. The detour run is delimited by reaching `add_numbers`, so this
+    False. The detour run is delimited by reaching the stop export, so this
     tracer ends the loop at the same instruction, making both observed sets
     describe the same execution slice.
     """
@@ -190,24 +272,26 @@ class _StopAtTracer(BblTracer):
         return result
 
 
-class _RipInWindow:
-    """A debugger proxy whose thread context reports a RIP inside `window`.
+class _IpInWindow:
+    """A debugger proxy whose thread context reports an IP inside `window`.
 
     Only `get_registers()` is faked; suspension, memory and allocation go to
     the real target. That is what §12.5(2) asks for: a *fake thread context*
     parked inside the bytes about to be rewritten, so the refusal path is
-    exercised without editing a live thread's context.
+    exercised without editing a live thread's context. The register is RIP on
+    an x64 target and EIP on a WOW64 one, because that is what the patch
+    window check reads.
     """
 
-    def __init__(self, dbg, address, size):
+    def __init__(self, dbg, address, size, ip_name="rip"):
         self._wrapped = dbg
-        self._rip = address + max(size // 2, 1)
+        self._context = {ip_name: address + max(size // 2, 1)}
 
     def __getattr__(self, name):
         return getattr(self._wrapped, name)
 
     def get_registers(self, handle):
-        return {"rip": self._rip}
+        return dict(self._context)
 
 
 @needs_keystone
@@ -216,20 +300,36 @@ class _RipInWindow:
 class TestBblAcceptance(unittest.TestCase):
     """§12.5 on the real `instrument_target`: run, reconcile, restore, exit."""
 
+    # The three facts a target contributes; the 32-bit subclass overrides them.
+    target = _TARGET
+    stop_export = "add_numbers"
+    ip_name = "rip"
+    wow64 = False
+
+    def start(self):
+        """A debugger paused at a loader stop, before the target's entry point."""
+        from tests.helpers import create_debugger
+
+        if self.wow64:
+            return _create_debugger32(self.target)
+        return create_debugger(self.target)
+
     def detour_slice(self):
-        """Install entry-function detours and run to the first add_numbers.
+        """Install entry-function detours and run to the first stop export.
 
         Returns the executed block set, the events, the installed RVAs, the
         plans and the wall time of the detoured run. Uninstall runs while the
         target is still paused at the stop, which is the documented point to
         drain the ring and restore bytes.
         """
-        from tests.helpers import create_debugger, teardown
+        from tests.helpers import teardown
 
-        dbg, pid, tid = create_debugger(_TARGET)
+        dbg, pid, tid = self.start()
         try:
-            module, base, result, add_rva = _prepare(dbg)
-            chosen = _entry_candidates(dbg, module, base, result, add_rva)
+            module, base, result, stop_rva = _prepare(
+                dbg, self.target, self.stop_export)
+            chosen = _entry_candidates(
+                dbg, module, base, result, stop_rva, self.target)
             instrumenter = BblInstrumenter(
                 dbg, module=module, result=result,
                 blocks=[plan.rva for plan in chosen], max_events=1024)
@@ -243,7 +343,7 @@ class TestBblAcceptance(unittest.TestCase):
 
             dbg.continue_event(pid, tid)
             started = time.perf_counter()
-            dbg.run_until(base + add_rva, max_wait_ms=15000,
+            dbg.run_until(base + stop_rva, max_wait_ms=15000,
                           max_idle_timeouts=3)
             elapsed = max(time.perf_counter() - started, 1e-9)
 
@@ -254,30 +354,41 @@ class TestBblAcceptance(unittest.TestCase):
                 "events": events,
                 "blocks": {event.rva for event in events},
                 "installed": set(report.installed),
-                "add_rva": add_rva,
+                "stop_rva": stop_rva,
                 "elapsed": elapsed,
             }
         finally:
             teardown(dbg)
 
     def tracer_slice(self, stop_rva):
-        """The blocks a full-plan `BblTracer` hits from loader to add_numbers.
+        """The blocks a full-plan `BblTracer` hits from loader to stop export.
 
         The full plan is kept on purpose: the comparison then has to *exclude*
         the blocks the detour path could not install, which is what proves the
         reconciliation is over the instrumented window and not a tautology.
-        """
-        from tests.helpers import create_debugger, teardown
 
-        dbg, pid, tid = create_debugger(_TARGET)
+        The tracer gets a larger event budget than the 100_000 default. The
+        32-bit target statically links the CRT, so the startup that scans the
+        inherited environment block runs in the module and produces block
+        events; a CI runner's environment is an order of magnitude larger than
+        a developer's, and the default budget then truncates the run during
+        startup. The stop block is planned and armed in that case, it is
+        simply never reached — so the budget, not the plan, is what has to
+        cover the target's startup (`_TRACER_MAX_EVENTS`).
+        """
+        from tests.helpers import teardown
+
+        dbg, pid, tid = self.start()
         try:
-            _module, base, _result, _ = _prepare(dbg)
+            module, base, _result, _ = _prepare(
+                dbg, self.target, self.stop_export)
             stop_address = base + stop_rva
             # Armed while still paused and reused by arm(), so the stop cannot
             # be missed by a race between resume and set_breakpoint.
             dbg.set_breakpoint(stop_address)
             recorded = []
-            tracer = _StopAtTracer(dbg, stop_address)
+            tracer = _StopAtTracer(dbg, stop_address, module=module,
+                                   max_events=_TRACER_MAX_EVENTS)
             self.assertGreater(tracer.plan(), 0, "the target planned no blocks")
             tracer.sink = recorded.append
 
@@ -288,6 +399,11 @@ class TestBblAcceptance(unittest.TestCase):
                                "the tracer hit no planned block")
             self.assertIn("reused caller breakpoints", summary.warnings,
                           "the stop breakpoint was not reused")
+            self.assertFalse(
+                summary.truncated,
+                f"the trace was cut short by {summary.reason} after "
+                f"{summary.events} events, before the shared stop block: a "
+                f"truncated run cannot reconcile the two slices")
             blocks = {event.rva for event in recorded}
             self.assertIn(stop_rva, blocks,
                           "the tracer did not reach the shared stop block")
@@ -297,7 +413,7 @@ class TestBblAcceptance(unittest.TestCase):
 
     def test_detour_events_match_the_breakpoint_tracer(self):
         detour = self.detour_slice()
-        traced = self.tracer_slice(detour["add_rva"])
+        traced = self.tracer_slice(detour["stop_rva"])
 
         self.assertTrue(detour["installed"])
         # Only BLOCK records, with the fields the stub can actually know (§12.1).
@@ -319,18 +435,20 @@ class TestBblAcceptance(unittest.TestCase):
                         "the reconciliation would be vacuous")
 
         blocks_per_second = len(detour["blocks"]) / detour["elapsed"]
-        print(f"\nbbl e2e: detours={len(detour['installed'])} "
+        print(f"\nbbl e2e ({self.target}): detours={len(detour['installed'])} "
               f"events={len(detour['events'])} blocks={len(detour['blocks'])} "
               f"run={detour['elapsed']:.3f}s "
               f"({blocks_per_second:.0f} blocks/s)")
 
     def test_uninstall_restores_every_displaced_byte(self):
-        from tests.helpers import create_debugger, teardown
+        from tests.helpers import teardown
 
-        dbg, pid, tid = create_debugger(_TARGET)
+        dbg, pid, tid = self.start()
         try:
-            module, base, result, add_rva = _prepare(dbg)
-            chosen = _entry_candidates(dbg, module, base, result, add_rva)
+            module, base, result, stop_rva = _prepare(
+                dbg, self.target, self.stop_export)
+            chosen = _entry_candidates(
+                dbg, module, base, result, stop_rva, self.target)
             instrumenter = BblInstrumenter(
                 dbg, module=module, result=result,
                 blocks=[plan.rva for plan in chosen], max_events=1024)
@@ -346,7 +464,7 @@ class TestBblAcceptance(unittest.TestCase):
             report = instrumenter.install()
             self.assertEqual(set(report.installed), set(planned), report.refused)
             dbg.continue_event(pid, tid)
-            dbg.run_until(base + add_rva, max_wait_ms=15000,
+            dbg.run_until(base + stop_rva, max_wait_ms=15000,
                           max_idle_timeouts=3)
             self.assertTrue(instrumenter.events(),
                             "the run proved nothing; no detour fired")
@@ -361,12 +479,14 @@ class TestBblAcceptance(unittest.TestCase):
             teardown(dbg)
 
     def test_the_target_terminates_cleanly_after_uninstall(self):
-        from tests.helpers import create_debugger, teardown
+        from tests.helpers import teardown
 
-        dbg, pid, tid = create_debugger(_TARGET)
+        dbg, pid, tid = self.start()
         try:
-            module, base, result, add_rva = _prepare(dbg)
-            chosen = _entry_candidates(dbg, module, base, result, add_rva)
+            module, base, result, stop_rva = _prepare(
+                dbg, self.target, self.stop_export)
+            chosen = _entry_candidates(
+                dbg, module, base, result, stop_rva, self.target)
             instrumenter = BblInstrumenter(
                 dbg, module=module, result=result,
                 blocks=[plan.rva for plan in chosen], max_events=1024)
@@ -374,7 +494,7 @@ class TestBblAcceptance(unittest.TestCase):
             self.assertTrue(report.installed, report.refused)
 
             dbg.continue_event(pid, tid)
-            dbg.run_until(base + add_rva, max_wait_ms=15000,
+            dbg.run_until(base + stop_rva, max_wait_ms=15000,
                           max_idle_timeouts=3)
             self.assertEqual(instrumenter.uninstall(), ())
             self.assertEqual(dbg.verify_breakpoints(), [],
@@ -400,16 +520,18 @@ class TestBblAcceptance(unittest.TestCase):
             teardown(dbg)
 
     def test_a_thread_inside_the_window_refuses_that_block(self):
-        from tests.helpers import create_debugger, teardown
+        from tests.helpers import teardown
 
-        dbg, pid, tid = create_debugger(_TARGET)
+        dbg, pid, tid = self.start()
         try:
-            module, base, result, add_rva = _prepare(dbg)
-            plan = _entry_candidates(dbg, module, base, result, add_rva)[0]
+            module, base, result, stop_rva = _prepare(
+                dbg, self.target, self.stop_export)
+            plan = _entry_candidates(
+                dbg, module, base, result, stop_rva, self.target)[0]
             address = base + plan.rva
             before = dbg.read_memory(address, plan.prefix_size)
 
-            proxy = _RipInWindow(dbg, address, plan.prefix_size)
+            proxy = _IpInWindow(dbg, address, plan.prefix_size, self.ip_name)
             instrumenter = BblInstrumenter(
                 proxy, module=module, result=result, blocks=[plan.rva])
             report = instrumenter.install()
@@ -420,11 +542,34 @@ class TestBblAcceptance(unittest.TestCase):
             rva, reason = report.refused[0]
             self.assertEqual(rva, plan.rva)
             self.assertIn("target busy", reason)
+            self.assertIn(f"0x{address:X}", reason,
+                          "the refusal did not name the window it refused")
             self.assertEqual(dbg.read_memory(address, plan.prefix_size), before,
                              "the refused block's bytes were changed")
             self.assertEqual(instrumenter.events(), ())
         finally:
             teardown(dbg)
+
+
+@needs_keystone
+@needs_cython
+@needs_wow64
+@needs_target32
+class TestBblAcceptance32(TestBblAcceptance):
+    """§12.5 item 6: the same acceptance on the WOW64 `loop_target32`.
+
+    The target is the 32-bit loop sample: its own in-module loop calls `bump`
+    once per iteration, so the instrumentation runs 32-bit code that never
+    leaves the module. `plan()` must be non-empty here -- an architecture check
+    that rejected every block would fail the inherited first assertion -- and
+    the x86 `relocatable` criterion is the same "no branch in the prefix", with
+    no RIP-relative case to consider (spec §12.1).
+    """
+
+    target = _TARGET32
+    stop_export = "bump"
+    ip_name = "eip"
+    wow64 = True
 
 
 if __name__ == "__main__":

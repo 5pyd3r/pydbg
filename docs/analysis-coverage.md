@@ -661,6 +661,15 @@ OepCandidate(rva, sources, evidence)     # sources ⊆ {"tls", "pdata-gap", "wat
   2. stub prologue 的寄存器宽度（`eax/ecx/edx` 对 `rax/rcx/rdx`）；
   3. 线程窗口判定读 **EIP**（`WOW64_CONTEXT`）而不是 RIP。
   x86 没有 RIP-relative 寻址，`relocate_prefix` 在这一侧反而更简单。
+  上述三条是**边界差异**；实现时还发现四处同样需要架构感知，记在这里，免得下一轮重新踩：
+  4. 32 位尾跳不是位置无关的：`ff 25` 在 32 位模式是 `jmp dword ptr [disp32]`，`disp32` 必须指向
+     紧跟其后的内联指针，所以 `build_stub` 必须知道桩会被写到哪里（x64 不需要这个信息）；
+  5. 记录字段的写宽：v1 记录里的 `ts`/`a`/`b` 是 u64，x86 没有 `mov m64, imm64`，只能拆成两枚
+     32 位 store；`tid` 的偏移由 `trace/format.py` 的 `RECORD_TID_OFFSET` 单点给出；
+  6. 分配窗口必须留在 32 位地址空间：`alloc_near` 的 ±2GB 窗口、stub 里的绝对立即数、事件环的
+     head/slot 地址都必须 ≤ 4 GiB，否则 32 位 EIP 与立即数都用不了；
+  7. 测试侧的双 loader 断点：WOW64 目标可能先在 64 位 bootstrap 断点停下，此刻 32 位映像还不可读，
+     而被调试进程是暂停的——"等它变可读"不会发生，必须先继续早期事件。
 - 事件沿用 trace v1 的 36 字节记录与 `TraceEvent`；`tid` 与 `ts` 在 stub 内不可得，都记 0，文档写明。
 
 ### 12.2 API
